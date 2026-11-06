@@ -83,9 +83,49 @@ Needs a runtime hook / custom menu to trigger (not cleanly always-on):
 
 Terminal/debug commands shipped in the game: godmode, icebreaker, immune-to-equipment-damage, player move/turn speed, sanity, achievements, TIR/TPR/world phase, sale mode, time set, cloud/wave/wind params.
 
+## Custom menu — `DREMenu.dylib` (v8+)
+
+Architecture: small ObjC dylib injected into the stock `DREDGE` executable via
+added `LC_LOAD_DYLIB` — same mechanism iOSGods uses, but our own code and zero
+dependencies on their frameworks.
+
+- **Injection:** `tools/inject_menu.py` writes a new `LC_LOAD_DYLIB`
+  (`@executable_path/Frameworks/DREMenu.dylib`) into the DREDGE header pad
+  (~14 KB free after `sizeofcmds`), drops the dylib into `Frameworks/`, repackages.
+- **Build:** `menu/DREMenu.m` compiled on macOS GitHub Actions
+  (`.github/workflows/build-menu.yml`) — Windows can't produce arm64 iOS Mach-O.
+- **UI:** constructor thread waits for `UnityFramework` + `Terminal.Shell` to
+  exist, then creates an always-visible floating mini `UIWindow` (draggable,
+  `UIWindowLevelAlert+3`). Tap → cheat panel (`UIWindowLevelAlert+2`).
+- **Command dispatch:** the game ships a full `CommandTerminal` console —
+  `Terminal.Shell` is a static `CommandShell` singleton. The dylib calls
+  `get_Shell()` (`0x1216E70`) → `RunCommand(string)` (`0x1214D50`), creating
+  managed strings via exported `il2cpp_string_new`. Every registered command
+  becomes a button: godmode, sanity, speed, teleport, add items, unlocks, DLC.
+- **Command list:** enumerated at runtime from `Terminal.Shell.Commands`
+  (`get_Commands` `0x1215CD0`) — a `Dictionary<string,CommandInfo>` walked
+  natively (entries array at obj+0x18, Entry{hash,next,key@8,val@16}=24 B,
+  Il2CppString utf16 chars at +0x14).
+- **Runtime toggles:** byte patches applied/restored on demand at the known
+  RVAs (mprotect RWX + `sys_icache_invalidate`). Float-returning methods patch
+  via `ldr s0,[pc,#8]; b +8; .float` literal-pool or `fmov s0,wzr` for 0.0f —
+  **not** `mov w0` (wrong register file).
+
+| Toggle | RVA | Patch |
+|---|---|---|
+| God Mode | `0x125E7EC` | `mov w0,#1; ret` |
+| Immune (equip dmg) | `0x125E7FC` | `mov w0,#1; ret` |
+| Zero Sanity | `0x135BFE4` | `fmov s0,wzr; ret` |
+| No Durability Loss | `0x127B134` | `fmov s0,wzr; ret` |
+| Free Research | `0x134C5B8` | `mov w0,#0; ret` |
+| No Cooldowns | `0x1295D74` | `ret` |
+| Catch Rate 5.0 | `0x134BEAC` | `ldr s0 / b / .float 5.0` |
+| Sell 4x | `0x13C07E4` | `ldr s0 / b / .float 4.0` |
+| Boat Speed 20 | `0x14A3AF8` | `ldr s0 / b / .float 20.0` |
+
 ## Not included
-- Cheat **menu** — iGameGod removed; unlocks are always-on. A custom menu needs a small loader dylib (no iGameGod required).
-- "All cabin items" — `DebugAddAllCabinItems` is a debug command, no clean always-on patch; would need a call-site hook.
+- "All cabin items" — `DebugAddAllCabinItems` is a debug command; reachable via
+  the menu's command list instead of an always-on patch.
 
 ## Releases
 - `v1.0.12` — original iOSGods mod IPA (reference)
@@ -93,6 +133,7 @@ Terminal/debug commands shipped in the game: godmode, icebreaker, immune-to-equi
 - `v1.0.12-clean-v4`/`v5` — surgical-zip builds; install but crash at launch (null dispatch slot, see root-cause)
 - `v1.0.12-clean-v6` — keeps `libDREDGE.dylib` + load command, drops iGameGod only; diagnostic build
 - `v1.5.19-standalone-v7` — **stock decrypted IPA + 3 static patches only; zero iOSGods code**
+- `v1.5.19-menu-v8` — v7 + `DREMenu.dylib` injected; floating menu + all game commands + runtime toggles
 
 ## Install / saves
 Same bundle ID → installs over the existing modded app; save files in app Documents survive (don't uninstall first or you lose them).
