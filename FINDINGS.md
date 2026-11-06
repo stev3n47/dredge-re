@@ -134,6 +134,8 @@ dependencies on their frameworks.
 - `v1.0.12-clean-v6` — keeps `libDREDGE.dylib` + load command, drops iGameGod only; diagnostic build
 - `v1.5.19-standalone-v7` — **stock decrypted IPA + 3 static patches only; zero iOSGods code**
 - `v1.5.19-menu-v8` — v7 + `DREMenu.dylib` injected; floating menu + all game commands + runtime toggles
+- `v1.5.19-menu-v8c` — adds bundled save (`dredge-save0.bin`), a restore button in the menu, and `UIFileSharingEnabled`/`LSSupportsOpeningDocumentsInPlace` so Documents is browsable in Files.app / Finder
+- `v1.5.19-menu-v9` — **current build.** Fixes two UI bugs reported on iPad: (1) windows must be attached to a `UIWindowScene` to render on iOS 13+ (v8 bubble was invisible); (2) `UIGestureRecognizer` targets are weak refs, so the tap host must be retained in a static var — v8 bubble rendered but did nothing on tap. Same contents as v8c otherwise.
 
 ## Install / saves
 Same bundle ID → installs over the existing modded app; save files in app Documents survive (don't uninstall first or you lose them).
