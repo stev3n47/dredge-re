@@ -220,6 +220,20 @@ static void patch_apply(int i, BOOL on) {
         if (col) y += 40;
     }
 
+    y = [self section:@"Save" y:y];
+    {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(0, y, bw, 34);
+        b.backgroundColor = [UIColor colorWithRed:0.5 green:0.3 blue:0.1 alpha:1];
+        b.layer.cornerRadius = 8;
+        b.titleLabel.font = [UIFont systemFontOfSize:10];
+        [b setTitle:@"Restore Bundled Save" forState:UIControlStateNormal];
+        [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        [b addTarget:self action:@selector(restoreSave) forControlEvents:UIControlEventTouchUpInside];
+        [_scroll addSubview:b];
+        y += 40;
+    }
+
     y = [self section:@"Toggles" y:y];
     int col = 0; CGFloat x = 0;
     for (int i = 0; i < g_npatches; i++) {
@@ -275,6 +289,45 @@ static void patch_apply(int i, BOOL on) {
         run_cmd(full.UTF8String);
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)restoreSave {
+    NSString *src = [[NSBundle mainBundle] pathForResource:@"dredge-save0" ofType:@"bin"];
+    if (!src) { [self toast:@"bundled save not found in .app"]; return; }
+
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    // find an existing dredge-save*.bin anywhere under Documents to learn the folder
+    NSString *destDir = nil;
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:docs];
+    NSString *rel;
+    while ((rel = [en nextObject])) {
+        NSString *base = rel.lastPathComponent.lowercaseString;
+        if ([base hasPrefix:@"dredge-save"] && [base hasSuffix:@".bin"]) {
+            destDir = [docs stringByAppendingPathComponent:rel.stringByDeletingLastPathComponent];
+            break;
+        }
+        // also learn from a folder literally named like the save dir
+        BOOL isDir = NO;
+        [fm fileExistsAtPath:[docs stringByAppendingPathComponent:rel] isDirectory:&isDir];
+        if (isDir && [base containsString:@"save"]) destDir = destDir ?: [docs stringByAppendingPathComponent:rel];
+    }
+    if (!destDir) destDir = docs;
+
+    NSString *dst = [destDir stringByAppendingPathComponent:@"dredge-save0.bin"];
+    NSError *err = nil;
+    [fm removeItemAtPath:dst error:nil];
+    BOOL ok = [fm copyItemAtPath:src toPath:dst error:&err];
+    [self toast:ok ? [NSString stringWithFormat:@"restored -> %@", dst]
+                   : [NSString stringWithFormat:@"failed: %@", err.localizedDescription]];
+}
+
+- (void)toast:(NSString *)msg {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Save" message:msg
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
 }
 
