@@ -301,18 +301,36 @@ static UIWindow *g_panelWin = nil;
 - (void)pan:(UIPanGestureRecognizer *)g;
 @end
 
+static UIWindowScene *find_scene(void) {
+    UIApplication *app = UIApplication.sharedApplication;
+    if (!app) return nil;
+    for (UIScene *s in app.connectedScenes) {
+        if ([s isKindOfClass:UIWindowScene.class] &&
+            s.activationState != UISceneActivationStateUnattached)
+            return (UIWindowScene *)s;
+    }
+    return nil;
+}
+
+static UIWindow *new_window(CGRect f, UIWindowLevel lvl) {
+    UIWindow *w = [[UIWindow alloc] initWithFrame:f];
+    w.windowScene = find_scene();
+    w.windowLevel = lvl;
+    w.backgroundColor = UIColor.clearColor;
+    return w;
+}
+
 @implementation DREGestureHost
 - (void)tap {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_panelWin) {
-            g_panelWin = [[UIWindow alloc] initWithFrame:CGRectMake(30, 80, 340, 420)];
-            g_panelWin.windowLevel = UIWindowLevelAlert + 2;
-            g_panelWin.backgroundColor = UIColor.clearColor;
+            g_panelWin = new_window(CGRectMake(30, 80, 340, 420), UIWindowLevelAlert + 2);
             DREPanel *vc = [DREPanel new];
             vc.win = g_panelWin;
             g_panelWin.rootViewController = vc;
         }
         g_panelWin.hidden = NO;
+        if (!g_panelWin.windowScene) g_panelWin.windowScene = find_scene();
         [((DREPanel *)g_panelWin.rootViewController) buildButtons];
     });
 }
@@ -327,11 +345,13 @@ static UIWindow *g_panelWin = nil;
 @end
 
 static void make_handle(void) {
-    if (g_handleWin) return;
+    if (g_handleWin) {
+        if (!g_handleWin.windowScene) g_handleWin.windowScene = find_scene();
+        g_handleWin.hidden = NO;
+        return;
+    }
     DREGestureHost *host = [DREGestureHost new];
-    g_handleWin = [[UIWindow alloc] initWithFrame:CGRectMake(8, 120, 54, 54)];
-    g_handleWin.windowLevel = UIWindowLevelAlert + 3;
-    g_handleWin.backgroundColor = UIColor.clearColor;
+    g_handleWin = new_window(CGRectMake(8, 120, 54, 54), UIWindowLevelAlert + 3);
     g_handleWin.rootViewController = [UIViewController new];
 
     UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 54, 54)];
@@ -354,12 +374,25 @@ static void make_handle(void) {
 
 #pragma mark - bootstrap
 
+static void poll_scene(void) {
+    if (find_scene()) { make_handle(); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ poll_scene(); });
+}
+
 __attribute__((constructor))
 static void dre_init(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-        // wait for UnityFramework + game shell to come up (up to 60s)
-        for (int i = 0; i < 120 && !(uf_base() && g_shell()); i++)
+        // wait for UnityFramework + game shell (up to 90s)
+        for (int i = 0; i < 180 && !(uf_base() && g_shell()); i++)
             usleep(500000);
-        dispatch_async(dispatch_get_main_queue(), ^{ make_handle(); });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            poll_scene();
+            // re-attach on foregrounding in case scene changed
+            [NSNotificationCenter.defaultCenter
+                addObserverForName:UIApplicationDidBecomeActiveNotification
+                object:nil queue:nil
+                usingBlock:^(NSNotification *n){ make_handle(); }];
+        });
     });
 }
