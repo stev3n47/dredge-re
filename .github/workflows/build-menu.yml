@@ -27,7 +27,10 @@ jobs:
           # enumerate binaries to re-sign by their CMS signature; a 1KB ad-hoc
           # stub may be skipped -> unsigned nested code fails iOS install.
           openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
-            -days 30 -nodes -subj "/CN=DREMenu/"
+            -days 30 -nodes -subj "/CN=DREMenu/" \
+            -addext "keyUsage=critical,digitalSignature" \
+            -addext "extendedKeyUsage=critical,codeSigning" \
+            -addext "basicConstraints=critical,CA:FALSE"
           openssl pkcs12 -export -legacy -out id.p12 -inkey key.pem -in cert.pem -passout pass:temp
           security create-keychain -p temp t.keychain
           security default-keychain -s t.keychain
