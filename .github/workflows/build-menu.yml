@@ -20,11 +20,21 @@ jobs:
             -miphoneos-version-min=15.0 \
             -framework UIKit -framework Foundation -framework CoreGraphics \
             -fobjc-arc -O2 -lc++ -lc++abi \
+            -Wl,-no_chained_fixups \
             -install_name '@executable_path/Frameworks/DREMenu.framework/DREMenu' \
             -o DREMenu menu/DREMenu.mm
-          # Ad-hoc sign so re-signers (Singulous etc.) detect a LC_CODE_SIGNATURE to replace;
-          # an unsigned binary is skipped by signers -> unsigned binary fails install.
-          codesign --force --sign - DREMenu
+          # Sign with a real (self-signed) cert, NOT ad-hoc: sideload re-signers
+          # enumerate binaries to re-sign by their CMS signature; a 1KB ad-hoc
+          # stub may be skipped -> unsigned nested code fails iOS install.
+          openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+            -days 30 -nodes -subj "/CN=DREMenu/"
+          openssl pkcs12 -export -out id.p12 -inkey key.pem -in cert.pem -passout pass:temp
+          security create-keychain -p temp t.keychain
+          security default-keychain -s t.keychain
+          security unlock-keychain -p temp t.keychain
+          security import id.p12 -k t.keychain -P temp -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp t.keychain
+          codesign --force --sign "DREMenu" DREMenu
           file DREMenu
           otool -L DREMenu
           codesign -dv DREMenu 2>&1 | head -5

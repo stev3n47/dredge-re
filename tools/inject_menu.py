@@ -44,7 +44,20 @@ def inject_dylib_cmd(exe: bytes, dylib_path: str) -> bytes:
     name = dylib_path.encode()
     cmdsize = (24 + len(name) + 1 + 7) & ~7
     cmd = struct.pack('<IIIIII', LC_LOAD_DYLIB, cmdsize, 24, 0, 0x10000, 0) + name + b'\0' * (cmdsize - 24 - len(name))
-    b[lc_end:lc_end+cmdsize] = cmd
+
+    # Insert BEFORE LC_CODE_SIGNATURE (Apple's conventional order) — some
+    # re-signers parse load commands assuming the codesig command is last.
+    cs_off = None
+    off = 32
+    for i in range(ncmds):
+        c, s = struct.unpack('<II', b[off:off+8])
+        if c == LC_CODE_SIGNATURE:
+            cs_off = off
+            break
+        off += s
+    ins = cs_off if cs_off is not None else lc_end
+    b[ins+cmdsize:lc_end+cmdsize] = b[ins:lc_end]
+    b[ins:ins+cmdsize] = cmd
     struct.pack_into('<I', b, 16, ncmds + 1)
     struct.pack_into('<I', b, 20, sizeofcmds + cmdsize)
     return bytes(b)
@@ -69,6 +82,7 @@ def main():
         'CFBundlePackageType': 'FMWK',
         'CFBundleVersion': '1',
         'CFBundleShortVersionString': '1.0',
+        'CFBundleInfoDictionaryVersion': '6.0',
         'MinimumOSVersion': '16.0',
         'CFBundleSupportedPlatforms': ['iPhoneOS'],
     }, fmt=plistlib.FMT_BINARY)
@@ -94,8 +108,10 @@ def main():
     zout = zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED)
     for zi in zin.infolist():
         n = zi.filename
-        # drop stale signatures/provisioning so signers regenerate them fresh
-        if '_CodeSignature' in n or n.endswith('embedded.mobileprovision'):
+        # keep _CodeSignature dirs — the working iOSGods IPA ships them
+        # (stale) and some signers expect a previously-signed bundle shape;
+        # only drop the device-specific provisioning profile
+        if n.endswith('embedded.mobileprovision'):
             continue
         if n == exe_path or n == info_path:
             continue
