@@ -19,7 +19,7 @@ jobs:
             -isysroot "$SDK" \
             -miphoneos-version-min=15.0 \
             -framework UIKit -framework Foundation -framework CoreGraphics \
-            -fobjc-arc -O2 \
+            -fobjc-arc -O2 -lc++ \
             -install_name '@executable_path/Frameworks/DREMenu.dylib' \
             -o DREMenu.dylib menu/DREMenu.mm
           # Ad-hoc sign so re-signers (Singulous etc.) detect a LC_CODE_SIGNATURE to replace;
