@@ -179,7 +179,9 @@ UX audit surfaced these, prioritized:
 Device ruled out: iOSGods IPA installs on the same iPhone 17 Pro Max / iOS 26.2 via Signulous, UDID registered, old app deleted. So the IPA is at fault. v10 fixed exec bits + ad-hoc dylib + stale signatures; still fails. Working theory: Signulous's signer may only enumerate `.framework` bundles (or binaries with real cert signatures — iGameGod's blob is 287 KB with certs, ours is a 1 KB ad-hoc stub) → a bare ad-hoc `.dylib` keeps an invalid signature → iOS nested-code integrity check fails.
 
 - `v1.5.19-base-v10` — control build: base-v10 packaging with NO dylib/menu. Installs ⇒ dylib confirmed as blocker.
-- `v1.5.19-menu-v10f` — v10 with `DREMenu` packaged as `Frameworks/DREMenu.framework/DREMenu` (+Info.plist), mimicking iGameGod's layout.
+- `v1.5.19-menu-v10f` — v10 with `DREMenu` packaged as `Frameworks/DREMenu.framework/DREMenu` (+Info.plist), mimicking iGameGod's layout. **Tested: still "Unable to install" via Signulous on iPhone.**
+- `v1.5.19-menu-v10g` — signing-shape match attempt: keeps stock `_CodeSignature/CodeResources` dirs (mod IPA ships them — ours previously stripped them); `LC_LOAD_DYLIB` inserted *before* `LC_CODE_SIGNATURE`; `DREMenu` signed with a real self-signed CMS cert (~1.7 KB blob) instead of ad-hoc stub; `-Wl,-no_fixup_chains` for legacy signer compat. Verified locally: real CMS superblob, no chained fixups, correct command order.
+- `v1.5.19-stock-repack` — pure control: decrypted stock IPA through our zip pipeline with **zero content changes** (211 entries, identical bytes). If even this fails on the iPhone, our zip writer is guilty, not the dylib/patches.
 
 ## Install / saves
 Same bundle ID → installs over the existing modded app; save files in app Documents survive (don't uninstall first or you lose them).
