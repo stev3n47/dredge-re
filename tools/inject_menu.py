@@ -92,20 +92,47 @@ def main():
     ip['LSSupportsOpeningDocumentsInPlace'] = True
     info_bytes = plistlib.dumps(ip, fmt=plistlib.FMT_BINARY)
 
-    def macho_zinfo(name):
-        zi = zipfile.ZipInfo(name)
-        zi.create_system = 3            # Unix -> honour permission bits
-        zi.external_attr = 0o755 << 16  # rwxr-xr-x
-        zi.compress_type = zipfile.ZIP_DEFLATED
-        return zi
-    def file_zinfo(name):
+    # Build a `zip -r`-shaped container like the iOSGods IPA that Signulous
+    # installs successfully: explicit dir entries (Payload/ first), no zip64
+    # extra fields, extract_version 20, flag_bits 0.
+    def dir_zinfo(name):
         zi = zipfile.ZipInfo(name)
         zi.create_system = 3
-        zi.external_attr = 0o644 << 16
-        zi.compress_type = zipfile.ZIP_DEFLATED
+        zi.external_attr = 0o40755 << 16
+        zi.compress_type = zipfile.ZIP_STORED
+        zi.extract_version = 20
+        zi.create_version = 20
         return zi
+    def norm(zi, exec_bit):
+        zi.extra = b''                     # strip zip64 extras
+        zi.flag_bits = 0
+        zi.extract_version = 20
+        zi.create_version = 20
+        zi.create_system = 3
+        zi.external_attr = exec_bit << 16
+        return zi
+    def macho_zinfo(name):
+        return norm(zipfile.ZipInfo(name), 0o100755)
+    def file_zinfo(name):
+        return norm(zipfile.ZipInfo(name), 0o100644)
 
     zout = zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED)
+    dirs_seen = set()
+    def emit_dirs(path):
+        parts = path.split('/')
+        for i in range(1, len(parts)):
+            d = '/'.join(parts[:i]) + '/'
+            if d not in dirs_seen:
+                dirs_seen.add(d)
+                zout.writestr(dir_zinfo(d), b'')
+
+    def emit(zi, data, exec_bit=None):
+        emit_dirs(zi.filename)
+        data = data if data is not None else zin.read(zi.filename)
+        if exec_bit is None:
+            exec_bit = 0o100755 if data[:4] in (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xfe\xed\xfa\xcf') else 0o100644
+        zout.writestr(norm(zi, exec_bit), data)
+
     for zi in zin.infolist():
         n = zi.filename
         # keep _CodeSignature dirs — the working iOSGods IPA ships them
@@ -115,21 +142,14 @@ def main():
             continue
         if n == exe_path or n == info_path:
             continue
-        # preserve original ZipInfo (keeps posix perms, create_system, timestamps)
-        data = zin.read(n)
-        # normalize: any Mach-O must be executable (installers verify the exec bit)
-        if data[:4] in (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xfe\xed\xfa\xcf'):
-            zi.external_attr = 0o755 << 16
-            zi.create_system = 3
-        zout.writestr(zi, data)
+        emit(zi, None)
     # rewritten/new binaries get explicit exec perms
-    zout.writestr(macho_zinfo(exe_path), exe)
-    zout.writestr(macho_zinfo(fw_path), dyb)
-    zout.writestr(file_zinfo(fw_plist), fw_info)
-    # plist: keep 0644
-    zout.writestr(file_zinfo(info_path), info_bytes)
+    emit(macho_zinfo(exe_path), exe)
+    emit(macho_zinfo(fw_path), dyb)
+    emit(file_zinfo(fw_plist), fw_info)
+    emit(file_zinfo(info_path), info_bytes)
     if save:
-        zout.writestr(file_zinfo(save_dst), open(save, 'rb').read())
+        emit(file_zinfo(save_dst), open(save, 'rb').read())
     zout.close(); zin.close()
 
     z = zipfile.ZipFile(out)
