@@ -21,7 +21,7 @@ jobs:
             -framework UIKit -framework Foundation -framework CoreGraphics \
             -fobjc-arc -O2 \
             -install_name '@executable_path/Frameworks/DREMenu.dylib' \
-            -o DREMenu.dylib menu/DREMenu.m
+            -o DREMenu.dylib menu/DREMenu.mm
           # Ad-hoc sign so re-signers (Singulous etc.) detect a LC_CODE_SIGNATURE to replace;
           # an unsigned dylib is skipped by signers -> unsigned binary fails install.
           codesign --force --sign - DREMenu.dylib

@@ -10,6 +10,7 @@
 #import <libkern/OSCacheControl.h>
 #import <dlfcn.h>
 #import <string.h>
+#import <unistd.h>
 
 #pragma mark - UnityFramework helpers
 
@@ -39,7 +40,10 @@ typedef void   (*run_fn_t)(void *self, void *line, void *mi);
 
 static void *g_shell(void) {
     uintptr_t b = uf_base();
-    return b ? ((shell_fn_t)(b + RVA_GET_SHELL))(NULL) : NULL;
+    if (!b) return NULL;
+    void *r = NULL;
+    try { r = ((shell_fn_t)(b + RVA_GET_SHELL))(NULL); } catch (...) { r = NULL; }
+    return r;
 }
 
 static void run_cmd(const char *cmd) {
@@ -47,8 +51,10 @@ static void run_cmd(const char *cmd) {
     uintptr_t b = uf_base();
     void *shell = g_shell();
     if (!b || !shell || !d_str_new) return;
-    void *s = d_str_new(cmd);
-    if (s) ((run_fn_t)(b + RVA_RUN_COMMAND))(shell, s, NULL);
+    void *s = NULL;
+    try { s = d_str_new(cmd); } catch (...) { s = NULL; }
+    if (!s) return;
+    try { ((run_fn_t)(b + RVA_RUN_COMMAND))(shell, s, NULL); } catch (...) {}
 }
 
 #pragma mark - Command dictionary enumeration
@@ -59,31 +65,42 @@ static void run_cmd(const char *cmd) {
 // Entry<string,obj>: {i32 hash, i32 next, key@8, value@16} = 24B
 // szarray: hdr16 + bounds8 + len@0x18(8) -> data @0x20
 // Il2CppString: hdr16 + len@0x10(i32) + chars utf16 @0x14
+// plausible managed-heap pointer: non-null, 8-aligned, in userland range
+static inline BOOL ok_ptr(uintptr_t p) {
+    return p > 0x10000 && (p & 7) == 0 && (p >> 40) == 0;
+}
+
 static NSArray<NSString *> *enum_commands(void) {
     uintptr_t b = uf_base();
     void *shell = g_shell();
     if (!b || !shell) return nil;
-    void *dict = ((getter_fn_t)(b + RVA_GET_COMMANDS))(shell, NULL);
-    if (!dict) return nil;
+    void *dict = NULL;
+    try { dict = ((getter_fn_t)(b + RVA_GET_COMMANDS))(shell, NULL); } catch (...) { dict = NULL; }
+    if (!ok_ptr((uintptr_t)dict)) return nil;
 
     NSMutableArray<NSString *> *out = [NSMutableArray array];
     static const int cand[] = {0x18, 0x20, 0x10};
     uintptr_t dictp = (uintptr_t)dict;
-    for (int ci = 0; ci < 3; ci++) {
+    for (int ci = 0; ci < 3 && !out.count; ci++) {
         uintptr_t arr = *(uintptr_t *)(dictp + cand[ci]);
-        if (arr < 0x10000) continue;
+        if (!ok_ptr(arr)) continue;
+        // array header: klass@0 must be a plausible pointer; max_length@0x18
+        if (!ok_ptr(*(uintptr_t *)arr)) continue;
         int32_t cnt = (int32_t)*(int64_t *)(arr + 0x18);
         if (cnt <= 0 || cnt > 512) continue;
         for (int i = 0; i < cnt; i++) {
-            uintptr_t key = *(uintptr_t *)(arr + 0x20 + (uintptr_t)i * 24 + 8);
-            if (key < 0x10000) continue;
+            uintptr_t ent = arr + 0x20 + (uintptr_t)i * 24;
+            int32_t hash = *(int32_t *)ent;
+            uintptr_t key = *(uintptr_t *)(ent + 8);
+            if (hash < 0 || !ok_ptr(key)) continue;      // empty/deleted slot
+            if (!ok_ptr(*(uintptr_t *)key)) continue;    // key->klass sane?
             int32_t slen = *(int32_t *)(key + 0x10);
             if (slen <= 0 || slen > 64) continue;
             NSString *s = [[NSString alloc] initWithCharacters:(const unichar *)(key + 0x14) length:slen];
             if (s) [out addObject:s];
         }
-        if (out.count) break;
-        [out removeAllObjects];
+        if (!out.count) continue;   // try next candidate only if nothing found
+        break;
     }
     return out.count ? out : nil;
 }
@@ -112,26 +129,30 @@ static patchdef g_patches[] = {
     {0x134C5B8, {0x52800000, 0xD65F03C0}, 2, {0}, "Free Research"},
     // void no-op: ret
     {0x1295D74, {0xD65F03C0},            1, {0}, "No Cooldowns"},
-    // float consts via literal pool
-    {0x134BEAC, {0x1C000040, 0x14000002, 0x40A00000}, 3, {0}, "Catch Rate 5.0"},
-    {0x13C07E4, {0x1C000040, 0x14000002, 0x40800000}, 3, {0}, "Sell 4x"},
-    {0x14A3AF8, {0x1C000040, 0x14000002, 0x41A00000}, 3, {0}, "Boat Speed 20"},
+    // float consts via literal pool: ldr s0,[pc,#8]; ret; .float v
+    {0x134BEAC, {0x1C000040, 0xD65F03C0, 0x40A00000}, 3, {0}, "Catch Rate 5.0"},
+    {0x13C07E4, {0x1C000040, 0xD65F03C0, 0x40800000}, 3, {0}, "Sell 4x"},
+    {0x14A3AF8, {0x1C000040, 0xD65F03C0, 0x41A00000}, 3, {0}, "Boat Speed 20"},
 };
 static const int g_npatches = sizeof(g_patches)/sizeof(g_patches[0]);
 static BOOL g_state[32] = {0};
 
-static void patch_apply(int i, BOOL on) {
+static BOOL patch_apply(int i, BOOL on) {
     uintptr_t b = uf_base();
-    if (!b) return;
+    if (!b) return NO;
     patchdef *p = &g_patches[i];
     uint32_t *addr = (uint32_t *)(b + p->rva);
     if (p->orig[0] == 0)
         memcpy(p->orig, addr, p->nwords * 4);
     uintptr_t page = ((uintptr_t)addr) & ~0xFFFULL;
-    mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
+    size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
+    if (mprotect((void *)page, pgsz, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+        return NO;
     if (on) memcpy(addr, p->code, p->nwords * 4);
     else    memcpy(addr, p->orig, p->nwords * 4);
     sys_icache_invalidate(addr, p->nwords * 4);
+    mprotect((void *)page, pgsz, PROT_READ | PROT_EXEC);
+    return YES;
 }
 
 #pragma mark - UI
@@ -317,9 +338,15 @@ static void patch_apply(int i, BOOL on) {
     if (!destDir) destDir = docs;
 
     NSString *dst = [destDir stringByAppendingPathComponent:@"dredge-save0.bin"];
+    NSString *tmp = [dst stringByAppendingString:@".tmp"];
     NSError *err = nil;
-    [fm removeItemAtPath:dst error:nil];
-    BOOL ok = [fm copyItemAtPath:src toPath:dst error:&err];
+    [fm removeItemAtPath:tmp error:nil];
+    // copy to .tmp first, then swap — never delete the existing save before copy succeeds
+    BOOL ok = [fm copyItemAtPath:src toPath:tmp error:&err];
+    if (ok) {
+        [fm removeItemAtPath:dst error:nil];
+        ok = [fm moveItemAtPath:tmp toPath:dst error:&err];
+    }
     [self toast:ok ? [NSString stringWithFormat:@"restored -> %@", dst]
                    : [NSString stringWithFormat:@"failed: %@", err.localizedDescription]];
 }
@@ -333,10 +360,15 @@ static void patch_apply(int i, BOOL on) {
 
 - (void)toggleBtn:(UIButton *)b {
     int i = (int)b.tag - 1000;
-    g_state[i] = !g_state[i];
-    patch_apply(i, g_state[i]);
+    BOOL want = !g_state[i];
+    if (!patch_apply(i, want)) {
+        [self toast:@"patch failed (memory not writable)"];
+        return;
+    }
+    g_state[i] = want;
     b.backgroundColor = g_state[i] ? [UIColor colorWithRed:0.1 green:0.5 blue:0.2 alpha:1]
                                    : [UIColor darkGrayColor];
+    [b setTitle:[NSString stringWithFormat:@"%s %@", g_patches[i].name, g_state[i]?@"✓":@""] forState:UIControlStateNormal];
 }
 
 - (void)hidePanel {
@@ -357,12 +389,15 @@ static UIWindow *g_panelWin = nil;
 static UIWindowScene *find_scene(void) {
     UIApplication *app = UIApplication.sharedApplication;
     if (!app) return nil;
+    UIWindowScene *fallback = nil;
     for (UIScene *s in app.connectedScenes) {
-        if ([s isKindOfClass:UIWindowScene.class] &&
-            s.activationState != UISceneActivationStateUnattached)
+        if (![s isKindOfClass:UIWindowScene.class]) continue;
+        if (s.activationState == UISceneActivationStateForegroundActive)
             return (UIWindowScene *)s;
+        if (s.activationState != UISceneActivationStateUnattached)
+            fallback = (UIWindowScene *)s;
     }
-    return nil;
+    return fallback;
 }
 
 static UIWindow *new_window(CGRect f, UIWindowLevel lvl) {
@@ -392,6 +427,12 @@ static UIWindow *new_window(CGRect f, UIWindowLevel lvl) {
     CGPoint tr = [g translationInView:g_handleWin];
     CGRect f = g_handleWin.frame;
     f.origin.x += tr.x; f.origin.y += tr.y;
+    // clamp inside the scene's screen bounds so the dot can't be dragged offscreen
+    CGRect bounds = g_handleWin.windowScene.screen.bounds;
+    if (bounds.size.width <= 0) bounds = UIScreen.mainScreen.bounds;
+    CGFloat m = 8;
+    f.origin.x = MIN(MAX(f.origin.x, m - f.size.width), bounds.size.width - m);
+    f.origin.y = MIN(MAX(f.origin.y, m - f.size.height), bounds.size.height - m);
     g_handleWin.frame = f;
     [g setTranslation:CGPointZero inView:g_handleWin];
 }
@@ -430,25 +471,21 @@ static void make_handle(void) {
 
 #pragma mark - bootstrap
 
-static void poll_scene(void) {
-    if (find_scene()) { make_handle(); return; }
+static void poll_ready(void) {
+    // poll on MAIN thread: g_shell() runs il2cpp code -> needs a GC-registered thread.
+    if (uf_base() && g_shell() && find_scene()) { make_handle(); return; }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ poll_scene(); });
+                   dispatch_get_main_queue(), ^{ poll_ready(); });
 }
 
 __attribute__((constructor))
 static void dre_init(void) {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-        // wait for UnityFramework + game shell (up to 90s)
-        for (int i = 0; i < 180 && !(uf_base() && g_shell()); i++)
-            usleep(500000);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            poll_scene();
-            // re-attach on foregrounding in case scene changed
-            [NSNotificationCenter.defaultCenter
-                addObserverForName:UIApplicationDidBecomeActiveNotification
-                object:nil queue:nil
-                usingBlock:^(NSNotification *n){ make_handle(); }];
-        });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        poll_ready();
+        // re-attach on foregrounding in case scene changed
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:UIApplicationDidBecomeActiveNotification
+            object:nil queue:nil
+            usingBlock:^(NSNotification *n){ make_handle(); }];
     });
 }

@@ -37,7 +37,7 @@ def inject_dylib_cmd(exe: bytes, dylib_path: str) -> bytes:
                 s += 80
         off += cmdsize
     pad = (min_sect or 0x4000) - lc_end
-    assert pad >= 72, f'not enough header pad ({pad})'
+    assert pad >= ((24 + len(dylib_path.encode()) + 1 + 7) & ~7), f'not enough header pad ({pad})'
 
     name = dylib_path.encode()
     cmdsize = (24 + len(name) + 1 + 7) & ~7
@@ -62,19 +62,38 @@ def main():
     ip = plistlib.loads(zin.read(info_path))
     ip['UIFileSharingEnabled'] = True
     ip['LSSupportsOpeningDocumentsInPlace'] = True
-    info = plistlib.dumps(ip, fmt=plistlib.FMT_BINARY)
+    info_bytes = plistlib.dumps(ip, fmt=plistlib.FMT_BINARY)
 
-    names = zin.namelist()
+    def macho_zinfo(name):
+        zi = zipfile.ZipInfo(name)
+        zi.create_system = 3            # Unix -> honour permission bits
+        zi.external_attr = 0o755 << 16  # rwxr-xr-x
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        return zi
+    def file_zinfo(name):
+        zi = zipfile.ZipInfo(name)
+        zi.create_system = 3
+        zi.external_attr = 0o644 << 16
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        return zi
+
     zout = zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED)
-    for n in names:
+    for zi in zin.infolist():
+        n = zi.filename
+        # drop stale signatures/provisioning so signers regenerate them fresh
+        if '_CodeSignature' in n or n.endswith('embedded.mobileprovision'):
+            continue
         if n == exe_path or n == info_path:
             continue
-        zout.writestr(n, zin.read(n))
-    zout.writestr(exe_path, exe)
-    zout.writestr(info_path, info)
-    zout.writestr(fw_path, dyb)
+        # preserve original ZipInfo (keeps posix perms, create_system, timestamps)
+        zout.writestr(zi, zin.read(n))
+    # rewritten/new binaries get explicit exec perms
+    zout.writestr(macho_zinfo(exe_path), exe)
+    zout.writestr(macho_zinfo(fw_path), dyb)
+    # plist: keep 0644
+    zout.writestr(file_zinfo(info_path), info_bytes)
     if save:
-        zout.writestr(save_dst, open(save, 'rb').read())
+        zout.writestr(file_zinfo(save_dst), open(save, 'rb').read())
     zout.close(); zin.close()
 
     z = zipfile.ZipFile(out)
