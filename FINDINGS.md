@@ -119,9 +119,14 @@ dependencies on their frameworks.
 | No Durability Loss | `0x127B134` | `fmov s0,wzr; ret` |
 | Free Research | `0x134C5B8` | `mov w0,#0; ret` |
 | No Cooldowns | `0x1295D74` | `ret` |
-| Catch Rate 5.0 | `0x134BEAC` | `ldr s0 / b / .float 5.0` |
-| Sell 4x | `0x13C07E4` | `ldr s0 / b / .float 4.0` |
-| Boat Speed 20 | `0x14A3AF8` | `ldr s0 / b / .float 20.0` |
+| Catch Rate 5.0 | `0x134BEAC` | `ldr s0 / ret / .float 5.0` |
+| Sell 4x | `0x13C07E4` | `ldr s0 / ret / .float 4.0` |
+| Boat Speed 20 | `0x14A3AF8` | `ldr s0 / ret / .float 20.0` |
+
+> Static patches applied at build time (v10): `get_IsInTrialMode`→false
+> (`0x12948BC`) and `GetHasEntitlement`→true (`0x13E358C`). SellValueModifier is
+> runtime-toggle only — its earlier static patch returned via `w0` which is the
+> wrong register file for a `float` method (must write `s0`).
 
 ## Not included
 - "All cabin items" — `DebugAddAllCabinItems` is a debug command; reachable via
@@ -135,7 +140,9 @@ dependencies on their frameworks.
 - `v1.5.19-standalone-v7` — **stock decrypted IPA + 3 static patches only; zero iOSGods code**
 - `v1.5.19-menu-v8` — v7 + `DREMenu.dylib` injected; floating menu + all game commands + runtime toggles
 - `v1.5.19-menu-v8c` — adds bundled save (`dredge-save0.bin`), a restore button in the menu, and `UIFileSharingEnabled`/`LSSupportsOpeningDocumentsInPlace` so Documents is browsable in Files.app / Finder
-- `v1.5.19-menu-v9` — **current build.** Fixes two UI bugs reported on iPad: (1) windows must be attached to a `UIWindowScene` to render on iOS 13+ (v8 bubble was invisible); (2) `UIGestureRecognizer` targets are weak refs, so the tap host must be retained in a static var — v8 bubble rendered but did nothing on tap. Same contents as v8c otherwise.
+- `v1.5.19-menu-v9` — fixes two UI bugs reported on iPad: (1) windows must be attached to a `UIWindowScene` to render on iOS 13+ (v8 bubble was invisible); (2) `UIGestureRecognizer` targets are weak refs, so the tap host must be retained in a static var — v8 bubble rendered but did nothing on tap. Same contents as v8c otherwise.
+- `v1.5.19-menu-v9b` — v9 + ad-hoc-signed `DREMenu.dylib` (re-signers only recurse into binaries that already carry `LC_CODE_SIGNATURE`; unsigned dylib → Singulous signed OK but iOS install refused).
+- `v1.5.19-menu-v10` — **current build.** Multi-agent audit fixes: float toggles used `b +8` into mid-function (guaranteed crash) → correct `ldr s0/ret/.float`; dropped buggy static `get_SellValueModifier` patch (returned via `w0`, float methods return in `s0` — Sell is runtime-toggle only); `mprotect` checked + RX restored; dictionary enum hardened; il2cpp calls on main thread; ObjC++ try/catch around managed calls; **zip repack preserves exec bits** (`writestr(ZipInfo)` + explicit 0755 on Mach-O) — the likely Singulous install blocker alongside device-UDID provisioning; stale `_CodeSignature`/`embedded.mobileprovision` stripped.
 
 ## Install / saves
 Same bundle ID → installs over the existing modded app; save files in app Documents survive (don't uninstall first or you lose them).
