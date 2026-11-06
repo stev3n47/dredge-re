@@ -174,5 +174,12 @@ UX audit surfaced these, prioritized:
 - Search/filter for the ~25+ command list.
 - Move Toggles section above the long command scroll; 34→40 pt buttons, 10→11–12 pt font.
 
+## Signulous install failure (iPhone) — diagnosis in progress
+
+Device ruled out: iOSGods IPA installs on the same iPhone 17 Pro Max / iOS 26.2 via Signulous, UDID registered, old app deleted. So the IPA is at fault. v10 fixed exec bits + ad-hoc dylib + stale signatures; still fails. Working theory: Signulous's signer may only enumerate `.framework` bundles (or binaries with real cert signatures — iGameGod's blob is 287 KB with certs, ours is a 1 KB ad-hoc stub) → a bare ad-hoc `.dylib` keeps an invalid signature → iOS nested-code integrity check fails.
+
+- `v1.5.19-base-v10` — control build: base-v10 packaging with NO dylib/menu. Installs ⇒ dylib confirmed as blocker.
+- `v1.5.19-menu-v10f` — v10 with `DREMenu` packaged as `Frameworks/DREMenu.framework/DREMenu` (+Info.plist), mimicking iGameGod's layout.
+
 ## Install / saves
 Same bundle ID → installs over the existing modded app; save files in app Documents survive (don't uninstall first or you lose them).
