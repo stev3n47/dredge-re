@@ -397,13 +397,16 @@ static UIWindow *new_window(CGRect f, UIWindowLevel lvl) {
 }
 @end
 
+// UIGestureRecognizer targets are weak — host must be retained for taps to work.
+static DREGestureHost *g_host = nil;
+
 static void make_handle(void) {
     if (g_handleWin) {
         if (!g_handleWin.windowScene) g_handleWin.windowScene = find_scene();
         g_handleWin.hidden = NO;
         return;
     }
-    DREGestureHost *host = [DREGestureHost new];
+    g_host = [DREGestureHost new];
     g_handleWin = new_window(CGRectMake(8, 120, 54, 54), UIWindowLevelAlert + 3);
     g_handleWin.rootViewController = [UIViewController new];
 
@@ -419,8 +422,8 @@ static void make_handle(void) {
     t.textColor = UIColor.whiteColor; t.font = [UIFont boldSystemFontOfSize:22];
     [dot addSubview:t];
 
-    [dot addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:host action:@selector(tap)]];
-    [dot addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:host action:@selector(pan:)]];
+    [dot addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:g_host action:@selector(tap)]];
+    [dot addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:g_host action:@selector(pan:)]];
     [g_handleWin.rootViewController.view addSubview:dot];
     g_handleWin.hidden = NO;
 }
