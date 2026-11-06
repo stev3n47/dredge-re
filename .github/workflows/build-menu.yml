@@ -20,7 +20,7 @@ jobs:
             -miphoneos-version-min=15.0 \
             -framework UIKit -framework Foundation -framework CoreGraphics \
             -fobjc-arc -O2 -lc++ -lc++abi \
-            -Wl,-no_chained_fixups \
+            -Wl,-no_fixup_chains \
             -install_name '@executable_path/Frameworks/DREMenu.framework/DREMenu' \
             -o DREMenu menu/DREMenu.mm
           # Sign with a real (self-signed) cert, NOT ad-hoc: sideload re-signers
