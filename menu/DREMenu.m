@@ -7,6 +7,7 @@
 #import <Foundation/Foundation.h>
 #import <mach-o/dyld.h>
 #import <sys/mman.h>
+#import <libkern/OSCacheControl.h>
 #import <dlfcn.h>
 #import <string.h>
 
@@ -130,7 +131,7 @@ static void patch_apply(int i, BOOL on) {
     mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
     if (on) memcpy(addr, p->code, p->nwords * 4);
     else    memcpy(addr, p->orig, p->nwords * 4);
-    __builtin___clear_cache((char *)addr, (char *)addr + p->nwords * 4);
+    sys_icache_invalidate(addr, p->nwords * 4);
 }
 
 #pragma mark - UI
