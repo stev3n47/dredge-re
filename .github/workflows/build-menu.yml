@@ -20,16 +20,16 @@ jobs:
             -miphoneos-version-min=15.0 \
             -framework UIKit -framework Foundation -framework CoreGraphics \
             -fobjc-arc -O2 -lc++ -lc++abi \
-            -install_name '@executable_path/Frameworks/DREMenu.dylib' \
-            -o DREMenu.dylib menu/DREMenu.mm
+            -install_name '@executable_path/Frameworks/DREMenu.framework/DREMenu' \
+            -o DREMenu menu/DREMenu.mm
           # Ad-hoc sign so re-signers (Singulous etc.) detect a LC_CODE_SIGNATURE to replace;
-          # an unsigned dylib is skipped by signers -> unsigned binary fails install.
-          codesign --force --sign - DREMenu.dylib
-          file DREMenu.dylib
-          otool -L DREMenu.dylib
-          codesign -dv DREMenu.dylib 2>&1 | head -5
+          # an unsigned binary is skipped by signers -> unsigned binary fails install.
+          codesign --force --sign - DREMenu
+          file DREMenu
+          otool -L DREMenu
+          codesign -dv DREMenu 2>&1 | head -5
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DREMenu.dylib
-          path: DREMenu.dylib
+          name: DREMenu
+          path: DREMenu

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Inject LC_LOAD_DYLIB for DREMenu.dylib into DREDGE and repackage the IPA.
+"""Inject LC_LOAD_DYLIB for DREMenu.framework into DREDGE and repackage the IPA.
 
 Usage:
-  python inject_menu.py <stock.ipa> <DREMenu.dylib> <out.ipa> [save.bin]
+  python inject_menu.py <stock.ipa> <DREMenu-binary> <out.ipa> [save.bin]
 
-- Adds LC_LOAD_DYLIB '@executable_path/Frameworks/DREMenu.dylib' to the
-  DREDGE executable (header pad is >= 0x3800 bytes, plenty for +56 bytes).
-- Copies DREMenu.dylib into Payload/DREDGE.app/Frameworks/.
+- Adds LC_LOAD_DYLIB '@executable_path/Frameworks/DREMenu.framework/DREMenu'
+  to the DREDGE executable (header pad is >= 0x3800 bytes).
+- Assembles Payload/DREDGE.app/Frameworks/DREMenu.framework/ (binary +
+  Info.plist) — a proper framework bundle so re-signers that only recurse
+  into .framework directories still detect and sign it (iGameGod precedent).
 - Enables UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace in
   Info.plist so Documents is browsable in Files.app / Finder file sharing.
 - Optionally bundles a save file inside .app for the menu's restore button.
@@ -51,13 +53,25 @@ def main():
     ipa, dylib, out = sys.argv[1], sys.argv[2], sys.argv[3]
     save = sys.argv[4] if len(sys.argv) > 4 else None
     exe_path  = 'Payload/DREDGE.app/DREDGE'
-    fw_path   = 'Payload/DREDGE.app/Frameworks/DREMenu.dylib'
+    fw_path   = 'Payload/DREDGE.app/Frameworks/DREMenu.framework/DREMenu'
+    fw_plist  = 'Payload/DREDGE.app/Frameworks/DREMenu.framework/Info.plist'
     info_path = 'Payload/DREDGE.app/Info.plist'
     save_dst  = 'Payload/DREDGE.app/dredge-save0.bin'
 
     zin = zipfile.ZipFile(ipa)
-    exe = inject_dylib_cmd(zin.read(exe_path), '@executable_path/Frameworks/DREMenu.dylib')
+    exe = inject_dylib_cmd(zin.read(exe_path), '@executable_path/Frameworks/DREMenu.framework/DREMenu')
     dyb = open(dylib, 'rb').read()
+
+    fw_info = plistlib.dumps({
+        'CFBundleExecutable': 'DREMenu',
+        'CFBundleIdentifier': 'com.dremenu',
+        'CFBundleName': 'DREMenu',
+        'CFBundlePackageType': 'FMWK',
+        'CFBundleVersion': '1',
+        'CFBundleShortVersionString': '1.0',
+        'MinimumOSVersion': '16.0',
+        'CFBundleSupportedPlatforms': ['iPhoneOS'],
+    }, fmt=plistlib.FMT_BINARY)
 
     ip = plistlib.loads(zin.read(info_path))
     ip['UIFileSharingEnabled'] = True
@@ -95,6 +109,7 @@ def main():
     # rewritten/new binaries get explicit exec perms
     zout.writestr(macho_zinfo(exe_path), exe)
     zout.writestr(macho_zinfo(fw_path), dyb)
+    zout.writestr(file_zinfo(fw_plist), fw_info)
     # plist: keep 0644
     zout.writestr(file_zinfo(info_path), info_bytes)
     if save:
