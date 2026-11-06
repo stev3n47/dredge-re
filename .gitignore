@@ -1,0 +1,9 @@
+*.ipa
+extracted/
+tools/
+dump_out/
+*.txt
+*.html
+manifest.plist
+.playwright-mcp/
+p1.txt
