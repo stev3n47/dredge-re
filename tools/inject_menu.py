@@ -86,7 +86,12 @@ def main():
         if n == exe_path or n == info_path:
             continue
         # preserve original ZipInfo (keeps posix perms, create_system, timestamps)
-        zout.writestr(zi, zin.read(n))
+        data = zin.read(n)
+        # normalize: any Mach-O must be executable (installers verify the exec bit)
+        if data[:4] in (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xfe\xed\xfa\xcf'):
+            zi.external_attr = 0o755 << 16
+            zi.create_system = 3
+        zout.writestr(zi, data)
     # rewritten/new binaries get explicit exec perms
     zout.writestr(macho_zinfo(exe_path), exe)
     zout.writestr(macho_zinfo(fw_path), dyb)

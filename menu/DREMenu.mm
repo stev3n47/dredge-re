@@ -70,7 +70,10 @@ static inline BOOL ok_ptr(uintptr_t p) {
     return p > 0x10000 && (p & 7) == 0 && (p >> 40) == 0;
 }
 
-static NSArray<NSString *> *enum_commands(void) {
+// Entries -> [{name, min, max}] — CommandInfo is a 24B VALUE struct stored
+// inline, so Dictionary<string,CommandInfo>.Entry stride = 40 bytes:
+//   hashCode@0(i32) next@4(i32) key@8(str*) | value: proc@16 max@24(i32) min@28(i32) help@32(str*)
+static NSArray<NSDictionary *> *enum_commands(void) {
     uintptr_t b = uf_base();
     void *shell = g_shell();
     if (!b || !shell) return nil;
@@ -78,7 +81,7 @@ static NSArray<NSString *> *enum_commands(void) {
     try { dict = ((getter_fn_t)(b + RVA_GET_COMMANDS))(shell, NULL); } catch (...) { dict = NULL; }
     if (!ok_ptr((uintptr_t)dict)) return nil;
 
-    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
     static const int cand[] = {0x18, 0x20, 0x10};
     uintptr_t dictp = (uintptr_t)dict;
     for (int ci = 0; ci < 3 && !out.count; ci++) {
@@ -89,7 +92,7 @@ static NSArray<NSString *> *enum_commands(void) {
         int32_t cnt = (int32_t)*(int64_t *)(arr + 0x18);
         if (cnt <= 0 || cnt > 512) continue;
         for (int i = 0; i < cnt; i++) {
-            uintptr_t ent = arr + 0x20 + (uintptr_t)i * 24;
+            uintptr_t ent = arr + 0x20 + (uintptr_t)i * 40;
             int32_t hash = *(int32_t *)ent;
             uintptr_t key = *(uintptr_t *)(ent + 8);
             if (hash < 0 || !ok_ptr(key)) continue;      // empty/deleted slot
@@ -97,10 +100,13 @@ static NSArray<NSString *> *enum_commands(void) {
             int32_t slen = *(int32_t *)(key + 0x10);
             if (slen <= 0 || slen > 64) continue;
             NSString *s = [[NSString alloc] initWithCharacters:(const unichar *)(key + 0x14) length:slen];
-            if (s) [out addObject:s];
+            if (!s) continue;
+            [out addObject:@{
+                @"name": s,
+                @"max": @(*(int32_t *)(ent + 24)),
+                @"min": @(*(int32_t *)(ent + 28)),
+            }];
         }
-        if (!out.count) continue;   // try next candidate only if nothing found
-        break;
     }
     return out.count ? out : nil;
 }
@@ -118,21 +124,19 @@ typedef struct {
     const char *name;
 } patchdef;
 
+// Only audited targets ship: wrong-register/unverified RVAs were dropped after
+// review (GetPlayerSanity is a dialogue helper where 0=insane; CheckAbilityCooldown
+// is UI-only; GetMissingDurabilityAmount is repair-side; 0x14A3AF8 is a float
+// interpolation fn, not boat speed).
 static patchdef g_patches[] = {
     // bool: mov w0,#1; ret
     {0x125E7EC, {0x52800020, 0xD65F03C0}, 2, {0}, "God Mode"},
     {0x125E7FC, {0x52800020, 0xD65F03C0}, 2, {0}, "Immune (Equip Dmg)"},
-    // float 0.0f: fmov s0,wzr; ret
-    {0x135BFE4, {0x1E2703E0, 0xD65F03C0}, 2, {0}, "Zero Sanity"},
-    {0x127B134, {0x1E2703E0, 0xD65F03C0}, 2, {0}, "No Durability Loss"},
     // int 0: mov w0,#0; ret
     {0x134C5B8, {0x52800000, 0xD65F03C0}, 2, {0}, "Free Research"},
-    // void no-op: ret
-    {0x1295D74, {0xD65F03C0},            1, {0}, "No Cooldowns"},
     // float consts via literal pool: ldr s0,[pc,#8]; ret; .float v
     {0x134BEAC, {0x1C000040, 0xD65F03C0, 0x40A00000}, 3, {0}, "Catch Rate 5.0"},
     {0x13C07E4, {0x1C000040, 0xD65F03C0, 0x40800000}, 3, {0}, "Sell 4x"},
-    {0x14A3AF8, {0x1C000040, 0xD65F03C0, 0x41A00000}, 3, {0}, "Boat Speed 20"},
 };
 static const int g_npatches = sizeof(g_patches)/sizeof(g_patches[0]);
 static BOOL g_state[32] = {0};
@@ -158,7 +162,7 @@ static BOOL patch_apply(int i, BOOL on) {
 #pragma mark - UI
 
 @interface DREPanel : UIViewController
-@property (nonatomic, strong) UIWindow *win;
+@property (nonatomic, weak) UIWindow *win;
 @end
 
 @implementation DREPanel {
@@ -199,7 +203,7 @@ static BOOL patch_apply(int i, BOOL on) {
     CGFloat y = 4;
     CGFloat bw = (w - 10) / 2;
 
-    NSArray *cmds = enum_commands();
+    NSArray<NSDictionary *> *cmds = enum_commands();
     if (cmds.count) {
         y = [self section:@"Game Commands" y:y];
         // Curated favorites first, then everything else registered
@@ -212,17 +216,18 @@ static BOOL patch_apply(int i, BOOL on) {
                          @"ListDestinations", @"UnlockDestination", @"Die"];
         int col = 0; CGFloat x = 0;
         for (NSString *n in fav) {
-            if (![cmds containsObject:n]) continue;
-            [self cmdBtn:n x:x y:y w:bw];
+            NSDictionary *c = [self cmdNamed:n in:cmds];
+            if (!c) continue;
+            [self cmdBtn:c x:x y:y w:bw];
             col = (col + 1) % 2; x = col ? bw + 10 : 0;
             if (!col) y += 40;
         }
         if (col) y += 40;
         y = [self section:@"All Commands" y:y];
         col = 0; x = 0;
-        for (NSString *n in cmds) {
-            if ([fav containsObject:n]) continue;
-            [self cmdBtn:n x:x y:y w:bw];
+        for (NSDictionary *c in cmds) {
+            if ([fav containsObject:c[@"name"]]) continue;
+            [self cmdBtn:c x:x y:y w:bw];
             col = (col + 1) % 2; x = col ? bw + 10 : 0;
             if (!col) y += 40;
         }
@@ -234,7 +239,7 @@ static BOOL patch_apply(int i, BOOL on) {
                            @"setsanity 0", @"sanity 0", @"help", @"clear"];
         int col = 0; CGFloat x = 0;
         for (NSString *n in guess) {
-            [self cmdBtn:n x:x y:y w:bw];
+            [self cmdBtn:@{@"name": n, @"min": @0, @"max": @0} x:x y:y w:bw];
             col = (col + 1) % 2; x = col ? bw + 10 : 0;
             if (!col) y += 40;
         }
@@ -286,26 +291,45 @@ static BOOL patch_apply(int i, BOOL on) {
     return y + 24;
 }
 
-- (void)cmdBtn:(NSString *)n x:(CGFloat)x y:(CGFloat)y w:(CGFloat)w {
+- (NSDictionary *)cmdNamed:(NSString *)n in:(NSArray<NSDictionary *> *)cmds {
+    for (NSDictionary *c in cmds)
+        if ([c[@"name"] isEqualToString:n]) return c;
+    return nil;
+}
+
+- (void)cmdBtn:(NSDictionary *)c x:(CGFloat)x y:(CGFloat)y w:(CGFloat)w {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
     b.frame = CGRectMake(x, y, w, 34);
     b.backgroundColor = [UIColor darkGrayColor];
     b.layer.cornerRadius = 8;
     b.titleLabel.font = [UIFont systemFontOfSize:10];
     b.titleLabel.numberOfLines = 2;
-    [b setTitle:n forState:UIControlStateNormal];
+    [b setTitle:c[@"name"] forState:UIControlStateNormal];
     [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    b.tag = 2000;
+    // carry the command dict via associated lookup — simpler: use tag into array
+    b.accessibilityIdentifier = [NSString stringWithFormat:@"%@|%@|%@",
+        c[@"name"], c[@"min"], c[@"max"]];
     [b addTarget:self action:@selector(runCmdBtn:) forControlEvents:UIControlEventTouchUpInside];
     [_scroll addSubview:b];
 }
 
 - (void)runCmdBtn:(UIButton *)b {
-    NSString *cmd = b.titleLabel.text;
+    NSArray *parts = [b.accessibilityIdentifier componentsSeparatedByString:@"|"];
+    NSString *cmd = parts.firstObject;
+    int minArg = parts.count > 1 ? parts[1].intValue : 0;
+    int maxArg = parts.count > 2 ? parts[2].intValue : 0;
+
+    // no-arg command: run immediately, no prompt
+    if (maxArg == 0 && minArg == 0) { run_cmd(cmd.UTF8String); return; }
+
     UIAlertController *a = [UIAlertController alertControllerWithTitle:cmd
-        message:@"Optional arguments:" preferredStyle:UIAlertControllerStyleAlert];
+        message:minArg > 0 ? @"Arguments (required):" : @"Optional arguments:"
+        preferredStyle:UIAlertControllerStyleAlert];
     [a addTextFieldWithConfigurationHandler:nil];
+    __weak UIAlertController *wa = a;
     [a addAction:[UIAlertAction actionWithTitle:@"Run" style:UIAlertActionStyleDefault handler:^(id act) {
-        NSString *arg = a.textFields.firstObject.text;
+        NSString *arg = wa.textFields.firstObject.text;
         NSString *full = arg.length ? [NSString stringWithFormat:@"%@ %@", cmd, arg] : cmd;
         run_cmd(full.UTF8String);
     }]];
