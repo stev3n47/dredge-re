@@ -1,0 +1,31 @@
+name: Build DREMenu.dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'menu/**'
+      - '.github/workflows/build-menu.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 -dynamiclib \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=15.0 \
+            -framework UIKit -framework Foundation \
+            -fobjc-arc -O2 \
+            -install_name '@executable_path/Frameworks/DREMenu.dylib' \
+            -o DREMenu.dylib menu/DREMenu.m
+          file DREMenu.dylib
+          otool -L DREMenu.dylib
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DREMenu.dylib
+          path: DREMenu.dylib
