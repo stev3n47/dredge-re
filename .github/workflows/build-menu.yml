@@ -31,6 +31,7 @@ jobs:
           openssl pkcs12 -export -legacy -out id.p12 -inkey key.pem -in cert.pem -passout pass:temp
           security create-keychain -p temp t.keychain
           security default-keychain -s t.keychain
+          security list-keychains -d user -s t.keychain
           security unlock-keychain -p temp t.keychain
           security import id.p12 -k t.keychain -P temp -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k temp t.keychain
