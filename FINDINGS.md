@@ -104,24 +104,34 @@ dependencies on their frameworks.
   becomes a button: godmode, sanity, speed, teleport, add items, unlocks, DLC.
 - **Command list:** enumerated at runtime from `Terminal.Shell.Commands`
   (`get_Commands` `0x1215CD0`) — a `Dictionary<string,CommandInfo>` walked
-  natively (entries array at obj+0x18, Entry{hash,next,key@8,val@16}=24 B,
-  Il2CppString utf16 chars at +0x14).
+  natively. `CommandInfo` is a 24-byte **value struct** (proc@0, max_args@8,
+  min_args@0xC, help@0x10) stored **inline** in the entry, so each
+  `Entry{hash@0,next@4,key@8,value@16}` is **40 bytes**, entries array at
+  obj+0x18 (candidate offsets 0x18/0x20/0x10 tried), Il2CppString utf16 chars
+  at +0x14. The menu reads name + min/max arg counts + help per command —
+  no-arg commands run on tap, arg commands get an alert prompt.
 - **Runtime toggles:** byte patches applied/restored on demand at the known
   RVAs (mprotect RWX + `sys_icache_invalidate`). Float-returning methods patch
-  via `ldr s0,[pc,#8]; b +8; .float` literal-pool or `fmov s0,wzr` for 0.0f —
-  **not** `mov w0` (wrong register file).
+  via `ldr s0,[pc,#8]; ret; .float` literal-pool — **not** `mov w0` (wrong
+  register file) and **not** `b +8` (branches into mid-function → crash).
 
 | Toggle | RVA | Patch |
 |---|---|---|
 | God Mode | `0x125E7EC` | `mov w0,#1; ret` |
 | Immune (equip dmg) | `0x125E7FC` | `mov w0,#1; ret` |
-| Zero Sanity | `0x135BFE4` | `fmov s0,wzr; ret` |
-| No Durability Loss | `0x127B134` | `fmov s0,wzr; ret` |
 | Free Research | `0x134C5B8` | `mov w0,#0; ret` |
-| No Cooldowns | `0x1295D74` | `ret` |
 | Catch Rate 5.0 | `0x134BEAC` | `ldr s0 / ret / .float 5.0` |
 | Sell 4x | `0x13C07E4` | `ldr s0 / ret / .float 4.0` |
-| Boat Speed 20 | `0x14A3AF8` | `ldr s0 / ret / .float 20.0` |
+
+Dropped after audit (unverified or wrong semantics):
+- `GetPlayerSanity`→0 (`0x135BFE4`): 0 = *insane*, drives dialogue/AI — not
+  "sanity never decreases".
+- `CheckAbilityCooldown` (`0x1295D74`): UI-layer check; doesn't touch real
+  cooldown enforcement.
+- `GetMissingDurabilityAmount` (`0x127B134`): repair-side calculation, not
+  proven "no durability loss".
+- `GetMaxSpeed` (`0x14A3AF8`): misattributed — disassembly shows a float
+  interpolation function, not boat speed. Forcing 20.0 could corrupt state.
 
 > Static patches applied at build time (v10): `get_IsInTrialMode`→false
 > (`0x12948BC`) and `GetHasEntitlement`→true (`0x13E358C`). SellValueModifier is
@@ -142,7 +152,27 @@ dependencies on their frameworks.
 - `v1.5.19-menu-v8c` — adds bundled save (`dredge-save0.bin`), a restore button in the menu, and `UIFileSharingEnabled`/`LSSupportsOpeningDocumentsInPlace` so Documents is browsable in Files.app / Finder
 - `v1.5.19-menu-v9` — fixes two UI bugs reported on iPad: (1) windows must be attached to a `UIWindowScene` to render on iOS 13+ (v8 bubble was invisible); (2) `UIGestureRecognizer` targets are weak refs, so the tap host must be retained in a static var — v8 bubble rendered but did nothing on tap. Same contents as v8c otherwise.
 - `v1.5.19-menu-v9b` — v9 + ad-hoc-signed `DREMenu.dylib` (re-signers only recurse into binaries that already carry `LC_CODE_SIGNATURE`; unsigned dylib → Singulous signed OK but iOS install refused).
-- `v1.5.19-menu-v10` — **current build.** Multi-agent audit fixes: float toggles used `b +8` into mid-function (guaranteed crash) → correct `ldr s0/ret/.float`; dropped buggy static `get_SellValueModifier` patch (returned via `w0`, float methods return in `s0` — Sell is runtime-toggle only); `mprotect` checked + RX restored; dictionary enum hardened; il2cpp calls on main thread; ObjC++ try/catch around managed calls; **zip repack preserves exec bits** (`writestr(ZipInfo)` + explicit 0755 on Mach-O) — the likely Singulous install blocker alongside device-UDID provisioning; stale `_CodeSignature`/`embedded.mobileprovision` stripped.
+- `v1.5.19-menu-v10` — **current build.** Four-agent audit applied: float toggles used `b +8` into mid-function (guaranteed crash) → correct `ldr s0/ret/.float`; dropped buggy static `get_SellValueModifier` patch (returned via `w0`, float methods return in `s0` — Sell is runtime-toggle only); `mprotect` checked + RX restored; dictionary enum hardened to 40-byte stride (CommandInfo is an inline value struct); il2cpp calls on main thread; ObjC++ try/catch around managed calls; **zip repack preserves exec bits** (explicit 0755 on all Mach-O) — the likely Singulous install blocker alongside device-UDID provisioning; stale `_CodeSignature`/`embedded.mobileprovision` stripped; dylib ad-hoc signed. Toggle list trimmed to the 5 verified patches (see table). No-arg commands run on tap; arg commands show min/max prompt.
+
+## Multi-agent audit — remaining findings (not yet implemented)
+
+UX audit surfaced these, prioritized:
+
+**Critical UX**
+- Panel fixed `(30,80,340,420)` overflows landscape iPhone height (~390–430 pt) — clamp to screen.
+- `run_cmd` fails silently; `toast:` is a blocking alert hardcoded to title "Save" even for patch failures — need a real transient toast.
+- Destructive commands (`Die`, `DepleteHarvestSpots`, save overwrite) are one-tap, no confirmation.
+
+**Important**
+- Dot: default position sits in the left-thumb steering zone and overlaps the panel (alert+3 vs alert+2); add edge-snap on pan-end, idle alpha fade, move default to right edge.
+- Toggle buttons lose the `✓` state suffix when the panel rebuilds on reopen.
+- Toggle states not persisted across relaunch (NSUserDefaults + re-apply in poll_ready).
+- `CommandInfo.help` (entry+32) is available but unread — surface as long-press help / arg-prompt message.
+
+**Nice-to-have**
+- Long-press dot → collapse to edge tab (proper hide, replaces accidental 8-pt sliver).
+- Search/filter for the ~25+ command list.
+- Move Toggles section above the long command scroll; 34→40 pt buttons, 10→11–12 pt font.
 
 ## Install / saves
 Same bundle ID → installs over the existing modded app; save files in app Documents survive (don't uninstall first or you lose them).
