@@ -317,8 +317,8 @@ static BOOL patch_apply(int i, BOOL on) {
 - (void)runCmdBtn:(UIButton *)b {
     NSArray *parts = [b.accessibilityIdentifier componentsSeparatedByString:@"|"];
     NSString *cmd = parts.firstObject;
-    int minArg = parts.count > 1 ? parts[1].intValue : 0;
-    int maxArg = parts.count > 2 ? parts[2].intValue : 0;
+    int minArg = parts.count > 1 ? [parts[1] intValue] : 0;
+    int maxArg = parts.count > 2 ? [parts[2] intValue] : 0;
 
     // no-arg command: run immediately, no prompt
     if (maxArg == 0 && minArg == 0) { run_cmd(cmd.UTF8String); return; }
