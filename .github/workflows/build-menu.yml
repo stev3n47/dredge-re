@@ -18,7 +18,7 @@ jobs:
           clang -arch arm64 -dynamiclib \
             -isysroot "$SDK" \
             -miphoneos-version-min=15.0 \
-            -framework UIKit -framework Foundation -framework CoreGraphics \
+            -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore \
             -fobjc-arc -O2 -lc++ -lc++abi \
             -Wl,-no_fixup_chains \
             -install_name '@executable_path/Frameworks/DREMenu.framework/DREMenu' \
