@@ -54,6 +54,48 @@ static void run_cmd(const char *cmd) {
     try { ((run_fn_t)(b + RVA_RUN_COMMAND))(shell, s, NULL); } catch (...) {}
 }
 
+#pragma mark - Toggle flags (data writes into UnityFramework __DATA zerofill)
+
+// Runtime code patching is impossible under dev signing (Signulous): writing
+// to a signed executable page needs dynamic-codesigning. So inject_menu.py
+// patches each cheat getter to `b <stub>` where stubs live in a __TEXT-tail
+// code cave and read a flag from the dead bss page at uf_base+FLAG_RVA.
+// Toggling = writing a byte/float here — a plain data write, always legal.
+#define FLAG_RVA 0x46DF528
+static uint8_t *flag_base(void) {
+    uintptr_t b = uf_base();
+    return b ? (uint8_t *)(b + FLAG_RVA) : NULL;
+}
+
+typedef struct { const char *name; uint32_t off; BOOL isf; float on, offv; } tog_t;
+static const tog_t g_togs[] = {
+    {"God Mode",       0, NO,  1, 0},
+    {"Immune (Equip)", 1, NO,  1, 0},
+    {"Catch Rate",     4, YES, 5.0f, 1.0f},
+    {"Sell Value",     8, YES, 4.0f, 1.0f},
+};
+#define NTOGS 4
+static BOOL g_state[NTOGS] = {NO, NO, YES, YES};   // catch/sell on by default
+static BOOL g_flags_init = NO;
+
+static void flag_apply(int i) {
+    uint8_t *f = flag_base();
+    if (!f) return;
+    if (g_togs[i].isf) *(float *)(f + g_togs[i].off) = g_state[i] ? g_togs[i].on : g_togs[i].offv;
+    else               f[g_togs[i].off] = g_state[i] ? 1 : 0;
+}
+static void flags_write(void) { for (int i = 0; i < NTOGS; i++) flag_apply(i); }
+
+static void state_persist(void) {
+    [[NSUserDefaults standardUserDefaults] setObject:
+        @[@(g_state[0]), @(g_state[1]), @(g_state[2]), @(g_state[3])]
+        forKey:@"dre_toggles"];
+}
+static void state_restore(void) {
+    NSArray *a = [[NSUserDefaults standardUserDefaults] objectForKey:@"dre_toggles"];
+    if (a.count == NTOGS) for (int i = 0; i < NTOGS; i++) g_state[i] = [a[i] boolValue];
+}
+
 #pragma mark - Command dictionary enumeration
 
 // Terminal.Shell.Commands -> Dictionary<string,CommandInfo>
@@ -115,13 +157,9 @@ static NSArray<NSDictionary *> *enum_commands(void) {
     return out.count ? out : nil;
 }
 
-// NOTE: runtime byte-patching was removed entirely — under normal dev signing
-// (Signulous), writing to a signed executable page requires the
-// dynamic-codesigning entitlement and the kernel kills the app on the write.
-// All cheats are static patches baked by tools/inject_menu.py:
-//   full game, all DLC, free research, catch rate x5, sell value x4.
-// God Mode / Immune Mode toggle via the game's own SetGodMode/SetImmuneMode
-// terminal commands in the list below.
+// NOTE: the Toggles section writes flag bytes/floats into the bss slot the
+// patched stubs read (see flag machinery above) — real on/off with zero
+// runtime code writes. "Active Patches" are always-on static bakes.
 
 #pragma mark - UI
 
@@ -189,11 +227,30 @@ static void anchor_view_reset(UIView *v) {
     CGFloat y = 4;
     CGFloat bw = (w - 10) / 2;
 
-    // Always-on static patches baked into UnityFramework (not toggles — see
-    // note above about dev signing). Shown for visibility only.
+    // Real toggles — flag writes into the bss slot the patched stubs read.
+    y = [self section:@"Toggles" y:y];
+    {
+        int col = 0; CGFloat x = 0;
+        for (int i = 0; i < NTOGS; i++) {
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+            b.frame = CGRectMake(x, y, bw, 36);
+            b.layer.cornerRadius = 9;
+            b.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+            b.showsTouchWhenHighlighted = YES;
+            b.tag = 3000 + i;
+            [self paintTog:b];
+            [b addTarget:self action:@selector(toggleBtn:) forControlEvents:UIControlEventTouchUpInside];
+            [_scroll addSubview:b];
+            col = (col + 1) % 2; x = col ? bw + 10 : 0;
+            if (!col) y += 42;
+        }
+        if (col) y += 42;
+        y += 4;
+    }
+
+    // Always-on static patches baked into UnityFramework — shown for visibility.
     y = [self section:@"Active Patches" y:y];
-    NSArray *baked = @[@"Full game unlocked", @"All DLC owned",
-                       @"Free research", @"Catch rate ×5", @"Sell value ×4"];
+    NSArray *baked = @[@"Full game unlocked", @"All DLC owned", @"Free research"];
     for (NSString *t in baked) {
         UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(4, y, w - 8, 20)];
         l.text = [NSString stringWithFormat:@"●  %@", t];
@@ -295,6 +352,25 @@ static void anchor_view_reset(UIView *v) {
         c[@"name"], c[@"min"], c[@"max"], c[@"help"] ?: @""];
     [b addTarget:self action:@selector(runCmdBtn:) forControlEvents:UIControlEventTouchUpInside];
     [_scroll addSubview:b];
+}
+
+- (void)paintTog:(UIButton *)b {
+    int i = (int)b.tag - 3000;
+    BOOL on = g_state[i];
+    b.backgroundColor = on ? [UIColor colorWithRed:0.15 green:0.55 blue:0.3 alpha:1]
+                           : [UIColor colorWithWhite:0.28 alpha:1];
+    [b setTitle:[NSString stringWithFormat:@"%s %@", g_togs[i].name, on ? @"ON" : @"OFF"]
+       forState:UIControlStateNormal];
+    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+}
+
+- (void)toggleBtn:(UIButton *)b {
+    int i = (int)b.tag - 3000;
+    g_state[i] = !g_state[i];
+    flag_apply(i);
+    state_persist();
+    [self paintTog:b];
+    [self toast:[NSString stringWithFormat:@"%s %@", g_togs[i].name, g_state[i] ? "ON" : "OFF"]];
 }
 
 // Commands that do irreversible things get a confirm first (forgiveness
@@ -612,6 +688,13 @@ static void make_handle(void) {
 #pragma mark - bootstrap
 
 static void poll_ready(void) {
+    // Write toggle flags as soon as UnityFramework is mapped — the stubs can
+    // be hit by game code long before the menu/shell is ready.
+    if (uf_base() && !g_flags_init) {
+        g_flags_init = YES;
+        state_restore();
+        flags_write();
+    }
     // poll on MAIN thread: g_shell() runs il2cpp code -> needs a GC-registered thread.
     if (uf_base() && g_shell() && find_scene()) { make_handle(); return; }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -620,6 +703,9 @@ static void poll_ready(void) {
 
 __attribute__((constructor))
 static void dre_init(void) {
+    // If UnityFramework is already mapped (load-time dependency), write flags
+    // now — before any game code can hit the stubs and read zero flags.
+    if (uf_base()) { g_flags_init = YES; state_restore(); flags_write(); }
     dispatch_async(dispatch_get_main_queue(), ^{
         poll_ready();
         // re-attach on foregrounding in case scene changed

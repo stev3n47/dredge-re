@@ -76,13 +76,62 @@ def main():
     exe = inject_dylib_cmd(zin.read(exe_path), '@executable_path/Frameworks/DREMenu.framework/DREMenu')
     dyb = open(dylib, 'rb').read()
 
-    # Static patches — ALWAYS applied here so every build carries them
-    # (raw stock input is now safe to feed the injector).
-    #   TrialModeManager.get_IsInTrialMode   0x12948BC -> mov w0,#0; ret
-    #   EntitlementManager.GetHasEntitlement 0x13E358C -> mov w0,#1; ret
+    # Static patches — ALWAYS applied here so every build carries them.
+    # Runtime patching is impossible under dev/Signulous signing: writing to a
+    # signed executable page needs dynamic-codesigning (TrollStore-only) and
+    # the kernel kills the app — so every cheat is baked in statically.
+    #
+    # Data-flag toggles (iOSGods' mechanism): the four cheat getters are only
+    # 8-byte functions packed back-to-back, so they can't hold a multi-instr
+    # flag read in place. Instead each gets `b <stub>` where stubs live in a
+    # code cave — the all-zero RX padding at __TEXT tail (0x3E46D40..0x3E48000).
+    # Each stub reads a flag from __DATA zerofill page 0x46DF000 (verified:
+    # zero adrp references to that page in stock code; iOSGods used slot
+    # 0x46DF528 there for the same reason). Flag storage at uf_base+0x46DF528:
+    #   +0 u8 God Mode (Player.get_IsGodModeEnabled)
+    #   +1 u8 Immune   (Player.get_IsImmuneModeEnabled)
+    #   +4 f32 Catch   (DeployableItemData.get_CatchRate)       on=5.0 off=1.0
+    #   +8 f32 Sell    (MarketDestination.get_SellValueModifier) on=4.0 off=1.0
+    # The menu writes these at runtime — a plain data write, legal under any
+    # signature. OFF restores true stock semantics for the bool toggles.
+    SLOT = 0x46DF528
+    CAVE = 0x3E46D40
+    def adrp(rd, pc_va, tgt_page):
+        imm = (((tgt_page & ~0xFFF) - (pc_va & ~0xFFF)) >> 12) & 0x1FFFFF
+        return 0x90000000 | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5) | rd
+    def ldrb(rt, rn, off):
+        return 0x39400000 | ((off & 0xFFF) << 10) | (rn << 5) | rt
+    def ldr_s(rt, rn, off):
+        return 0xBD400000 | (((off >> 2) & 0xFFF) << 10) | (rn << 5) | rt
+    def b(pc_va, tgt_va):
+        return 0x14000000 | (((tgt_va - pc_va) >> 2) & 0x3FFFFFF)
+    RET = 0xD65F03C0
+    def w32s(*words): return b''.join(struct.pack('<I', w) for w in words)
+
     uf = bytearray(zin.read(uf_path))
-    uf[0x12948BC:0x12948BC+8] = bytes.fromhex('00008052c0035fd6')
-    uf[0x13E358C:0x13E358C+8] = bytes.fromhex('20008052c0035fd6')
+    # code cave: four stubs, 12 bytes each
+    stubs = b''.join([
+        w32s(adrp(9, CAVE + 0x00, SLOT), ldrb(0, 9, 0x528), RET),      # god
+        w32s(adrp(9, CAVE + 0x0C, SLOT), ldrb(0, 9, 0x529), RET),      # immune
+        w32s(adrp(9, CAVE + 0x18, SLOT), ldr_s(0, 9, 0x52C), RET),     # catch
+        w32s(adrp(9, CAVE + 0x24, SLOT), ldr_s(0, 9, 0x530), RET),     # sell
+    ])
+    uf[CAVE:CAVE + len(stubs)] = stubs
+
+    patches = [
+        # always-on: full game, all DLC, free research
+        (0x12948BC, w32s(0x52800000, RET)),                       # trial -> 0
+        (0x13E358C, w32s(0x52800020, RET)),                       # entitlement -> 1
+        (0x134C5B8, w32s(0x52800000, RET)),                       # research -> 0
+        # toggle getters -> branch to flag-reading stubs (original `ret` at +4
+        # is left intact and simply unreachable)
+        (0x125E7EC, w32s(b(0x125E7EC, CAVE + 0x00))),             # god
+        (0x125E7FC, w32s(b(0x125E7FC, CAVE + 0x0C))),             # immune
+        (0x134BEAC, w32s(b(0x134BEAC, CAVE + 0x18))),             # catch
+        (0x13C07E4, w32s(b(0x13C07E4, CAVE + 0x24))),             # sell
+    ]
+    for off, blob in patches:
+        uf[off:off+len(blob)] = blob
     uf = bytes(uf)
 
     fw_info = plistlib.dumps({
