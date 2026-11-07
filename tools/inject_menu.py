@@ -159,10 +159,15 @@ def main():
     ITEMEVAL, UPGGATE = 0x127A194, 0x1420C60
     UPG_FREE, UPG_PAY = 0x1420CC4, 0x1420C64     # tbnz target / fallthrough
     #   flag+3 (same Fish Quality flag) also hooks CreateFishItem entry:
-    #   on -> w2=FORCE(2) aberration, w4=FORCE_BIG_TROPHY(2) size mode so
-    #   caught fish are genuinely mutant trophies, not just repriced.
-    #   Species without aberrants safely fall back to normal.
+    #   on -> w2=FORCE(2) aberration (FORBID callers kept for quest fish),
+    #   w4=FORCE_BIG_TROPHY(2) always — "Fish Quality" means mutant trophies.
+    #   AND two internal bail-outs are bypassed: the SaveData progression
+    #   gates CanCatchAberrations (cbz @0x14072B4) and GetCaughtCountById
+    #   (b.lt @0x1407300, NZCV replayed via local b.ge). Without these the
+    #   forced modes still exit to the normal path on fresh saves.
     CREATE_FISH = 0x1407040
+    ABERRGATE1, ABERRGATE2 = 0x14072B4, 0x1407300
+    ABERR_BAIL, ABERR_CONT1, ABERR_CONT2 = 0x1407D70, 0x14072B8, 0x1407304
     #   flag+9 Free Research: SpendResearchItem entry -> w0=1. The old
     #   ResearchPointsRequired bake was dead code (inlined getter, zero
     #   bl callers) — this is the live spend seam (2 real callers, both
@@ -255,20 +260,18 @@ def main():
         ldp_x(9, 10, 16),                        # on path: restore
         b(S6 + 0x24, UPG_FREE),
     )
-    # stub7 — CreateFishItem entry: flag on -> upgrade *random* modes only:
-    # w2==RANDOM_CHANCE(0) -> FORCE(2) aberration; w4==ANY(0) ->
-    # FORCE_BIG_TROPHY(2). Callers that deliberately pass FORBID (quest
-    # fish) or a set size mode keep their choice.
+    # stub7 — CreateFishItem entry: flag on -> w2==RANDOM_CHANCE(0) ->
+    # FORCE(2) aberration (explicit FORBID kept for quest fish); w4 ->
+    # FORCE_BIG_TROPHY(2) unconditionally (size has no story-critical caller).
     S7 = S6 + len(stub6)
     stub7 = w32s(
         adrp(9, S7 + 0x00, SLOT), ldrb(9, 9, 0x52B),
-        cbz(9, 5),                               # flag off -> original args
+        cbz(9, 4),                               # flag off -> original args
         cbnz(2, 2),                              # w2 set already -> keep it
         0x52800042,                              # mov w2,#2  FORCE aberration
-        cbnz(4, 2),                              # w4 set already -> keep it
         0x52800044,                              # mov w4,#2  FORCE_BIG_TROPHY
         orig(CREATE_FISH),                       # sub sp,sp,#0xf0
-        b(S7 + 0x20, CREATE_FISH + 4),
+        b(S7 + 0x1C, CREATE_FISH + 4),
     )
     # stub8 — SpendResearchItem entry: flag on -> w0=1 (part spends free).
     S8 = S7 + len(stub7)
@@ -280,8 +283,38 @@ def main():
         0x52800020,                              # mov w0,#1
         RET,
     )
-    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6) + len(stub7) + len(stub8)] \
-        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6 + stub7 + stub8
+    # stub9 — CreateFishItem CanCatchAberrations bail (`cbz w0`) — the save
+    # progression gate. Forcing w2=2 upstream still exits to the normal path
+    # here on any save that hasn't unlocked aberrations. Flag+3 on -> skip
+    # the bail; off -> replay cbz (w0!=0 -> continue, else bail).
+    S9 = S8 + len(stub8)
+    stub9 = w32s(
+        stp_x(9, 10, -16),
+        adrp(9, S9 + 0x04, SLOT), ldrb(10, 9, 0x52B),
+        ldp_x(9, 10, 16),
+        cbz(10, 2),                              # flag off -> replay orig
+        b(S9 + 0x14, ABERR_CONT1),               # flag on -> continue past cbz
+        cbnz(0, 2),                              # w0!=0 -> continue
+        b(S9 + 0x1C, ABERR_BAIL),                # w0==0 -> original bail
+        b(S9 + 0x20, ABERR_CONT1),               # continue
+    )
+    # stub10 — CreateFishItem GetCaughtCountById bail (`b.lt`) — second save
+    # gate: aberrations only spawn for species already caught once. NZCV is
+    # live from `cmp w0,#1`; adrp/ldrb/stp/ldp don't touch it, so the off
+    # path replays b.lt as a local b.ge (b.cond can't reach back ~46MB).
+    S10 = S9 + len(stub9)
+    stub10 = w32s(
+        stp_x(9, 10, -16),
+        adrp(9, S10 + 0x04, SLOT), ldrb(10, 9, 0x52B),
+        ldp_x(9, 10, 16),
+        cbz(10, 2),                              # flag off -> replay b.lt
+        b(S10 + 0x14, ABERR_CONT2),              # flag on -> skip bail
+        bcond(0xA, 2),                           # b.ge -> continue (b.lt inverted)
+        b(S10 + 0x1C, ABERR_BAIL),               # lt -> original bail
+        b(S10 + 0x20, ABERR_CONT2),              # ge -> continue
+    )
+    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6) + len(stub7) + len(stub8) + len(stub9) + len(stub10)] \
+        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6 + stub7 + stub8 + stub9 + stub10
 
     patches = [
         # always-on: full game, all DLC (research-points getter baked too —
@@ -299,6 +332,8 @@ def main():
         (UPGGATE,   w32s(b(UPGGATE, S6))),
         (CREATE_FISH, w32s(b(CREATE_FISH, S7))),
         (SPEND_RESEARCH, w32s(b(SPEND_RESEARCH, S8))),
+        (ABERRGATE1, w32s(b(ABERRGATE1, S9))),
+        (ABERRGATE2, w32s(b(ABERRGATE2, S10))),
     ]
     for off, blob in patches:
         uf[off:off+len(blob)] = blob

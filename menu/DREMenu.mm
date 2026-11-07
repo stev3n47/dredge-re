@@ -82,8 +82,8 @@ typedef struct {
     const char *cmd;       // TOG_CMD: command name (1/0 arg if it takes one)
 } tog_t;
 static const tog_t g_togs[] = {
-    {"God Mode",       "shield.fill",                     TOG_CMD,  0, "SetGodMode"},
-    {"Immune (Equip)", "checkmark.shield.fill",           TOG_CMD,  0, "SetImmuneMode"},
+    {"God Mode",       "shield.fill",                     TOG_CMD,  0, "player.god"},
+    {"Immune (Equip)", "checkmark.shield.fill",           TOG_CMD,  0, "player.immune"},
     {"Sell Value",     "dollarsign.circle.fill",          TOG_FLAG, 0, NULL},
     {"Pot Auto-Catch", "fish.fill",                       TOG_FLAG, 1, NULL},
     {"No Overheat",    "flame.fill",                      TOG_FLAG, 2, NULL},
@@ -453,13 +453,11 @@ static void anchor_view_reset(UIView *v) {
     if (visible.count) {
         // Curated favorites are the default view; everything else hides
         // behind a "See All" disclosure in the section header.
-        NSArray *fav = @[@"SetGodMode", @"godmode", @"SetImmuneMode", @"ToggleIcebreaker",
-                         @"SetSanity", @"SetMaxSpeed", @"SetPlayerBaseMoveSpeed", @"SetPlayerBaseTurnSpeed",
-                         @"TeleportPlayerToHarvestSpot", @"RestockHarvestSpot", @"DepleteHarvestSpots",
-                         @"DebugAddItem", @"DebugAddItemInventory", @"DebugAddItemNet",
-                         @"DebugAddItemStorage", @"DebugAddItemOverflowStorage", @"DebugAddAllCabinItems",
-                         @"DebugUnlockAbility", @"DebugSetGameAsPurchased", @"SetAllDLC",
-                         @"ListDestinations", @"UnlockDestination", @"Die"];
+        NSArray *fav = @[@"player.god", @"player.immune", @"icebreaker", @"player.move",
+                         @"money.add", @"catch", @"item.add", @"item.list",
+                         @"tp", @"restock", @"repair", @"aberrate",
+                         @"ability.add", @"upgrade.list", @"time.stop", @"time.start",
+                         @"weather.set", @"ency.all", @"ooze.clearall", @"player.die"];
         int col = 0; CGFloat x = 0;
         if (!q.length) {
             CGFloat hy = y;
@@ -648,15 +646,10 @@ static BOOL destructive_cmd(NSString *cmd);   // fwd — defined below
     const tog_t *t = &g_togs[i];
     dre_tick();
     if (t->kind == TOG_CMD) {
-        // Look up the command's arg contract: if it takes an arg send 1/0,
-        // else fire it bare (it's a flip-flop internally). Bool parses 1/0.
-        if (!g_cmds) g_cmds = enum_commands();
-        NSDictionary *c = [self cmdNamed:@(t->cmd) in:g_cmds];
-        NSString *line = @(t->cmd);
-        BOOL want = !g_state[i];
-        if (c && [c[@"max"] intValue] > 0)
-            line = [NSString stringWithFormat:@"%s %d", t->cmd, want ? 1 : 0];
-        run_cmd(line.UTF8String);
+        // player.god / player.immune take a required 0|1 int arg — the
+        // method throws without one. Names are the registered dotted
+        // commands (SetGodMode is just the C# method name).
+        run_cmd(([NSString stringWithFormat:@"%s %d", t->cmd, !g_state[i] ? 1 : 0]).UTF8String);
     }
     g_state[i] = !g_state[i];
     flag_apply(i);
@@ -708,7 +701,11 @@ static BOOL destructive_cmd(NSString *cmd);   // fwd — defined below
 static BOOL destructive_cmd(NSString *cmd) {
     static NSSet *d = nil;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ d = [NSSet setWithArray:@[@"Die", @"DepleteHarvestSpots"]]; });
+    dispatch_once(&once, ^{ d = [NSSet setWithArray:@[@"player.die", @"DepleteHarvestSpots",
+        @"damage", @"infect", @"item.remove", @"world.event",
+        @"ach.clear", @"ach.final", @"ach.set", @"trial.enable",
+        @"ency.all", @"ency.most", @"ency.most.dlc1", @"ency.most.dlc2",
+        @"func.savebad", @"func.savecrash", @"debt.pay"]]; });
     return [d containsObject:cmd];
 }
 
