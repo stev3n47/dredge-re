@@ -180,6 +180,19 @@ Device ruled out: iOSGods IPA installs on the same iPhone 17 Pro Max / iOS 26.2 
 
 - `v1.5.19-base-v10` — control build: base-v10 packaging with NO dylib/menu. Installs ⇒ dylib confirmed as blocker.
 - `v1.5.19-menu-v10f` — v10 with `DREMenu` packaged as `Frameworks/DREMenu.framework/DREMenu` (+Info.plist), mimicking iGameGod's layout. **Tested: still "Unable to install" via Signulous on iPhone.**
+
+### Bisection results (iPhone 17 Pro Max / iOS 26.2, Signulous)
+
+| Build | Result |
+|---|---|
+| `v1.0.12-mod-repack` (iOSGods IPA through OUR writer) | **INSTALLS** → writer/container fine |
+| `v1.5.19-stock-repack` (v1 zip64 container) | FAILS |
+| `v1.5.19-stock-repack-v2` (canonical container) | FAILS → not the container either |
+| `v1.5.19-stock-raw` (untouched decrypt) | FAILS → stock IPA content is guilty |
+| `v1.0.12-hybrid-mod-stockuf` (mod + stock UnityFramework) | **INSTALLS** → stock UF exonerated |
+| `v1.0.12-hybrid-mod-stockres` (mod + stock Assets.car/strings/Info.plist) | testing |
+
+Content delta between working (mod) and failing (stock) after bisection: `Assets.car` (143 KB vs 1 MB — prime suspect, iOS validates icon catalog at install), `Info.plist` format (XML vs bplist — valid both ways), 13× `InfoPlist.strings` (verified clean — stock just adds `CFBundleDisplayName`), `DREDGE` stub (verified clean — only the iGameGod cmd + resig), 2 small framework binaries (code identical, sig-only diffs), `_CodeSignature/CodeResources` files.
 - `v1.5.19-menu-v10g` — signing-shape match attempt: keeps stock `_CodeSignature/CodeResources` dirs (mod IPA ships them — ours previously stripped them); `LC_LOAD_DYLIB` inserted *before* `LC_CODE_SIGNATURE`; `DREMenu` signed with a real self-signed CMS cert (~1.7 KB blob) instead of ad-hoc stub; `-Wl,-no_fixup_chains` for legacy signer compat. Verified locally: real CMS superblob, no chained fixups, correct command order.
 - `v1.5.19-stock-repack` — pure control: decrypted stock IPA through our zip pipeline with **zero content changes** (211 entries, identical bytes). If even this fails on the iPhone, our zip writer is guilty, not the dylib/patches.
 
