@@ -39,8 +39,22 @@ jobs:
           file CXMenu
           otool -L CXMenu
           codesign -dv CXMenu 2>&1 | head -5
+      - name: Compile stub dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 -dynamiclib \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=15.0 \
+            -Wl,-no_fixup_chains \
+            -install_name '@executable_path/Frameworks/StubDylib.dylib' \
+            -o StubDylib next-game/StubDylib.c
+          codesign --force --sign "CXMenu" StubDylib
+          file StubDylib
+          otool -L StubDylib
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CXMenu
-          path: CXMenu
+          path: |
+            CXMenu
+            StubDylib

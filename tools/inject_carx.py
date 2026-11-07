@@ -13,8 +13,12 @@
 - Bakes the resource-seam patch into UnityFramework (see stub notes below)
 - Repackages the IPA preserving exec bits and zip layout
 
-Usage: inject_carx.py <input.ipa> <CXMenu dylib> <out.ipa>
-"""
+Usage: inject_carx.py <input.ipa> <CXMenu dylib> <out.ipa> [stub dylib]
+
+With a stub dylib argument, the iOSGods load commands are left untouched
+and the stub is written to their file paths instead — the dep graph then
+contains real loadable images (zero-init stubs) rather than defunct
+weak-missing entries. Without it, the LCs are excised (v3 behavior).
 import sys, struct, zipfile, os, plistlib
 
 LC_LOAD_DYLIB      = 0xC
@@ -105,12 +109,16 @@ def main():
     exe = bytearray(zin.read(exe_path))
     dyb = open(dylib, 'rb').read()
 
-    # iOSGods payload removal: excise the loads, drop the files.
-    n = remove_load(exe, b'iGameGod');   assert n == 1, f'exe iGameGod LC x{n}'
+    stub = open(sys.argv[4], 'rb').read() if len(sys.argv) > 4 else None
+
+    if stub is None:
+        # iOSGods payload removal: excise the loads, drop the files.
+        n = remove_load(exe, b'iGameGod');   assert n == 1, f'exe iGameGod LC x{n}'
     exe = inject_dylib_cmd(bytes(exe), '@executable_path/Frameworks/CXMenu.framework/CXMenu')
 
     uf = bytearray(zin.read(uf_path))
-    n = remove_load(uf, b'libcarx');     assert n == 1, f'uf libcarx LC x{n}'
+    if stub is None:
+        n = remove_load(uf, b'libcarx');     assert n == 1, f'uf libcarx LC x{n}'
     orig = lambda va: struct.unpack('<I', uf[va:va+4])[0]
 
     # ---- encoders ---------------------------------------------------------
@@ -263,6 +271,21 @@ def main():
     emit(macho_zinfo(fw_path), dyb)
     emit(file_zinfo(fw_plist), fw_info)
     emit(file_zinfo(info_path), info_bytes)
+    if stub is not None:
+        # Neutral stub images at the original iOSGods paths — real loadable
+        # files so no defunct weak images remain in the dep graph.
+        emit(macho_zinfo(f'{app}/Frameworks/libcarx.dylib'), stub)
+        emit(macho_zinfo(f'{app}/Frameworks/iGameGod.framework/iGameGod'), stub)
+        igg_plist = plistlib.dumps({
+            'CFBundleExecutable': 'iGameGod',
+            'CFBundleIdentifier': 'com.stub.igamegod',
+            'CFBundleInfoDictionaryVersion': '6.0',
+            'CFBundleName': 'iGameGod',
+            'CFBundlePackageType': 'FMWK',
+            'CFBundleShortVersionString': '1.0',
+            'CFBundleSupportedPlatforms': ['iPhoneOS'],
+        }, fmt=plistlib.FMT_BINARY)
+        emit(file_zinfo(f'{app}/Frameworks/iGameGod.framework/Info.plist'), igg_plist)
     zout.close(); zin.close()
 
     z = zipfile.ZipFile(out)
