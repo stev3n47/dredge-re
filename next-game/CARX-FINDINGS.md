@@ -13,12 +13,24 @@ dyld skips the now-absent files), independent `CXMenu.framework` injected.
   UnityFramework, embeds `CXMenu.framework`, repackages.
 - `next-game/CXMenu.mm` — menu dylib (same design system as DREMenu: floating
   dot, material panel, spring/haptic feedback). Writes flag bytes only.
-- Flag page: UnityFramework `__data` dead run at **0x7658720** (0x1540 bytes
-  of file-backed zeros, zero pointer xrefs — NOT 0x771A000, that's
-  `__swift_hooks` and live).
-- Code cave: `__TEXT` zero run at **0x6150690** (0x2130 bytes).
+- Flag page: `__DATA` segment-tail padding at **0x7B47000** — `__common`
+  ends 0x7B44F40, segment maps to 0x7B48000; file-backed data ends
+  0x771C000 so the tail is mapped zero-fill (writable, unreferenced).
+- Code cave: `__TEXT` segment-tail padding at **0x69974D0** — ~0xB30 bytes
+  before vend 0x6998000, zero branch/pointer xrefs.
 
-## Flag layout (uf_base + 0x7658720)
+⚠️ **Cave-selection lesson (v1 launch crash):** zero runs INSIDE live
+sections are real data, not padding. The v1 cave (0x6150690) sat in
+`__TEXT.__const` — its "zeros" were live const data; overwriting them made
+dyld's initializer walk call a null pointer (CODESIGNING "Invalid Page",
+pc=0 in `forEachInitializer`). `__data`/`__bss`/`__common` interior runs
+have the same problem (0x7658720 was inside `__data`; 0x771A000 is
+`__swift_hooks`). Only SEGMENT-TAIL padding — after the last section but
+inside the mapped segment — is provably dead. Also note unsectioned code
+can exist between the last declared section and the nonzero tail
+(0x6994010–0x69974C3 holds real ARM64 code with no owning section).
+
+## Flag layout (uf_base + 0x7B47000)
 
 | Off | Type | Meaning |
 |-----|------|---------|
@@ -46,7 +58,7 @@ factor (`w22`) is `+1` on earns, `-1` on spends (`cneg` from the `add` bool
 in `AddResources` @0x283D4A4 — called by `RewardsResultDelta..ctor`
 @0x286828C, the race-end reward pipeline).
 
-Stub at 0x6150690 (site `b` at 0x283D660):
+Stub at 0x69974D0 (site `b` at 0x283D660):
 
 - flag+0 && factor>0 → `madd w23, w8, w10, w23` with w10 = i32 from flag+4
   → earns pay `delta × mult`.
