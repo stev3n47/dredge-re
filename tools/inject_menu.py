@@ -127,9 +127,13 @@ def main():
         zi.external_attr = exec_bit << 16
         return zi
     def macho_zinfo(name):
-        return norm(zipfile.ZipInfo(name), 0o100755)
+        zi = norm(zipfile.ZipInfo(name), 0o100755)
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        return zi
     def file_zinfo(name):
-        return norm(zipfile.ZipInfo(name), 0o100644)
+        zi = norm(zipfile.ZipInfo(name), 0o100644)
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        return zi
 
     zout = zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED)
     dirs_seen = set()
