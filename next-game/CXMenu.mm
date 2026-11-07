@@ -32,11 +32,11 @@ static uintptr_t uf_base(void) {
 
 // Same signing constraint as DREDGE: runtime code patching needs
 // dynamic-codesigning (TrollStore-only). inject_carx.py bakes a `b <stub>`
-// at the AddResource madd site — the stub lives in a __TEXT code cave
-// (0x6150690) and reads flag bytes from a dead __data page at
-// uf_base+FLAG_RVA (0x7658720: file-backed zeros, zero xrefs).
+// at the AddResource madd site — the stub lives in __TEXT segment-tail
+// page padding (0x69974D0) and reads flag bytes from __DATA segment-tail
+// padding at uf_base+FLAG_RVA (past __common, mapped zero-fill, no xrefs).
 // Toggling = writing a byte — always legal.
-#define FLAG_RVA 0x7658720
+#define FLAG_RVA 0x7B47000
 static uint8_t *flag_base(void) {
     uintptr_t b = uf_base();
     return b ? (uint8_t *)(b + FLAG_RVA) : NULL;

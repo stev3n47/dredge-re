@@ -125,7 +125,14 @@ def main():
     #   flag+0 Cash Boost: earns (factor>0) use i32 multiplier at flag+4
     #   flag+1 Free Purchases: spends (factor<0) skip the madd — w23 keeps
     #     `balance`, so the store writes the unchanged balance back.
-    SITE, CAVE, SLOT = 0x283D660, 0x6150690, 0x7658720
+    #
+    # Cave/flag safety: zero runs INSIDE live sections are real data —
+    # the first cave pick (0x6150690 in __TEXT.__const) crashed dyld's
+    # initializer walk (null fn ptr call, CODESIGNING Invalid Page). The
+    # only provably dead space is SEGMENT-TAIL page padding: bytes past the
+    # last section but inside the mapped segment — never addressed by
+    # section machinery, zero branch/pointer xrefs (verified).
+    SITE, CAVE, SLOT = 0x283D660, 0x69974D0, 0x7B47000
     SB = CAVE
     stub = w32s(
         stp_x(9, 10, -16),                        # +0x00 save scratch
@@ -145,7 +152,7 @@ def main():
         ldp_x(9, 10, 16),                         # +0x38 restore
         b(SB+0x3C, SITE + 4),                     # +0x3C return
     )
-    assert len(stub) <= 0x2130
+    assert len(stub) <= (0x6998000 - CAVE)
     assert orig(SITE) == madd(23, 8, 22, 23), f'site word {orig(SITE):08x}'
     assert uf[CAVE:CAVE+len(stub)] == b'\x00' * len(stub), 'cave not empty'
     uf[CAVE:CAVE+len(stub)] = stub
