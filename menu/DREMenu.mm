@@ -5,6 +5,7 @@
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
 #import <string.h>
@@ -259,7 +260,7 @@ static void anchor_view_reset(UIView *v) {
                                    v.bounds.size.height / 2);
 }
 
-@interface DREPanel : UIViewController <UITextFieldDelegate>
+@interface DREPanel : UIViewController <UITextFieldDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, weak) UIWindow *win;
 @end
 
@@ -268,6 +269,8 @@ static void anchor_view_reset(UIView *v) {
     UITextField *_search;
     UILabel *_sub;           // "N active" subtitle
     UIVisualEffectView *_bg;
+    BOOL _showAll;           // See All disclosure on the command list
+    CGFloat _lastW;          // rebuild chip layout when scroll width changes
 }
 
 - (void)viewDidLoad {
@@ -358,9 +361,15 @@ static void anchor_view_reset(UIView *v) {
     // Explicit path so the shadow renders even though the root view is clear.
     self.view.layer.shadowPath = [UIBezierPath
         bezierPathWithRoundedRect:self.view.bounds cornerRadius:20].CGPath;
+    // Chips are laid out manually — rebuild when the scroll width settles or
+    // changes (first layout may differ from viewDidLoad's default bounds,
+    // and rotation resizes the panel).
+    CGFloat w = _scroll.bounds.size.width;
+    if (w > 0 && fabs(w - _lastW) > 0.5) { _lastW = w; [self buildButtons]; }
 }
 
 - (void)buildButtons {
+    CGPoint off = _scroll.contentOffset;   // rebuilds clear the scroll — keep position
     for (UIView *v in _scroll.subviews) [v removeFromSuperview];
     CGFloat w = _scroll.bounds.size.width;
     if (w <= 0) w = self.view.bounds.size.width - 24;
@@ -408,8 +417,8 @@ static void anchor_view_reset(UIView *v) {
             return [((NSString *)d[@"name"]).lowercaseString containsString:q];
         }]] : cmds;
     if (visible.count) {
-        y = [self section:@"Commands" icon:@"terminal.fill" y:y];
-        // Curated favorites first (skipped while filtering), then the rest.
+        // Curated favorites are the default view; everything else hides
+        // behind a "See All" disclosure in the section header.
         NSArray *fav = @[@"SetGodMode", @"godmode", @"SetImmuneMode", @"ToggleIcebreaker",
                          @"SetSanity", @"SetMaxSpeed", @"SetPlayerBaseMoveSpeed", @"SetPlayerBaseTurnSpeed",
                          @"TeleportPlayerToHarvestSpot", @"RestockHarvestSpot", @"DepleteHarvestSpots",
@@ -419,6 +428,11 @@ static void anchor_view_reset(UIView *v) {
                          @"ListDestinations", @"UnlockDestination", @"Die"];
         int col = 0; CGFloat x = 0;
         if (!q.length) {
+            CGFloat hy = y;
+            y = [self section:@"Commands" icon:@"terminal.fill" y:y];
+            if (!_showAll)
+                [self textBtn:[NSString stringWithFormat:@"See All (%d)", (int)cmds.count]
+                         atY:hy sel:@selector(toggleAll:) w:w];
             for (NSString *n in fav) {
                 NSDictionary *c = [self cmdNamed:n in:visible];
                 if (!c) continue;
@@ -427,16 +441,29 @@ static void anchor_view_reset(UIView *v) {
                 if (!col) y += 46;
             }
             if (col) y += 46;
-            y = [self section:@"All Commands" y:y];
-            col = 0; x = 0;
+            if (_showAll) {
+                CGFloat ay = y;
+                y = [self section:@"All Commands" icon:@"list.bullet" y:y];
+                [self textBtn:@"Show Less" atY:ay sel:@selector(toggleAll:) w:w];
+                col = 0; x = 0;
+                for (NSDictionary *c in visible) {
+                    if ([fav containsObject:c[@"name"]]) continue;
+                    [self cmdBtn:c x:x y:y w:bw];
+                    col = (col + 1) % 2; x = col ? bw + 10 : 0;
+                    if (!col) y += 46;
+                }
+                if (col) y += 46;
+            }
+        } else {
+            // filtering — flat result list, favorites split is skipped
+            y = [self section:@"Commands" icon:@"terminal.fill" y:y];
+            for (NSDictionary *c in visible) {
+                [self cmdBtn:c x:x y:y w:bw];
+                col = (col + 1) % 2; x = col ? bw + 10 : 0;
+                if (!col) y += 46;
+            }
+            if (col) y += 46;
         }
-        for (NSDictionary *c in visible) {
-            if (!q.length && [fav containsObject:c[@"name"]]) continue;
-            [self cmdBtn:c x:x y:y w:bw];
-            col = (col + 1) % 2; x = col ? bw + 10 : 0;
-            if (!col) y += 46;
-        }
-        if (col) y += 46;
     } else if (!cmds.count) {
         // fallback: static guesses if enumeration fails
         y = [self section:@"Commands (guess)" y:y];
@@ -450,29 +477,26 @@ static void anchor_view_reset(UIView *v) {
         }
         if (col) y += 46;
     } else {
-        y = [self section:@"No matches" y:y];
+        y = [self section:@"No matches" icon:@"magnifyingglass" y:y];
         y += 6;
     }
 
     y = [self section:@"Save" icon:@"internaldrive" y:y];
-    {
-        DREButton *b = [DREButton buttonWithType:UIButtonTypeCustom];
-        b.frame = CGRectMake(0, y, bw, 40);
-        b.backgroundColor = [UIColor colorWithRed:0.5 green:0.3 blue:0.1 alpha:0.9];
-        b.layer.cornerRadius = DRE_RADIUS;
-        b.layer.cornerCurve = kCACornerCurveContinuous;
-        [b setTitle:@"  Restore Save" forState:UIControlStateNormal];
-        [b setImage:dre_symbol(@"arrow.down.doc.fill", 13, UIImageSymbolWeightMedium) forState:UIControlStateNormal];
-        b.tintColor = DRE_TEXT;
-        [b setTitleColor:DRE_TEXT forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-        b.imageEdgeInsets = UIEdgeInsetsMake(0, -4, 0, 0);
-        [b addTarget:self action:@selector(restoreSave) forControlEvents:UIControlEventTouchUpInside];
-        [_scroll addSubview:b];
+    {   // Export / Import — share-sheet out, document-picker in.
+        [self chip:@"  Export" icon:@"square.and.arrow.up"
+                 x:0 y:y w:bw sel:@selector(exportSave:)];
+        [self chip:@"  Import" icon:@"square.and.arrow.down"
+                 x:bw + 10 y:y w:bw sel:@selector(importSave:)];
+        y += 46;
+        // Bundled restore — the known-good save shipped inside the IPA.
+        DREButton *rb = [self chip:@"  Restore bundled save" icon:@"arrow.down.doc.fill"
+                                 x:0 y:y w:bw sel:@selector(restoreSave)];
+        rb.backgroundColor = [UIColor colorWithRed:0.5 green:0.3 blue:0.1 alpha:0.9];
         y += 46;
     }
 
     _scroll.contentSize = CGSizeMake(w, y + 20);
+    _scroll.contentOffset = off;   // clamps itself if the content shrank
 }
 
 - (CGFloat)section:(NSString *)t icon:(NSString *)icon y:(CGFloat)y {
@@ -489,6 +513,41 @@ static void anchor_view_reset(UIView *v) {
     return y + 26;
 }
 - (CGFloat)section:(NSString *)t y:(CGFloat)y { return [self section:t icon:@"folder.fill" y:y]; }
+
+// Standard left-aligned icon chip — toggle/save/command buttons all share this.
+- (DREButton *)chip:(NSString *)title icon:(NSString *)icon
+                  x:(CGFloat)x y:(CGFloat)y w:(CGFloat)w sel:(SEL)sel {
+    DREButton *b = [DREButton buttonWithType:UIButtonTypeCustom];
+    b.frame = CGRectMake(x, y, w, 40);
+    b.backgroundColor = DRE_FILL;
+    b.layer.cornerRadius = DRE_RADIUS;
+    b.layer.cornerCurve = kCACornerCurveContinuous;
+    [b setImage:dre_symbol(icon, 13, UIImageSymbolWeightMedium) forState:UIControlStateNormal];
+    b.tintColor = DRE_TEXT;
+    b.imageEdgeInsets = UIEdgeInsetsMake(0, -6, 0, 0);
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:DRE_TEXT forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    b.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 0);
+    [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
+    [_scroll addSubview:b];
+    return b;
+}
+
+// Right-aligned blue text button that sits inside a section header
+// (the App Store "See All" pattern).
+- (void)textBtn:(NSString *)t atY:(CGFloat)hy sel:(SEL)s w:(CGFloat)w {
+    DREButton *b = [DREButton buttonWithType:UIButtonTypeCustom];
+    b.frame = CGRectMake(w - 120, hy - 2, 118, 26);
+    [b setTitle:t forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+    [b setTitleColor:DRE_BLUE forState:UIControlStateNormal];
+    b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
+    [b addTarget:self action:s forControlEvents:UIControlEventTouchUpInside];
+    [_scroll addSubview:b];
+}
+- (void)toggleAll:(UIButton *)b { dre_tick(); _showAll = !_showAll; [self buildButtons]; }
 
 static BOOL destructive_cmd(NSString *cmd);   // fwd — defined below
 
@@ -658,16 +717,11 @@ static BOOL destructive_cmd(NSString *cmd) {
     exec();
 }
 
-- (void)restoreSave {
-    NSString *src = [[NSBundle mainBundle] pathForResource:@"dredge-save0" ofType:@"bin"];
-    if (!src) { dre_notify(UINotificationFeedbackTypeError);
-        [self toast:@"Bundled save not found" icon:@"exclamationmark.triangle.fill" tint:DRE_RED]; return; }
-
+// Scan Documents + Library for dredge-save*.bin — saves may live in
+// Documents, Application Support, or a subdir we haven't seen.
+- (NSArray<NSString *> *)savePaths {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *home = NSHomeDirectory();
-
-    // Scan the whole app container — saves may live in Documents,
-    // Library/Application Support, or a subdir we haven't seen.
     NSMutableArray<NSString *> *hits = [NSMutableArray array];
     for (NSString *base in @[@"Documents", @"Library"]) {
         NSDirectoryEnumerator *en = [fm enumeratorAtPath:[home stringByAppendingPathComponent:base]];
@@ -678,17 +732,81 @@ static BOOL destructive_cmd(NSString *cmd) {
                 [hits addObject:[base stringByAppendingPathComponent:rel]];
         }
     }
+    return hits;
+}
+// Where imports/restores write slot 0: next to the game's own save if one
+// exists, else Documents.
+- (NSString *)saveDestDir {
+    NSArray<NSString *> *hits = [self savePaths];
+    if (hits.count)
+        return [[NSHomeDirectory() stringByAppendingPathComponent:hits.firstObject]
+                stringByDeletingLastPathComponent];
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+}
+// The live save to export — prefer slot 0, else whatever exists.
+- (NSString *)currentSavePath {
+    NSArray<NSString *> *hits = [self savePaths];
+    for (NSString *h in hits)
+        if ([h.lastPathComponent isEqualToString:@"dredge-save0.bin"])
+            return [NSHomeDirectory() stringByAppendingPathComponent:h];
+    return hits.count ? [NSHomeDirectory() stringByAppendingPathComponent:hits.firstObject] : nil;
+}
 
-    NSString *destDir;
-    if (hits.count) {
-        // put ours next to the first existing save the game made
-        destDir = [[home stringByAppendingPathComponent:hits.firstObject]
-                   stringByDeletingLastPathComponent];
-    } else {
-        destDir = [home stringByAppendingPathComponent:@"Documents"];
-    }
-    NSString *dst = [destDir stringByAppendingPathComponent:@"dredge-save0.bin"];
+- (void)exportSave:(UIView *)src {
+    NSString *p = [self currentSavePath];
+    if (!p) { dre_notify(UINotificationFeedbackTypeError);
+        [self toast:@"No save file found" icon:@"exclamationmark.triangle.fill" tint:DRE_RED]; return; }
+    UIActivityViewController *av = [[UIActivityViewController alloc]
+        initWithActivityItems:@[[NSURL fileURLWithPath:p]] applicationActivities:nil];
+    av.popoverPresentationController.sourceView = src;   // ignored on iPhone, required on iPad
+    [self presentViewController:av animated:YES completion:nil];
+}
 
+- (void)importSave:(UIView *)src {
+    // asCopy:YES lands the pick in our temp container — no security-scope
+    // dance needed, and non-.bin files are still selectable so we name-check
+    // in the confirm instead.
+    UIDocumentPickerViewController *p = [[UIDocumentPickerViewController alloc]
+        initForOpeningContentTypes:@[UTTypeData, UTTypeItem] asCopy:YES];
+    p.delegate = self;
+    p.allowsMultipleSelection = NO;
+    [self presentViewController:p animated:YES completion:nil];
+}
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)c {}
+- (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSURL *u = urls.firstObject;
+    if (!u) return;
+    NSString *dst = [[self saveDestDir] stringByAppendingPathComponent:@"dredge-save0.bin"];
+    BOOL isBin = [u.pathExtension.lowercaseString isEqualToString:@"bin"];
+    NSString *msg = [NSString stringWithFormat:@"%@Replace save slot 0 with:\n%@?",
+        isBin ? @"" : @"Not a .bin file — it may not load.\n\n", u.lastPathComponent];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Import save?"
+        message:msg preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Replace" style:UIAlertActionStyleDestructive
+        handler:^(id act){
+            NSFileManager *fm = NSFileManager.defaultManager;
+            NSString *tmp = [dst stringByAppendingString:@".tmp"];
+            NSError *err = nil;
+            [fm removeItemAtPath:tmp error:nil];
+            BOOL ok = [fm copyItemAtURL:u toURL:[NSURL fileURLWithPath:tmp] error:&err];
+            if (ok) { [fm removeItemAtPath:dst error:nil]; ok = [fm moveItemAtPath:tmp toPath:dst error:&err]; }
+            if (ok) { dre_notify(UINotificationFeedbackTypeSuccess);
+                [self toast:@"Save imported — restart the game"]; }
+            else { dre_notify(UINotificationFeedbackTypeError);
+                [self toast:[NSString stringWithFormat:@"Failed: %@", err.localizedDescription]
+                       icon:@"exclamationmark.triangle.fill" tint:DRE_RED]; }
+        }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)restoreSave {
+    NSString *src = [[NSBundle mainBundle] pathForResource:@"dredge-save0" ofType:@"bin"];
+    if (!src) { dre_notify(UINotificationFeedbackTypeError);
+        [self toast:@"Bundled save not found" icon:@"exclamationmark.triangle.fill" tint:DRE_RED]; return; }
+
+    NSArray<NSString *> *hits = [self savePaths];
+    NSString *dst = [[self saveDestDir] stringByAppendingPathComponent:@"dredge-save0.bin"];
     NSString *foundMsg = hits.count
         ? [NSString stringWithFormat:@"Found %d existing save(s).\nWriting next to:\n%@",
            (int)hits.count, hits.firstObject.stringByDeletingLastPathComponent]
@@ -698,12 +816,13 @@ static BOOL destructive_cmd(NSString *cmd) {
         message:foundMsg preferredStyle:UIAlertControllerStyleAlert];
     [c addAction:[UIAlertAction actionWithTitle:@"Restore" style:UIAlertActionStyleDestructive
         handler:^(id a){
+            NSFileManager *fm = NSFileManager.defaultManager;
             NSString *tmp = [dst stringByAppendingString:@".tmp"];
             NSError *err = nil;
             [fm removeItemAtPath:tmp error:nil];
             BOOL ok = [fm copyItemAtPath:src toPath:tmp error:&err];
             if (ok) { [fm removeItemAtPath:dst error:nil]; ok = [fm moveItemAtPath:tmp toPath:dst error:&err]; }
-            if (ok) [self toast:[NSString stringWithFormat:@"Restored → %@", dst.lastPathComponent]];
+            if (ok) [self toast:@"Save restored — restart the game"];
             else { dre_notify(UINotificationFeedbackTypeError);
                 [self toast:[NSString stringWithFormat:@"Failed: %@", err.localizedDescription]
                        icon:@"exclamationmark.triangle.fill" tint:DRE_RED]; }
