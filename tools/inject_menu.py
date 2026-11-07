@@ -163,6 +163,11 @@ def main():
     #   caught fish are genuinely mutant trophies, not just repriced.
     #   Species without aberrants safely fall back to normal.
     CREATE_FISH = 0x1407040
+    #   flag+9 Free Research: SpendResearchItem entry -> w0=1. The old
+    #   ResearchPointsRequired bake was dead code (inlined getter, zero
+    #   bl callers) — this is the live spend seam (2 real callers, both
+    #   tbz w0 -> failure). Each notch click fills free.
+    SPEND_RESEARCH = 0x1311DC4
 
     # stub0 @CAVE+0x00 — GetItemValue: flag on && mode==SELL -> s0 *= flag f32.
     stub0 = w32s(
@@ -265,11 +270,22 @@ def main():
         orig(CREATE_FISH),                       # sub sp,sp,#0xf0
         b(S7 + 0x20, CREATE_FISH + 4),
     )
-    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6) + len(stub7)] \
-        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6 + stub7
+    # stub8 — SpendResearchItem entry: flag on -> w0=1 (part spends free).
+    S8 = S7 + len(stub7)
+    stub8 = w32s(
+        adrp(9, S8 + 0x00, SLOT), ldrb(9, 9, 0x531),
+        cbnz(9, 3),                              # flag on -> forced success
+        orig(SPEND_RESEARCH),                    # stp x26,x25,[sp,#-0x50]!
+        b(S8 + 0x10, SPEND_RESEARCH + 4),
+        0x52800020,                              # mov w0,#1
+        RET,
+    )
+    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6) + len(stub7) + len(stub8)] \
+        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6 + stub7 + stub8
 
     patches = [
-        # always-on: full game, all DLC, free research
+        # always-on: full game, all DLC (research-points getter baked too —
+        # has zero bl callers so likely inlined, but covers virtual calls)
         (0x12948BC, w32s(0x52800000, RET)),                       # trial -> 0
         (0x13E358C, w32s(0x52800020, RET)),                       # entitlement -> 1
         (0x134C5B8, w32s(0x52800000, RET)),                       # research -> 0
@@ -282,6 +298,7 @@ def main():
         (ITEMEVAL,  w32s(b(ITEMEVAL, S5))),
         (UPGGATE,   w32s(b(UPGGATE, S6))),
         (CREATE_FISH, w32s(b(CREATE_FISH, S7))),
+        (SPEND_RESEARCH, w32s(b(SPEND_RESEARCH, S8))),
     ]
     for off, blob in patches:
         uf[off:off+len(blob)] = blob
