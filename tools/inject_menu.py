@@ -158,6 +158,11 @@ def main():
     #        tbz (tbz can't reach back to the cave).
     ITEMEVAL, UPGGATE = 0x127A194, 0x1420C60
     UPG_FREE, UPG_PAY = 0x1420CC4, 0x1420C64     # tbnz target / fallthrough
+    #   flag+3 (same Fish Quality flag) also hooks CreateFishItem entry:
+    #   on -> w2=FORCE(2) aberration, w4=FORCE_BIG_TROPHY(2) size mode so
+    #   caught fish are genuinely mutant trophies, not just repriced.
+    #   Species without aberrants safely fall back to normal.
+    CREATE_FISH = 0x1407040
 
     # stub0 @CAVE+0x00 — GetItemValue: flag on && mode==SELL -> s0 *= flag f32.
     stub0 = w32s(
@@ -245,8 +250,23 @@ def main():
         ldp_x(9, 10, 16),                        # on path: restore
         b(S6 + 0x24, UPG_FREE),
     )
-    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6)] \
-        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6
+    # stub7 — CreateFishItem entry: flag on -> upgrade *random* modes only:
+    # w2==RANDOM_CHANCE(0) -> FORCE(2) aberration; w4==ANY(0) ->
+    # FORCE_BIG_TROPHY(2). Callers that deliberately pass FORBID (quest
+    # fish) or a set size mode keep their choice.
+    S7 = S6 + len(stub6)
+    stub7 = w32s(
+        adrp(9, S7 + 0x00, SLOT), ldrb(9, 9, 0x52B),
+        cbz(9, 5),                               # flag off -> original args
+        cbnz(2, 2),                              # w2 set already -> keep it
+        0x52800042,                              # mov w2,#2  FORCE aberration
+        cbnz(4, 2),                              # w4 set already -> keep it
+        0x52800044,                              # mov w4,#2  FORCE_BIG_TROPHY
+        orig(CREATE_FISH),                       # sub sp,sp,#0xf0
+        b(S7 + 0x20, CREATE_FISH + 4),
+    )
+    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6) + len(stub7)] \
+        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6 + stub7
 
     patches = [
         # always-on: full game, all DLC, free research
@@ -261,6 +281,7 @@ def main():
         (FRESHBR,   w32s(b(FRESHBR, S3))),
         (ITEMEVAL,  w32s(b(ITEMEVAL, S5))),
         (UPGGATE,   w32s(b(UPGGATE, S6))),
+        (CREATE_FISH, w32s(b(CREATE_FISH, S7))),
     ]
     for off, blob in patches:
         uf[off:off+len(blob)] = blob
