@@ -90,9 +90,10 @@ static const tog_t g_togs[] = {
     {"Fish Quality",   "sparkles",                        TOG_FLAG, 3, NULL},
     {"Free Upgrades",  "wrench.and.screwdriver.fill",     TOG_FLAG, 8, NULL},
     {"Free Research",  "book.fill",                       TOG_FLAG, 9, NULL},
+    {"No Consume",     "infinity.circle.fill",            TOG_FLAG, 10, NULL},
 };
-#define NTOGS 8
-static BOOL g_state[NTOGS] = {NO, NO, YES, YES, YES, YES, YES, YES};  // flags on; god/immune session-only
+#define NTOGS 9
+static BOOL g_state[NTOGS] = {NO, NO, YES, YES, YES, YES, YES, YES, YES};  // flags on; god/immune session-only
 static BOOL g_flags_init = NO;
 static float g_sell_mult = 4.0f;
 

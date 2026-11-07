@@ -134,6 +134,8 @@ def main():
         return 0x1E201000 | ((imm8 & 0xFF) << 13) | rd   # imm8 0x70 = 1.0f
     def b(pc_va, tgt_va):
         return 0x14000000 | (((tgt_va - pc_va) >> 2) & 0x3FFFFFF)
+    def bl(pc_va, tgt_va):
+        return 0x94000000 | (((tgt_va - pc_va) >> 2) & 0x3FFFFFF)
     RET = 0xD65F03C0
     def w32s(*words): return b''.join(struct.pack('<I', w) for w in words)
 
@@ -168,6 +170,17 @@ def main():
     CREATE_FISH = 0x1407040
     ABERRGATE1, ABERRGATE2 = 0x14072B4, 0x1407300
     ABERR_BAIL, ABERR_CONT1, ABERR_CONT2 = 0x1407D70, 0x14072B8, 0x1407304
+    #   flag+0xA (0x532) No Consume — five `bl RemoveObjectFromGridData`
+    #   call sites inside consume paths get the call skipped when on:
+    #   bait deploy, repair kit, gear repair, hull repair, pot deploy
+    #   (pot also stays in inventory -> infinite deploys). Selling,
+    #   moving, rot-conversion and quest hand-ins keep working.
+    REMOVEOBJ = 0x12EC40C
+    CONSUME_SITES = [0x13DE158,   # BaitAbility.DeployBait
+                     0x1403DB4,   # ItemManager.UseRepairKit
+                     0x12EC0E8,   # RepairActionHandler.RepairFocusedItem
+                     0x14097F0,   # ItemManager.RepairHullDamage
+                     0x12560C4]   # DeployPotAbility.Activate
     #   flag+9 Free Research: SpendResearchItem entry -> w0=1. The old
     #   ResearchPointsRequired bake was dead code (inlined getter, zero
     #   bl callers) — this is the live spend seam (2 real callers, both
@@ -313,8 +326,24 @@ def main():
         b(S10 + 0x1C, ABERR_BAIL),               # lt -> original bail
         b(S10 + 0x20, ABERR_CONT2),              # ge -> continue
     )
-    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6) + len(stub7) + len(stub8) + len(stub9) + len(stub10)] \
-        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6 + stub7 + stub8 + stub9 + stub10
+    # stub11 — No Consume, one instance per call site. Flag on -> b back
+    # past the `bl` (item never removed). Off -> run the original bl; its
+    # return lands on the trailing b back to the caller.
+    consume_stubs = []
+    SC = S10 + len(stub10)
+    for site in CONSUME_SITES:
+        consume_stubs.append((site, SC, w32s(
+            stp_x(9, 10, -16),
+            adrp(9, SC + 0x04, SLOT), ldrb(10, 9, 0x532),
+            ldp_x(9, 10, 16),
+            cbz(10, 2),                          # off -> run original call
+            b(SC + 0x14, site + 4),              # on -> skip removal
+            bl(SC + 0x18, REMOVEOBJ),            # original call
+            b(SC + 0x1C, site + 4),              # return to caller
+        )))
+        SC += len(consume_stubs[-1][2])
+    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6) + len(stub7) + len(stub8) + len(stub9) + len(stub10) + sum(len(s[2]) for s in consume_stubs)] \
+        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6 + stub7 + stub8 + stub9 + stub10 + b''.join(s[2] for s in consume_stubs)
 
     patches = [
         # always-on: full game, all DLC (research-points getter baked too —
@@ -334,7 +363,7 @@ def main():
         (SPEND_RESEARCH, w32s(b(SPEND_RESEARCH, S8))),
         (ABERRGATE1, w32s(b(ABERRGATE1, S9))),
         (ABERRGATE2, w32s(b(ABERRGATE2, S10))),
-    ]
+    ] + [(site, w32s(b(site, sva))) for site, sva, _ in consume_stubs]
     for off, blob in patches:
         uf[off:off+len(blob)] = blob
     uf = bytes(uf)
