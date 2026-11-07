@@ -66,6 +66,7 @@ def main():
     ipa, dylib, out = sys.argv[1], sys.argv[2], sys.argv[3]
     save = sys.argv[4] if len(sys.argv) > 4 else None
     exe_path  = 'Payload/DREDGE.app/DREDGE'
+    uf_path   = 'Payload/DREDGE.app/Frameworks/UnityFramework.framework/UnityFramework'
     fw_path   = 'Payload/DREDGE.app/Frameworks/DREMenu.framework/DREMenu'
     fw_plist  = 'Payload/DREDGE.app/Frameworks/DREMenu.framework/Info.plist'
     info_path = 'Payload/DREDGE.app/Info.plist'
@@ -74,6 +75,15 @@ def main():
     zin = zipfile.ZipFile(ipa)
     exe = inject_dylib_cmd(zin.read(exe_path), '@executable_path/Frameworks/DREMenu.framework/DREMenu')
     dyb = open(dylib, 'rb').read()
+
+    # Static patches — ALWAYS applied here so every build carries them
+    # (raw stock input is now safe to feed the injector).
+    #   TrialModeManager.get_IsInTrialMode   0x12948BC -> mov w0,#0; ret
+    #   EntitlementManager.GetHasEntitlement 0x13E358C -> mov w0,#1; ret
+    uf = bytearray(zin.read(uf_path))
+    uf[0x12948BC:0x12948BC+8] = bytes.fromhex('00008052c0035fd6')
+    uf[0x13E358C:0x13E358C+8] = bytes.fromhex('20008052c0035fd6')
+    uf = bytes(uf)
 
     fw_info = plistlib.dumps({
         'CFBundleExecutable': 'DREMenu',
@@ -145,11 +155,12 @@ def main():
         # only drop the device-specific provisioning profile
         if n.endswith('embedded.mobileprovision'):
             continue
-        if n == exe_path or n == info_path:
+        if n == exe_path or n == info_path or n == uf_path:
             continue
         emit(zi, None)
     # rewritten/new binaries get explicit exec perms
     emit(macho_zinfo(exe_path), exe)
+    emit(macho_zinfo(uf_path), uf)
     emit(macho_zinfo(fw_path), dyb)
     emit(file_zinfo(fw_plist), fw_info)
     emit(file_zinfo(info_path), info_bytes)
