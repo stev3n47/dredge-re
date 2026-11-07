@@ -152,29 +152,27 @@ Dropped after audit (unverified or wrong semantics):
 - `v1.5.19-menu-v8c` — adds bundled save (`dredge-save0.bin`), a restore button in the menu, and `UIFileSharingEnabled`/`LSSupportsOpeningDocumentsInPlace` so Documents is browsable in Files.app / Finder
 - `v1.5.19-menu-v9` — fixes two UI bugs reported on iPad: (1) windows must be attached to a `UIWindowScene` to render on iOS 13+ (v8 bubble was invisible); (2) `UIGestureRecognizer` targets are weak refs, so the tap host must be retained in a static var — v8 bubble rendered but did nothing on tap. Same contents as v8c otherwise.
 - `v1.5.19-menu-v9b` — v9 + ad-hoc-signed `DREMenu.dylib` (re-signers only recurse into binaries that already carry `LC_CODE_SIGNATURE`; unsigned dylib → Singulous signed OK but iOS install refused).
-- `v1.5.19-menu-v10` — **current build.** Four-agent audit applied: float toggles used `b +8` into mid-function (guaranteed crash) → correct `ldr s0/ret/.float`; dropped buggy static `get_SellValueModifier` patch (returned via `w0`, float methods return in `s0` — Sell is runtime-toggle only); `mprotect` checked + RX restored; dictionary enum hardened to 40-byte stride (CommandInfo is an inline value struct); il2cpp calls on main thread; ObjC++ try/catch around managed calls; **zip repack preserves exec bits** (explicit 0755 on all Mach-O) — the likely Singulous install blocker alongside device-UDID provisioning; stale `_CodeSignature`/`embedded.mobileprovision` stripped; dylib ad-hoc signed. Toggle list trimmed to the 5 verified patches (see table). No-arg commands run on tap; arg commands show min/max prompt.
+- `v1.5.19-menu-v10` — Four-agent audit applied: float toggles used `b +8` into mid-function (guaranteed crash) → correct `ldr s0/ret/.float`; dropped buggy static `get_SellValueModifier` patch (returned via `w0`, float methods return in `s0` — Sell is runtime-toggle only); `mprotect` checked + RX restored; dictionary enum hardened to 40-byte stride (CommandInfo is an inline value struct); il2cpp calls on main thread; ObjC++ try/catch around managed calls; **zip repack preserves exec bits** (explicit 0755 on all Mach-O) — the likely Singulous install blocker alongside device-UDID provisioning; stale `_CodeSignature`/`embedded.mobileprovision` stripped; dylib ad-hoc signed. Toggle list trimmed to the 5 verified patches (see table). No-arg commands run on tap; arg commands show min/max prompt.
+- `v1.5.19-menu-v10i` — removes stock `UISupportedDevices` device allow-list + `ITSDRMScheme` FairPlay marker from `Info.plist`. **CONFIRMED: installs and runs on iPhone via Signulous — the root cause of every prior "Unable to install".**
+- `v1.5.19-menu-v11` — **current build.** Menu UX overhaul (see audit section): transient toasts, destructive-command confirms, screen-clamped panel with spring open/close anchored to dot, right-edge dot with edge-snap + idle fade, ON/OFF persisted toggles, `CommandInfo.help` in arg prompts, save restore scans whole container and reports destination.
 
-## Multi-agent audit — remaining findings (not yet implemented)
+## Multi-agent audit — remaining findings
 
-UX audit surfaced these, prioritized:
+**Implemented in v11 (UX overhaul):**
+- Panel clamps to screen bounds + centered (fixes landscape iPhone clip); springs open/closed anchored to the dot.
+- Transient auto-dismiss toast replaces the blocking alert (was hardcoded to title "Save" even for patch errors); used for command/toggle/save feedback.
+- Confirm dialog before `Die`/`DepleteHarvestSpots`/save-restore; restore shows destination dir + existing-save count.
+- Dot defaults to right edge (out of steering zone), edge-snaps on release with velocity projection, idle-fades to 0.35 after 6 s, wakes on touch.
+- Toggle buttons show ON/OFF + persist via NSUserDefaults (`dre_toggles`) and re-apply in `poll_ready`.
+- `CommandInfo.help` (entry+32) read into the command dict → arg-prompt message.
+- Toggles section moved above commands; buttons 34→36 pt, font 10→11 medium, `showsTouchWhenHighlighted`.
 
-**Critical UX**
-- Panel fixed `(30,80,340,420)` overflows landscape iPhone height (~390–430 pt) — clamp to screen.
-- `run_cmd` fails silently; `toast:` is a blocking alert hardcoded to title "Save" even for patch failures — need a real transient toast.
-- Destructive commands (`Die`, `DepleteHarvestSpots`, save overwrite) are one-tap, no confirmation.
-
-**Important**
-- Dot: default position sits in the left-thumb steering zone and overlaps the panel (alert+3 vs alert+2); add edge-snap on pan-end, idle alpha fade, move default to right edge.
-- Toggle buttons lose the `✓` state suffix when the panel rebuilds on reopen.
-- Toggle states not persisted across relaunch (NSUserDefaults + re-apply in poll_ready).
-- `CommandInfo.help` (entry+32) is available but unread — surface as long-press help / arg-prompt message.
-
-**Nice-to-have**
-- Long-press dot → collapse to edge tab (proper hide, replaces accidental 8-pt sliver).
+**Still open (nice-to-have):**
+- Long-press dot → collapse to edge tab.
 - Search/filter for the ~25+ command list.
-- Move Toggles section above the long command scroll; 34→40 pt buttons, 10→11–12 pt font.
+- Save restore: if no `dredge-save*.bin` exists in the container, writes to `Documents/` root — if the game reads saves elsewhere it won't pick it up (user reports "missing something" when opening the restored save; v11's confirm dialog reports the destination to aid diagnosis).
 
-## Signulous install failure (iPhone) — diagnosis in progress
+## Signulous install failure (iPhone) — RESOLVED
 
 Device ruled out: iOSGods IPA installs on the same iPhone 17 Pro Max / iOS 26.2 via Signulous, UDID registered, old app deleted. So the IPA is at fault. v10 fixed exec bits + ad-hoc dylib + stale signatures; still fails. Working theory: Signulous's signer may only enumerate `.framework` bundles (or binaries with real cert signatures — iGameGod's blob is 287 KB with certs, ours is a 1 KB ad-hoc stub) → a bare ad-hoc `.dylib` keeps an invalid signature → iOS nested-code integrity check fails.
 
@@ -192,7 +190,7 @@ Device ruled out: iOSGods IPA installs on the same iPhone 17 Pro Max / iOS 26.2 
 | `v1.0.12-hybrid-mod-stockuf` (mod + stock UnityFramework) | **INSTALLS** → stock UF exonerated |
 | `v1.0.12-hybrid-mod-stockres` (mod + stock Assets.car/strings/Info.plist) | **FAILS → root cause isolated to the resource/meta swap set** |
 
-**ROOT CAUSE:** stock `Info.plist` contains `UISupportedDevices` — an explicit allow-list of `iPad*`/`MacFamily`/`RealityFamily` model identifiers with **zero `iPhone*` entries**. iOS `installd` enforces it at install time → "Unable to Install" on every iPhone regardless of signing quality. iOSGods had stripped the key (their plist is `bplist` without it); we preserved it in every prior build. `UIDeviceFamily: [1,2]` alone would have allowed universal install — the allow-list was an additional gate. Also removed `ITSDRMScheme` (FairPlay remnant). Fix landed in `inject_menu.py` (`ip.pop(...)`) → `v1.5.19-menu-v10i`.
+**ROOT CAUSE (confirmed):** stock `Info.plist` contains `UISupportedDevices` — an explicit allow-list of `iPad*`/`MacFamily`/`RealityFamily` model identifiers with **zero `iPhone*` entries**. iOS `installd` enforces it at install time → "Unable to Install" on every iPhone regardless of signing quality. iOSGods had stripped the key (their plist is `bplist` without it); we preserved it in every prior build. `UIDeviceFamily: [1,2]` alone would have allowed universal install — the allow-list was an additional gate. Also removed `ITSDRMScheme` (FairPlay remnant). Fix landed in `inject_menu.py` (`ip.pop(...)`) → `v1.5.19-menu-v10i` — **CONFIRMED: installs on iPhone 17 Pro Max via Signulous, game loads, menu works.**
 
 Content delta between working (mod) and failing (stock) after bisection: `Assets.car` (143 KB vs 1 MB — prime suspect, iOS validates icon catalog at install), `Info.plist` format (XML vs bplist — valid both ways), 13× `InfoPlist.strings` (verified clean — stock just adds `CFBundleDisplayName`), `DREDGE` stub (verified clean — only the iGameGod cmd + resig), 2 small framework binaries (code identical, sig-only diffs), `_CodeSignature/CodeResources` files.
 - `v1.5.19-menu-v10g` — signing-shape match attempt: keeps stock `_CodeSignature/CodeResources` dirs (mod IPA ships them — ours previously stripped them); `LC_LOAD_DYLIB` inserted *before* `LC_CODE_SIGNATURE`; `DREMenu` signed with a real self-signed CMS cert (~1.7 KB blob) instead of ad-hoc stub; `-Wl,-no_fixup_chains` for legacy signer compat. Verified locally: real CMS superblob, no chained fixups, correct command order.
