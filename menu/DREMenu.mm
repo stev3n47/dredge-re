@@ -111,7 +111,9 @@ static void state_persist(void) {
 static void state_restore(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     NSArray *a = [d objectForKey:@"dre_toggles"];
-    if (a.count == 6) for (int i = 0; i < 6; i++) g_state[i + 2] = [a[i] boolValue];
+    // apply as many as were saved — older builds persisted fewer toggles
+    for (NSUInteger i = 0; i < a.count && i < NTOGS - 2; i++)
+        g_state[i + 2] = [a[i] boolValue];
     if ([d objectForKey:@"dre_sellmult"]) g_sell_mult = [d floatForKey:@"dre_sellmult"];
     if (g_sell_mult <= 0) g_sell_mult = 4.0f;
 }
@@ -637,19 +639,21 @@ static int g_fadeGen = 0;
 - (void)tap {
     dispatch_async(dispatch_get_main_queue(), ^{
         wake_dot();
+        // Refit to the current screen every open — creation once, but the
+        // frame must survive rotation while the panel was hidden.
+        CGRect sb = g_handleWin.windowScene.screen.bounds;
+        if (sb.size.width <= 0) sb = UIScreen.mainScreen.bounds;
+        CGFloat pw = MIN(340, sb.size.width - 32);
+        CGFloat ph = MIN(420, sb.size.height - 32);
+        CGRect pf = CGRectMake((sb.size.width - pw) / 2,
+                               (sb.size.height - ph) / 2, pw, ph);
         if (!g_panelWin) {
-            // Clamp panel to the screen so landscape iPhone doesn't clip it.
-            CGRect sb = g_handleWin.windowScene.screen.bounds;
-            if (sb.size.width <= 0) sb = UIScreen.mainScreen.bounds;
-            CGFloat pw = MIN(340, sb.size.width - 32);
-            CGFloat ph = MIN(420, sb.size.height - 32);
-            g_panelWin = new_window(CGRectMake((sb.size.width - pw) / 2,
-                                               (sb.size.height - ph) / 2, pw, ph),
-                                    UIWindowLevelAlert + 2);
+            g_panelWin = new_window(pf, UIWindowLevelAlert + 2);
             DREPanel *vc = [DREPanel new];
             vc.win = g_panelWin;
             g_panelWin.rootViewController = vc;
         }
+        g_panelWin.frame = pf;
         g_panelWin.hidden = NO;
         if (!g_panelWin.windowScene) g_panelWin.windowScene = find_scene();
         DREPanel *vc = (DREPanel *)g_panelWin.rootViewController;
@@ -725,6 +729,15 @@ static void wake_dot(void) {
 static void make_handle(void) {
     if (g_handleWin) {
         if (!g_handleWin.windowScene) g_handleWin.windowScene = find_scene();
+        // Re-clamp to the live screen — rotation while backgrounded can
+        // leave the dot offscreen or floating mid-display.
+        CGRect f = g_handleWin.frame;
+        CGRect sb = find_scene().screen.bounds;
+        if (sb.size.width > 0) {
+            f.origin.x = MIN(MAX(f.origin.x, 6), sb.size.width - f.size.width - 6);
+            f.origin.y = MIN(MAX(f.origin.y, 40), sb.size.height - f.size.height - 40);
+            g_handleWin.frame = f;
+        }
         g_handleWin.hidden = NO;
         return;
     }
