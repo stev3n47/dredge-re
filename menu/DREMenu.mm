@@ -1,16 +1,13 @@
 // DREMenu.dylib — custom cheat menu for DREDGE iOS (build 246)
 // Injected via LC_LOAD_DYLIB into the DREDGE executable.
-// Floating mini button -> cheat panel -> calls Terminal.Shell.RunCommand("...")
-// and applies runtime byte patches for always-on toggles.
+// Floating mini button -> cheat panel -> calls Terminal.Shell.RunCommand("...").
+// Cheats are static patches baked at build time (see inject_menu.py).
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <mach-o/dyld.h>
-#import <sys/mman.h>
-#import <libkern/OSCacheControl.h>
 #import <dlfcn.h>
 #import <string.h>
-#import <unistd.h>
 
 #pragma mark - UnityFramework helpers
 
@@ -118,68 +115,13 @@ static NSArray<NSDictionary *> *enum_commands(void) {
     return out.count ? out : nil;
 }
 
-#pragma mark - Runtime byte patches (always-on toggles)
-
-// Each patch is a variable-length sequence of words written at the function start.
-// Float-returning methods must return in s0, not w0.
-// Pattern for float consts: ldr s0,[pc,#8]; b +8; .float v
-typedef struct {
-    uint32_t rva;
-    uint32_t code[4];
-    int      nwords;
-    uint32_t orig[4];
-    const char *name;
-} patchdef;
-
-// Only audited targets ship: wrong-register/unverified RVAs were dropped after
-// review (GetPlayerSanity is a dialogue helper where 0=insane; CheckAbilityCooldown
-// is UI-only; GetMissingDurabilityAmount is repair-side; 0x14A3AF8 is a float
-// interpolation fn, not boat speed).
-static patchdef g_patches[] = {
-    // bool: mov w0,#1; ret
-    {0x125E7EC, {0x52800020, 0xD65F03C0}, 2, {0}, "God Mode"},
-    {0x125E7FC, {0x52800020, 0xD65F03C0}, 2, {0}, "Immune (Equip Dmg)"},
-    // int 0: mov w0,#0; ret
-    {0x134C5B8, {0x52800000, 0xD65F03C0}, 2, {0}, "Free Research"},
-    // float consts via literal pool: ldr s0,[pc,#8]; ret; .float v
-    {0x134BEAC, {0x1C000040, 0xD65F03C0, 0x40A00000}, 3, {0}, "Catch Rate 5.0"},
-    {0x13C07E4, {0x1C000040, 0xD65F03C0, 0x40800000}, 3, {0}, "Sell 4x"},
-};
-static const int g_npatches = sizeof(g_patches)/sizeof(g_patches[0]);
-static BOOL g_state[32] = {0};
-
-static BOOL patch_apply(int i, BOOL on);
-
-// Persist toggle state across relaunch; re-applied once UF is mapped.
-static void state_persist(void) {
-    NSMutableArray *a = [NSMutableArray arrayWithCapacity:g_npatches];
-    for (int i = 0; i < g_npatches; i++) [a addObject:@(g_state[i])];
-    [NSUserDefaults.standardUserDefaults setObject:a forKey:@"dre_toggles"];
-}
-static void state_restore(void) {
-    NSArray *a = [NSUserDefaults.standardUserDefaults arrayForKey:@"dre_toggles"];
-    if (a.count != g_npatches) return;
-    for (int i = 0; i < g_npatches; i++)
-        if ([a[i] boolValue] && patch_apply(i, YES)) g_state[i] = YES;
-}
-
-static BOOL patch_apply(int i, BOOL on) {
-    uintptr_t b = uf_base();
-    if (!b) return NO;
-    patchdef *p = &g_patches[i];
-    uint32_t *addr = (uint32_t *)(b + p->rva);
-    if (p->orig[0] == 0)
-        memcpy(p->orig, addr, p->nwords * 4);
-    uintptr_t page = ((uintptr_t)addr) & ~0xFFFULL;
-    size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
-    if (mprotect((void *)page, pgsz, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
-        return NO;
-    if (on) memcpy(addr, p->code, p->nwords * 4);
-    else    memcpy(addr, p->orig, p->nwords * 4);
-    sys_icache_invalidate(addr, p->nwords * 4);
-    mprotect((void *)page, pgsz, PROT_READ | PROT_EXEC);
-    return YES;
-}
+// NOTE: runtime byte-patching was removed entirely — under normal dev signing
+// (Signulous), writing to a signed executable page requires the
+// dynamic-codesigning entitlement and the kernel kills the app on the write.
+// All cheats are static patches baked by tools/inject_menu.py:
+//   full game, all DLC, free research, catch rate x5, sell value x4.
+// God Mode / Immune Mode toggle via the game's own SetGodMode/SetImmuneMode
+// terminal commands in the list below.
 
 #pragma mark - UI
 
@@ -247,28 +189,20 @@ static void anchor_view_reset(UIView *v) {
     CGFloat y = 4;
     CGFloat bw = (w - 10) / 2;
 
-    // Toggles first — highest-frequency section shouldn't sit at the bottom.
-    y = [self section:@"Toggles" y:y];
-    int col = 0; CGFloat x = 0;
-    for (int i = 0; i < g_npatches; i++) {
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
-        b.frame = CGRectMake(x, y, bw, 36);
-        b.layer.cornerRadius = 9;
-        b.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
-        b.showsTouchWhenHighlighted = YES;
-        [b setTitle:[NSString stringWithFormat:@"%s %@", g_patches[i].name,
-                     g_state[i] ? @"ON" : @"OFF"] forState:UIControlStateNormal];
-        [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        b.tag = 1000 + i;
-        b.backgroundColor = g_state[i] ? [UIColor colorWithRed:0.13 green:0.52 blue:0.24 alpha:1]
-                                       : [UIColor colorWithWhite:0.28 alpha:1];
-        [b addTarget:self action:@selector(toggleBtn:) forControlEvents:UIControlEventTouchUpInside];
-        [_scroll addSubview:b];
-        col = (col + 1) % 2; x = col ? bw + 10 : 0;
-        if (!col) y += 42;
+    // Always-on static patches baked into UnityFramework (not toggles — see
+    // note above about dev signing). Shown for visibility only.
+    y = [self section:@"Active Patches" y:y];
+    NSArray *baked = @[@"Full game unlocked", @"All DLC owned",
+                       @"Free research", @"Catch rate ×5", @"Sell value ×4"];
+    for (NSString *t in baked) {
+        UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(4, y, w - 8, 20)];
+        l.text = [NSString stringWithFormat:@"●  %@", t];
+        l.textColor = [UIColor colorWithRed:0.45 green:0.85 blue:0.5 alpha:1];
+        l.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+        [_scroll addSubview:l];
+        y += 22;
     }
-    if (col) y += 42;
-    y += 4;
+    y += 8;
 
     NSArray<NSDictionary *> *cmds = enum_commands();
     if (cmds.count) {
@@ -498,22 +432,6 @@ static BOOL destructive_cmd(NSString *cmd) {
     });
 }
 
-- (void)toggleBtn:(UIButton *)b {
-    int i = (int)b.tag - 1000;
-    BOOL want = !g_state[i];
-    if (!patch_apply(i, want)) {
-        [self toast:@"patch failed (memory not writable)"];
-        return;
-    }
-    g_state[i] = want;
-    state_persist();
-    b.backgroundColor = g_state[i] ? [UIColor colorWithRed:0.13 green:0.52 blue:0.24 alpha:1]
-                                   : [UIColor colorWithWhite:0.28 alpha:1];
-    [b setTitle:[NSString stringWithFormat:@"%s %@", g_patches[i].name,
-                 g_state[i] ? @"ON" : @"OFF"] forState:UIControlStateNormal];
-    [self toast:[NSString stringWithFormat:@"%s %s", g_patches[i].name, g_state[i] ? "on" : "off"]];
-}
-
 - (void)hidePanel {
     // Symmetric exit — shrink+fade back toward the handle (spatial consistency).
     CGPoint dot = g_handleWin ? CGPointMake(CGRectGetMidX(g_handleWin.frame),
@@ -695,7 +613,7 @@ static void make_handle(void) {
 
 static void poll_ready(void) {
     // poll on MAIN thread: g_shell() runs il2cpp code -> needs a GC-registered thread.
-    if (uf_base() && g_shell() && find_scene()) { state_restore(); make_handle(); return; }
+    if (uf_base() && g_shell() && find_scene()) { make_handle(); return; }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ poll_ready(); });
 }
