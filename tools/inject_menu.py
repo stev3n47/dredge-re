@@ -81,19 +81,24 @@ def main():
     # signed executable page needs dynamic-codesigning (TrollStore-only) and
     # the kernel kills the app — so every cheat is baked in statically.
     #
-    # Data-flag toggles (iOSGods' mechanism): the four cheat getters are only
-    # 8-byte functions packed back-to-back, so they can't hold a multi-instr
-    # flag read in place. Instead each gets `b <stub>` where stubs live in a
-    # code cave — the all-zero RX padding at __TEXT tail (0x3E46D40..0x3E48000).
-    # Each stub reads a flag from __DATA zerofill page 0x46DF000 (verified:
-    # zero adrp references to that page in stock code; iOSGods used slot
-    # 0x46DF528 there for the same reason). Flag storage at uf_base+0x46DF528:
-    #   +0 u8 God Mode (Player.get_IsGodModeEnabled)
-    #   +1 u8 Immune   (Player.get_IsImmuneModeEnabled)
-    #   +4 f32 Catch   (DeployableItemData.get_CatchRate)       on=5.0 off=1.0
-    #   +8 f32 Sell    (MarketDestination.get_SellValueModifier) on=4.0 off=1.0
-    # The menu writes these at runtime — a plain data write, legal under any
-    # signature. OFF restores true stock semantics for the bool toggles.
+    # Data-flag toggles (iOSGods' mechanism, v15): patched functions get
+    # `b <stub>` into a code cave — zero padding at __TEXT tail
+    # (0x3E46D40..0x3E48000, mapped RX). Stubs read a flag byte from the dead
+    # __DATA zerofill page 0x46DF000 (zero adrp/GOT/chained-fixup refs in
+    # stock). The menu writes flag bytes at uf_base+0x46DF528 — a plain data
+    # write, legal under any signature.
+    #
+    # v15 hook choices — picked for REAL callers (verified via bl-scan; the
+    # previous getter patches were dead code — il2cpp inlines tiny getters):
+    #   flag+0 Sell ×4:  GameManager.AddFunds entry. Arg is a .NET decimal by
+    #       value in x1:x2 = 96-bit mantissa + flags. ×4 = mantissa << 2.
+    #       Skipped when sign bit (x2[63]) set → negative adds (debt) untouched.
+    #       13 real bl callers incl. SellFocusedItem.
+    #   flag+1 Pot auto-catch: SerializedCrabPotPOIData.CalculateCatchRoll
+    #       (float roll, this) -> w0 bool. Flag on → w0=1 (always caught).
+    #       Crab pots only; rod/trawl use a different path.
+    # God/Immune are menu-driven `SetGodMode`/`SetImmuneMode` terminal commands
+    # (write real Player fields) — no patch needed.
     SLOT = 0x46DF528
     CAVE = 0x3E46D40
     def adrp(rd, pc_va, tgt_page):
@@ -101,34 +106,76 @@ def main():
         return 0x90000000 | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5) | rd
     def ldrb(rt, rn, off):
         return 0x39400000 | ((off & 0xFFF) << 10) | (rn << 5) | rt
-    def ldr_s(rt, rn, off):
-        return 0xBD400000 | (((off >> 2) & 0xFFF) << 10) | (rn << 5) | rt
+    def cbz(rt, imm19):
+        return 0x34000000 | ((imm19 & 0x7FFFF) << 5) | rt
+    def cbnz(rt, imm19):
+        return 0x35000000 | ((imm19 & 0x7FFFF) << 5) | rt
+    def tbnz(rt, bit, imm14):
+        return 0x37000000 | (((bit >> 5) & 1) << 31) | ((bit & 31) << 19) \
+               | ((imm14 & 0x3FFF) << 5) | rt
+    def mov_r(rd, rs, wide):
+        return (0xAA0003E0 if wide else 0x2A0003E0) | (rs << 16) | rd
+    def lsr_i(rd, rn, sh, wide):      # UBFM rd,rn,#sh,#(bits-1)
+        bits = 64 if wide else 32
+        return (0xD3400000 if wide else 0x53000000) \
+               | (sh << 16) | ((bits - 1) << 10) | (rn << 5) | rd
+    def lsl_i(rd, rn, sh, wide):      # UBFM rd,rn,#(bits-sh),#(bits-sh-1)
+        bits = 64 if wide else 32
+        return (0xD3400000 if wide else 0x53000000) \
+               | ((bits - sh) << 16) | ((bits - sh - 1) << 10) | (rn << 5) | rd
+    def orr_r(rd, rn, rm, wide):
+        return (0xAA000000 if wide else 0x2A000000) | (rm << 16) | (rn << 5) | rd
+    def bfi(rd, rn, lsb, width):      # BFM rd,rn,#(64-lsb),#width-1
+        return 0xB3400000 | (((64 - lsb) & 63) << 16) | ((width - 1) << 10) \
+               | (rn << 5) | rd
     def b(pc_va, tgt_va):
         return 0x14000000 | (((tgt_va - pc_va) >> 2) & 0x3FFFFFF)
     RET = 0xD65F03C0
     def w32s(*words): return b''.join(struct.pack('<I', w) for w in words)
 
     uf = bytearray(zin.read(uf_path))
-    # code cave: four stubs, 12 bytes each
-    stubs = b''.join([
-        w32s(adrp(9, CAVE + 0x00, SLOT), ldrb(0, 9, 0x528), RET),      # god
-        w32s(adrp(9, CAVE + 0x0C, SLOT), ldrb(0, 9, 0x529), RET),      # immune
-        w32s(adrp(9, CAVE + 0x18, SLOT), ldr_s(0, 9, 0x52C), RET),     # catch
-        w32s(adrp(9, CAVE + 0x24, SLOT), ldr_s(0, 9, 0x530), RET),     # sell
-    ])
-    uf[CAVE:CAVE + len(stubs)] = stubs
+    orig = lambda va: struct.unpack('<I', uf[va:va+4])[0]
+
+    ADDFUNDS, CATCHROLL = 0x13F6E30, 0x1289B38
+
+    # stub0 @CAVE+0x00 — AddFunds(decimal amount{x1:x2}, ...): flag on && x2
+    # sign bit clear -> mantissa96 <<= 2 (decimal ×4), then resume at +4.
+    # mantissa = {x2[31:0] hi32 : x1 lo64}; <<2: new_hi = hi<<2 | lo>>62;
+    # new_lo = lo<<2 (hi top bits = overflow, discarded).
+    stub0 = w32s(
+        orig(ADDFUNDS),                          # stp x26,x25,[sp,#-0x50]!
+        adrp(9, CAVE + 0x04, SLOT), ldrb(10, 9, 0x528),
+        cbz(10, 9),                              # flag off -> resume
+        tbnz(2, 63, 8),                          # negative amount -> resume
+        mov_r(11, 2, False),                     # w11 = old hi32
+        mov_r(13, 1, True),                      # x13 = old lo64
+        lsr_i(12, 13, 62, True),                 # lo64 top2 -> new hi32 low
+        lsl_i(1, 13, 2, True),                   # new lo64 = lo64 << 2
+        lsl_i(15, 11, 2, False),                 # new hi32 = hi32 << 2
+        orr_r(15, 15, 12, False),                #          | lo64 top2
+        bfi(2, 15, 0, 32),                       # x2 = flags(top32) | new_hi32
+        b(CAVE + 0x30, ADDFUNDS + 4),            # resume AddFunds+4
+    )
+    # stub1 @CAVE+0x34 — CalculateCatchRoll(roll, this)->bool: flag -> w0=1.
+    S1 = CAVE + len(stub0)
+    stub1 = w32s(
+        adrp(9, S1 + 0x00, SLOT), ldrb(9, 9, 0x529),
+        cbnz(9, 3),                              # flag on -> forced catch
+        orig(CATCHROLL),                         # sub sp,sp,#0x50
+        b(S1 + 0x10, CATCHROLL + 4),             # resume original
+        0x52800020,                              # mov w0,#1
+        RET,
+    )
+    uf[CAVE:CAVE + len(stub0) + len(stub1)] = stub0 + stub1
 
     patches = [
         # always-on: full game, all DLC, free research
         (0x12948BC, w32s(0x52800000, RET)),                       # trial -> 0
         (0x13E358C, w32s(0x52800020, RET)),                       # entitlement -> 1
         (0x134C5B8, w32s(0x52800000, RET)),                       # research -> 0
-        # toggle getters -> branch to flag-reading stubs (original `ret` at +4
-        # is left intact and simply unreachable)
-        (0x125E7EC, w32s(b(0x125E7EC, CAVE + 0x00))),             # god
-        (0x125E7FC, w32s(b(0x125E7FC, CAVE + 0x0C))),             # immune
-        (0x134BEAC, w32s(b(0x134BEAC, CAVE + 0x18))),             # catch
-        (0x13C07E4, w32s(b(0x13C07E4, CAVE + 0x24))),             # sell
+        # toggle trampolines (original word replicated inside each stub)
+        (ADDFUNDS,  w32s(b(ADDFUNDS, CAVE))),
+        (CATCHROLL, w32s(b(CATCHROLL, S1))),
     ]
     for off, blob in patches:
         uf[off:off+len(blob)] = blob

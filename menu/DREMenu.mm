@@ -58,42 +58,51 @@ static void run_cmd(const char *cmd) {
 
 // Runtime code patching is impossible under dev signing (Signulous): writing
 // to a signed executable page needs dynamic-codesigning. So inject_menu.py
-// patches each cheat getter to `b <stub>` where stubs live in a __TEXT-tail
-// code cave and read a flag from the dead bss page at uf_base+FLAG_RVA.
-// Toggling = writing a byte/float here — a plain data write, always legal.
+// patches GameManager.AddFunds / CalculateCatchRoll entries to `b <stub>` —
+// stubs live in a __TEXT-tail code cave and read flag bytes from the dead
+// bss page at uf_base+FLAG_RVA. Toggling = writing a byte — always legal.
 #define FLAG_RVA 0x46DF528
 static uint8_t *flag_base(void) {
     uintptr_t b = uf_base();
     return b ? (uint8_t *)(b + FLAG_RVA) : NULL;
 }
 
-typedef struct { const char *name; uint32_t off; BOOL isf; float on, offv; } tog_t;
+// Two toggle mechanisms (v15):
+//   TOG_FLAG — write a flag byte at flag_base()+off; the AddFunds/CatchRoll
+//     trampolines read it (verified real callers).
+//   TOG_CMD  — run the game's own terminal command (SetGodMode writes the real
+//     Player field; the property getter we used to patch had zero callers).
+typedef enum { TOG_FLAG, TOG_CMD } togkind;
+typedef struct {
+    const char *name;
+    togkind kind;
+    uint32_t off;          // TOG_FLAG: flag byte offset
+    const char *cmd;       // TOG_CMD: command name (1/0 arg if it takes one)
+} tog_t;
 static const tog_t g_togs[] = {
-    {"God Mode",       0, NO,  1, 0},
-    {"Immune (Equip)", 1, NO,  1, 0},
-    {"Catch Rate",     4, YES, 5.0f, 1.0f},
-    {"Sell Value",     8, YES, 4.0f, 1.0f},
+    {"God Mode",       TOG_CMD,  0, "SetGodMode"},
+    {"Immune (Equip)", TOG_CMD,  0, "SetImmuneMode"},
+    {"Sell Value ×4",  TOG_FLAG, 0, NULL},
+    {"Pot Auto-Catch", TOG_FLAG, 1, NULL},
 };
 #define NTOGS 4
-static BOOL g_state[NTOGS] = {NO, NO, YES, YES};   // catch/sell on by default
+static BOOL g_state[NTOGS] = {NO, NO, YES, YES};   // sell/pot on; god/immune session-only
 static BOOL g_flags_init = NO;
 
 static void flag_apply(int i) {
     uint8_t *f = flag_base();
-    if (!f) return;
-    if (g_togs[i].isf) *(float *)(f + g_togs[i].off) = g_state[i] ? g_togs[i].on : g_togs[i].offv;
-    else               f[g_togs[i].off] = g_state[i] ? 1 : 0;
+    if (f && g_togs[i].kind == TOG_FLAG) f[g_togs[i].off] = g_state[i] ? 1 : 0;
 }
 static void flags_write(void) { for (int i = 0; i < NTOGS; i++) flag_apply(i); }
 
+// Only the flag toggles persist — god/immune game state resets each session.
 static void state_persist(void) {
-    [[NSUserDefaults standardUserDefaults] setObject:
-        @[@(g_state[0]), @(g_state[1]), @(g_state[2]), @(g_state[3])]
+    [[NSUserDefaults standardUserDefaults] setObject:@[@(g_state[2]), @(g_state[3])]
         forKey:@"dre_toggles"];
 }
 static void state_restore(void) {
     NSArray *a = [[NSUserDefaults standardUserDefaults] objectForKey:@"dre_toggles"];
-    if (a.count == NTOGS) for (int i = 0; i < NTOGS; i++) g_state[i] = [a[i] boolValue];
+    if (a.count == 2) { g_state[2] = [a[0] boolValue]; g_state[3] = [a[1] boolValue]; }
 }
 
 #pragma mark - Command dictionary enumeration
@@ -157,14 +166,15 @@ static NSArray<NSDictionary *> *enum_commands(void) {
     return out.count ? out : nil;
 }
 
-// NOTE: the Toggles section writes flag bytes/floats into the bss slot the
-// patched stubs read (see flag machinery above) — real on/off with zero
-// runtime code writes. "Active Patches" are always-on static bakes.
+// NOTE: Toggles either write flag bytes the cave stubs read (sell/pot) or
+// fire the game's own terminal commands (god/immune) — zero runtime code
+// writes either way. "Active Patches" are always-on static bakes.
 
 #pragma mark - UI
 
 static UIWindow *g_handleWin = nil;
 static UIWindow *g_panelWin = nil;
+static NSArray<NSDictionary *> *g_cmds = nil;
 
 // Anchor a window-filling view's layer to a SCREEN point (the dot), so scale
 // animations grow/shrink toward it. layer.position is in the PARENT layer's
@@ -261,7 +271,7 @@ static void anchor_view_reset(UIView *v) {
     }
     y += 8;
 
-    NSArray<NSDictionary *> *cmds = enum_commands();
+    NSArray<NSDictionary *> *cmds = g_cmds = enum_commands();
     if (cmds.count) {
         y = [self section:@"Game Commands" y:y];
         // Curated favorites first, then everything else registered
@@ -366,6 +376,18 @@ static void anchor_view_reset(UIView *v) {
 
 - (void)toggleBtn:(UIButton *)b {
     int i = (int)b.tag - 3000;
+    const tog_t *t = &g_togs[i];
+    if (t->kind == TOG_CMD) {
+        // Look up the command's arg contract: if it takes an arg send 1/0,
+        // else fire it bare (it's a flip-flop internally). Bool parses 1/0.
+        if (!g_cmds) g_cmds = enum_commands();
+        NSDictionary *c = [self cmdNamed:@(t->cmd) in:g_cmds];
+        NSString *line = @(t->cmd);
+        BOOL want = !g_state[i];
+        if (c && [c[@"max"] intValue] > 0)
+            line = [NSString stringWithFormat:@"%s %d", t->cmd, want ? 1 : 0];
+        run_cmd(line.UTF8String);
+    }
     g_state[i] = !g_state[i];
     flag_apply(i);
     state_persist();
