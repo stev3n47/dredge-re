@@ -402,7 +402,7 @@ static BOOL destructive_cmd(NSString *cmd) {
 
     // Scan the whole app container — saves may live in Documents,
     // Library/Application Support, or a subdir we haven't seen.
-    NSMutableArray *hits = [NSMutableArray array];
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
     for (NSString *base in @[@"Documents", @"Library"]) {
         NSDirectoryEnumerator *en = [fm enumeratorAtPath:[home stringByAppendingPathComponent:base]];
         NSString *rel;
@@ -493,7 +493,7 @@ static BOOL destructive_cmd(NSString *cmd) {
                                    : [UIColor colorWithWhite:0.28 alpha:1];
     [b setTitle:[NSString stringWithFormat:@"%s %@", g_patches[i].name,
                  g_state[i] ? @"ON" : @"OFF"] forState:UIControlStateNormal];
-    [self toast:[NSString stringWithFormat:@"%s %@", g_patches[i].name, g_state[i] ? "on" : "off"]];
+    [self toast:[NSString stringWithFormat:@"%s %s", g_patches[i].name, g_state[i] ? "on" : "off"]];
 }
 
 - (void)hidePanel {
@@ -554,6 +554,8 @@ static UIWindow *new_window(CGRect f, UIWindowLevel lvl) {
 // Idle-fade the handle after N sec of no interaction (visibility vs obstruction).
 static void schedule_fade(void);
 static void wake_dot(void);
+static UIView *g_dot = nil;
+static int g_fadeGen = 0;
 
 @implementation DREGestureHost
 - (void)tap {
@@ -634,8 +636,6 @@ static void wake_dot(void);
 
 // UIGestureRecognizer targets are weak — host must be retained for taps to work.
 static DREGestureHost *g_host = nil;
-static UIView *g_dot = nil;
-static int g_fadeGen = 0;
 
 static void schedule_fade(void) {
     int gen = ++g_fadeGen;
