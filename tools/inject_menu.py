@@ -88,18 +88,21 @@ def main():
     # stock). The menu writes flag bytes at uf_base+0x46DF528 — a plain data
     # write, legal under any signature.
     #
-    # v15b hook choices — picked for REAL callers (verified via bl-scan; the
+    # v16 hook choices — picked for REAL callers (verified via bl-scan; the
     # previous getter patches were dead code — il2cpp inlines tiny getters):
-    #   flag+0 Sell ×4:  ItemManager.GetItemValue(this, item, mode{w2},
+    #   flag+0 Sell:  ItemManager.GetItemValue(this, item, mode{w2},
     #       sellValueModifier{s0}) entry. mode==SELL(1) && flag on ->
-    #       s0 *= 4 (fadd trick: s0 doubled twice — no fp immediate needed).
+    #       s0 *= f32 multiplier flag at +0x52C (menu-written, default 4.0).
     #       Feeds BOTH the displayed shop price and the credited amount —
-    #       9 real bl callers incl. SellModeActionHandler. Buy mode untouched.
+    #       9 real bl callers incl. SellModeActionHandler. Buy untouched.
     #   flag+1 Pot auto-catch: SerializedCrabPotPOIData.CalculateCatchRoll
-    #       (float roll, this) -> w0 bool. Flag on → w0=1 (always caught).
-    #       Crab pots only; rod/trawl use a different path.
-    # God/Immune are menu-driven `SetGodMode`/`SetImmuneMode` terminal commands
-    # (write real Player fields) — no patch needed.
+    #       -> w0 bool. Flag on → w0=1 (always caught). Crab pots only.
+    #   flag+2 No overheat: BoostAbility.Update mid-function patch at the
+    #       `str s0,[x19,#0xF4]` (rawBurnAmount store). Flag on → store
+    #       skipped → burn never accumulates → currentBurnProp stays 0 →
+    #       no lockout, no explosion. Saves/restores x9/x10 (live regs).
+    # God/Immune are menu-driven `SetGodMode`/`SetImmuneMode` terminal
+    # commands (write real Player fields) — no patch needed.
     SLOT = 0x46DF528
     CAVE = 0x3E46D40
     def adrp(rd, pc_va, tgt_page):
@@ -107,6 +110,14 @@ def main():
         return 0x90000000 | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5) | rd
     def ldrb(rt, rn, off):
         return 0x39400000 | ((off & 0xFFF) << 10) | (rn << 5) | rt
+    def ldr_s(rt, rn, off):
+        return 0xBD400000 | (((off >> 2) & 0xFFF) << 10) | (rn << 5) | rt
+    def str_s(rt, rn, off):
+        return 0xBD000000 | (((off >> 2) & 0xFFF) << 10) | (rn << 5) | rt
+    def stp_x(rt, rt2, imm):
+        return 0xA9800000 | (((imm >> 3) & 0x7F) << 15) | (rt2 << 10) | (31 << 5) | rt
+    def ldp_x(rt, rt2, imm):
+        return 0xA8C00000 | (((imm >> 3) & 0x7F) << 15) | (rt2 << 10) | (31 << 5) | rt
     def cbz(rt, imm19):
         return 0x34000000 | ((imm19 & 0x7FFFF) << 5) | rt
     def cbnz(rt, imm19):
@@ -115,8 +126,8 @@ def main():
         return 0x7100001F | ((imm12 & 0xFFF) << 10) | (rn << 5)
     def bcond(cond, imm19):
         return 0x54000000 | ((imm19 & 0x7FFFF) << 5) | cond
-    def fadd_s(rd, rn, rm):
-        return 0x1E202800 | (rm << 16) | (rn << 5) | rd
+    def fmul_s(rd, rn, rm):
+        return 0x1E200800 | (rm << 16) | (rn << 5) | rd
     def b(pc_va, tgt_va):
         return 0x14000000 | (((tgt_va - pc_va) >> 2) & 0x3FFFFFF)
     RET = 0xD65F03C0
@@ -125,20 +136,20 @@ def main():
     uf = bytearray(zin.read(uf_path))
     orig = lambda va: struct.unpack('<I', uf[va:va+4])[0]
 
-    GETITEMVAL, CATCHROLL = 0x1401B84, 0x1289B38
+    GETITEMVAL, CATCHROLL, BURNSTORE = 0x1401B84, 0x1289B38, 0x1476D3C
 
-    # stub0 @CAVE+0x00 — GetItemValue: flag on && mode==SELL -> s0 *= 4.
+    # stub0 @CAVE+0x00 — GetItemValue: flag on && mode==SELL -> s0 *= flag f32.
     stub0 = w32s(
         orig(GETITEMVAL),                        # sub sp,sp,#0x60
         adrp(9, CAVE + 0x04, SLOT), ldrb(10, 9, 0x528),
         cbz(10, 5),                              # flag off -> resume
         cmp_i(2, 1),                             # mode == SELL?
         bcond(1, 3),                             # b.ne -> resume (BUY untouched)
-        fadd_s(1, 0, 0),                         # s1 = 2*modifier
-        fadd_s(0, 1, 1),                         # s0 = 4*modifier
+        ldr_s(1, 9, 0x52C),                      # s1 = multiplier flag
+        fmul_s(0, 0, 1),                         # s0 *= multiplier
         b(CAVE + 0x20, GETITEMVAL + 4),          # resume GetItemValue+4
     )
-    # stub1 @CAVE+0x20 — CalculateCatchRoll(roll, this)->bool: flag -> w0=1.
+    # stub1 — CalculateCatchRoll(roll, this)->bool: flag -> w0=1.
     S1 = CAVE + len(stub0)
     stub1 = w32s(
         adrp(9, S1 + 0x00, SLOT), ldrb(9, 9, 0x529),
@@ -148,7 +159,20 @@ def main():
         0x52800020,                              # mov w0,#1
         RET,
     )
-    uf[CAVE:CAVE + len(stub0) + len(stub1)] = stub0 + stub1
+    # stub2 — BoostAbility.Update burn store: flag on -> skip store.
+    # x9/x10 live mid-function → save/restore around the flag read.
+    S2 = S1 + len(stub1)
+    stub2 = w32s(
+        stp_x(9, 10, -16),                       # stp x9,x10,[sp,#-0x10]!
+        adrp(9, S2 + 0x04, SLOT), ldrb(10, 9, 0x52A),
+        cbnz(10, 4),                             # flag on -> restore & skip
+        ldp_x(9, 10, 16),                        # ldp x9,x10,[sp],#0x10
+        orig(BURNSTORE),                         # str s0,[x19,#0xf4]
+        b(S2 + 0x18, BURNSTORE + 4),
+        ldp_x(9, 10, 16),                        # skip path: restore
+        b(S2 + 0x20, BURNSTORE + 4),
+    )
+    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2)] = stub0 + stub1 + stub2
 
     patches = [
         # always-on: full game, all DLC, free research
@@ -158,6 +182,7 @@ def main():
         # toggle trampolines (original word replicated inside each stub)
         (GETITEMVAL, w32s(b(GETITEMVAL, CAVE))),
         (CATCHROLL, w32s(b(CATCHROLL, S1))),
+        (BURNSTORE, w32s(b(BURNSTORE, S2))),
     ]
     for off, blob in patches:
         uf[off:off+len(blob)] = blob

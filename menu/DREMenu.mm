@@ -82,27 +82,35 @@ typedef struct {
 static const tog_t g_togs[] = {
     {"God Mode",       TOG_CMD,  0, "SetGodMode"},
     {"Immune (Equip)", TOG_CMD,  0, "SetImmuneMode"},
-    {"Sell Value ×4",  TOG_FLAG, 0, NULL},
+    {"Sell Value",     TOG_FLAG, 0, NULL},          // multiplier = g_sell_mult @ flag+4
     {"Pot Auto-Catch", TOG_FLAG, 1, NULL},
+    {"No Overheat",    TOG_FLAG, 2, NULL},
 };
-#define NTOGS 4
-static BOOL g_state[NTOGS] = {NO, NO, YES, YES};   // sell/pot on; god/immune session-only
+#define NTOGS 5
+static BOOL g_state[NTOGS] = {NO, NO, YES, YES, YES};  // flags on; god/immune session-only
 static BOOL g_flags_init = NO;
+static float g_sell_mult = 4.0f;
 
 static void flag_apply(int i) {
     uint8_t *f = flag_base();
-    if (f && g_togs[i].kind == TOG_FLAG) f[g_togs[i].off] = g_state[i] ? 1 : 0;
+    if (!f || g_togs[i].kind != TOG_FLAG) return;
+    f[g_togs[i].off] = g_state[i] ? 1 : 0;
+    if (i == 2) *(float *)(f + 4) = g_sell_mult;   // sell multiplier float
 }
 static void flags_write(void) { for (int i = 0; i < NTOGS; i++) flag_apply(i); }
 
 // Only the flag toggles persist — god/immune game state resets each session.
 static void state_persist(void) {
-    [[NSUserDefaults standardUserDefaults] setObject:@[@(g_state[2]), @(g_state[3])]
+    [[NSUserDefaults standardUserDefaults] setObject:@[@(g_state[2]), @(g_state[3]), @(g_state[4])]
         forKey:@"dre_toggles"];
+    [[NSUserDefaults standardUserDefaults] setFloat:g_sell_mult forKey:@"dre_sellmult"];
 }
 static void state_restore(void) {
-    NSArray *a = [[NSUserDefaults standardUserDefaults] objectForKey:@"dre_toggles"];
-    if (a.count == 2) { g_state[2] = [a[0] boolValue]; g_state[3] = [a[1] boolValue]; }
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    NSArray *a = [d objectForKey:@"dre_toggles"];
+    if (a.count == 3) for (int i = 0; i < 3; i++) g_state[i + 2] = [a[i] boolValue];
+    if ([d objectForKey:@"dre_sellmult"]) g_sell_mult = [d floatForKey:@"dre_sellmult"];
+    if (g_sell_mult <= 0) g_sell_mult = 4.0f;
 }
 
 #pragma mark - Command dictionary enumeration
@@ -254,6 +262,15 @@ static void anchor_view_reset(UIView *v) {
             col = (col + 1) % 2; x = col ? bw + 10 : 0;
             if (!col) y += 42;
         }
+        // Sell multiplier input occupies the spare grid slot
+        UIButton *mb = [UIButton buttonWithType:UIButtonTypeCustom];
+        mb.frame = CGRectMake(x, y, bw, 36);
+        mb.layer.cornerRadius = 9;
+        mb.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+        mb.showsTouchWhenHighlighted = YES;
+        [self paintMult:mb];
+        [mb addTarget:self action:@selector(sellMultBtn:) forControlEvents:UIControlEventTouchUpInside];
+        [_scroll addSubview:mb];
         if (col) y += 42;
         y += 4;
     }
@@ -393,6 +410,34 @@ static void anchor_view_reset(UIView *v) {
     state_persist();
     [self paintTog:b];
     [self toast:[NSString stringWithFormat:@"%s %@", g_togs[i].name, g_state[i] ? @"ON" : @"OFF"]];
+}
+
+- (void)paintMult:(UIButton *)b {
+    b.backgroundColor = [UIColor colorWithWhite:0.28 alpha:1];
+    [b setTitle:[NSString stringWithFormat:@"Sell ×%.1f", g_sell_mult] forState:UIControlStateNormal];
+    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+}
+
+- (void)sellMultBtn:(UIButton *)b {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Sell Multiplier"
+        message:@"Multiplier applied to sell prices" preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.keyboardType = UIKeyboardTypeDecimalPad;
+        tf.text = [NSString stringWithFormat:@"%.1f", g_sell_mult];
+    }];
+    __weak UIAlertController *wa = a;
+    [a addAction:[UIAlertAction actionWithTitle:@"Set" style:UIAlertActionStyleDefault handler:^(id act) {
+        float v = wa.textFields.firstObject.text.floatValue;
+        if (v > 0) {
+            g_sell_mult = v;
+            flag_apply(2);
+            state_persist();
+            [self paintMult:b];
+            [self toast:[NSString stringWithFormat:@"Sell ×%.1f", g_sell_mult]];
+        } else [self toast:@"enter a positive number"];
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 // Commands that do irreversible things get a confirm first (forgiveness
