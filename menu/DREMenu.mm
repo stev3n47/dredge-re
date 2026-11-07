@@ -228,6 +228,40 @@ static BOOL dre_reduceMotion(void) { return UIAccessibilityIsReduceMotionEnabled
 }
 @end
 
+// Direct-manipulation feedback for the floating handle: presses dent it
+// (0.88), drags lift it (1.08 + deeper shadow) like moving a Home Screen
+// icon. Spring settle so a quick tap still lands cleanly.
+@interface DREDot : UIView
+@property (nonatomic) BOOL lifted;
+@end
+@implementation DREDot
+- (void)applyScale:(CGFloat)s {
+    if (dre_reduceMotion()) { self.transform = CGAffineTransformMakeScale(s, s); return; }
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.65
+        initialSpringVelocity:0 options:0
+        animations:^{ self.transform = CGAffineTransformMakeScale(s, s); } completion:nil];
+}
+- (void)setLifted:(BOOL)l {
+    _lifted = l;
+    self.layer.shadowOpacity = l ? 0.55 : 0.35;
+    self.layer.shadowRadius = l ? 14 : 8;
+    [self applyScale:l ? 1.08 : 1.0];
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e {
+    [super touchesBegan:t withEvent:e];
+    if (dre_reduceMotion()) return;
+    [UIView animateWithDuration:0.12 delay:0 options:UIViewAnimationOptionCurveEaseOut
+        animations:^{ self.transform = CGAffineTransformMakeScale(0.88, 0.88); } completion:nil];
+}
+- (void)settle { [self applyScale:self.lifted ? 1.08 : 1.0]; }
+- (void)touchesEnded:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e {
+    [super touchesEnded:t withEvent:e]; [self settle];
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e {
+    [super touchesCancelled:t withEvent:e]; [self settle];
+}
+@end
+
 // Haptics — fired on the causal event (the toggle commit, the snap home).
 // Lazily created on the main thread; .prepare() keeps latency ~0.
 static UIImpactFeedbackGenerator *g_impact = nil;
@@ -948,13 +982,18 @@ static UIWindow *new_window(CGRect f, UIWindowLevel lvl) {
 // Idle-fade the handle after N sec of no interaction (visibility vs obstruction).
 static void schedule_fade(void);
 static void wake_dot(void);
-static UIView *g_dot = nil;
+static DREDot *g_dot = nil;
 static int g_fadeGen = 0;
 
 @implementation DREGestureHost
 - (void)tap {
     dispatch_async(dispatch_get_main_queue(), ^{
         wake_dot();
+        // Panel already up? The dot toggles — close back toward the dot.
+        if (g_panelWin && !g_panelWin.hidden) {
+            [(DREPanel *)g_panelWin.rootViewController hidePanel];
+            return;
+        }
         // Refit to the current screen every open — creation once, but the
         // frame must survive rotation while the panel was hidden.
         CGRect sb = g_handleWin.windowScene.screen.bounds;
@@ -1002,6 +1041,7 @@ static CGFloat dre_rubber(CGFloat over, CGFloat dim) {
     if (!g_handleWin) return;
     g_fadeGen++;                    // stays awake while dragging
     g_dot.alpha = 0.9;
+    g_dot.lifted = YES;             // pick it up — scale + shadow until release
     CGPoint tr = [g translationInView:g_handleWin];
     CGRect f = g_handleWin.frame;
     f.origin.x += tr.x; f.origin.y += tr.y;
@@ -1020,7 +1060,8 @@ static CGFloat dre_rubber(CGFloat over, CGFloat dim) {
 
     if (g.state == UIGestureRecognizerStateEnded ||
         g.state == UIGestureRecognizerStateCancelled) {
-        wake_dot();
+        wake_dot();                 // clears the fade before the settle spring starts
+        g_dot.lifted = NO;
         // Edge-snap: project with release velocity, spring to nearest x-edge.
         CGPoint vel = [g velocityInView:g_handleWin];
         CGFloat proj = f.origin.x + vel.x * 0.15;   // momentum projection
@@ -1085,18 +1126,29 @@ static void make_handle(void) {
     g_handleWin = new_window(CGRectMake(org.x, org.y, 56, 56), UIWindowLevelAlert + 3);
     g_handleWin.rootViewController = [UIViewController new];
 
-    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 56, 56)];
-    dot.backgroundColor = DRE_BLUE;
+    DREDot *dot = [[DREDot alloc] initWithFrame:CGRectMake(0, 0, 56, 56)];
+    dot.backgroundColor = UIColor.clearColor;
     dot.layer.cornerRadius = 28;
-    dot.layer.cornerCurve = kCACornerCurveContinuous;
-    dot.layer.borderWidth = 1.5;
-    dot.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.6].CGColor;
+    dot.layer.borderWidth = 1.0;
+    dot.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
     dot.layer.shadowColor = UIColor.blackColor.CGColor;
     dot.layer.shadowOpacity = 0.35;
     dot.layer.shadowRadius = 8;
     dot.layer.shadowOffset = CGSizeMake(0, 3);
+    dot.layer.shadowPath = [UIBezierPath bezierPathWithOvalInRect:dot.bounds].CGPath;
     dot.userInteractionEnabled = YES;
     g_dot = dot;
+
+    // Material surface — the dot samples the game behind it instead of
+    // painting a flat color, so it sits over any scene without clashing.
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:
+        [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark]];
+    blur.frame = dot.bounds;
+    blur.layer.cornerRadius = 28;
+    blur.layer.cornerCurve = kCACornerCurveContinuous;
+    blur.layer.masksToBounds = YES;
+    blur.userInteractionEnabled = NO;   // touches belong to the dot
+    [dot addSubview:blur];
 
     UIImageView *t = [[UIImageView alloc] initWithImage:dre_symbol(@"fish.fill", 20, UIImageSymbolWeightSemibold)];
     t.tintColor = UIColor.whiteColor;
