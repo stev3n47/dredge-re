@@ -158,7 +158,8 @@ Dropped after audit (unverified or wrong semantics):
 - `v1.5.19-menu-v13` — Runtime byte-patching removed entirely: under normal dev/Signulous signing, writing to a signed executable page needs `dynamic-codesigning` (TrollStore-only); the kernel kills the app on write → every toggle crashed instantly. All cheats baked statically.
 - `v1.5.19-menu-v14` — Real on/off toggles restored via the **iOSGods data-flag mechanism** (see below): getters get `b <stub>` into a `__TEXT`-tail code cave; stubs read flags from a dead bss page; menu writes flag bytes — zero runtime code writes, works under dev signing. **Regression:** every toggle crashed on tap — crash log showed `EXC_BREAKPOINT` in `objc_opt_respondsToSelector` inside `stringWithFormat`: the toast passed a C string (`"ON"`) to `%@` instead of `@"ON"`. The flag write succeeded; the *toast* killed it.
 - `v1.5.19-menu-v14b` — Toast fix; toggles respond but don't affect gameplay — the patched getters have zero callers (see below).
-- `v1.5.19-menu-v15` — **current build.** Toggles retargeted to verified callers: `AddFunds` decimal ×4 trampoline, `CalculateCatchRoll` auto-catch trampoline, `SetGodMode`/`SetImmuneMode` via terminal commands.
+- `v1.5.19-menu-v15` — Toggles retargeted to verified callers: `AddFunds` decimal ×4 trampoline, `CalculateCatchRoll` auto-catch trampoline, `SetGodMode`/`SetImmuneMode` via terminal commands. **Still no visible sell-price change** — `AddFunds` multiplies the credited amount, but the shop's displayed price comes from `GetItemValue`, a different function.
+- `v1.5.19-menu-v15b` — **current build.** Sell ×4 retargeted to `ItemManager.GetItemValue(item, mode, sellValueModifier)` — the seam feeding BOTH the shop price label and the credited amount (9 real callers). Flag on + `mode==SELL` → `s0` doubled twice; buy prices untouched.
 
 ## v15 — retargeted toggles (v14 stubs were dead code)
 
@@ -170,11 +171,12 @@ and our branches ran into a void. `GetHasEntitlement` works because it has
 
 v15 seams, chosen for verified reachability:
 
-- **Sell Value ×4** — `GameManager.AddFunds` entry trampoline (13 real `bl`
-  callers incl. `SellFocusedItem`). Amount is a .NET `decimal` by value in
-  `x1:x2` = 96-bit mantissa + flags. Flag on → mantissa `<<2`; skipped when
-  the sign bit (`x2[63]`) is set so negative adjustments (debt) aren't
-  quadrupled. Stub @ `0x3E46D40` in the same `__TEXT` cave.
+- **Sell Value ×4** — `ItemManager.GetItemValue(item, mode{w2},
+  sellValueModifier{s0})` entry trampoline (9 real `bl` callers incl.
+  `SellModeActionHandler`). Flag on + `mode==SELL(1)` → `fadd s0,s0,s0` ×2
+  = ×4 modifier — feeds the shop price label AND the credit. Buy untouched.
+  (v15 used `AddFunds` — real callers, but the price label doesn't flow
+  through it, so nothing visibly changed.)
 - **Pot Auto-Catch** — `SerializedCrabPotPOIData.CalculateCatchRoll`
   trampoline: flag on → `mov w0,#1; ret` (always caught); else replicated
   prologue + resume. Crab pots only; rod/trawl is a different path.

@@ -88,12 +88,13 @@ def main():
     # stock). The menu writes flag bytes at uf_base+0x46DF528 — a plain data
     # write, legal under any signature.
     #
-    # v15 hook choices — picked for REAL callers (verified via bl-scan; the
+    # v15b hook choices — picked for REAL callers (verified via bl-scan; the
     # previous getter patches were dead code — il2cpp inlines tiny getters):
-    #   flag+0 Sell ×4:  GameManager.AddFunds entry. Arg is a .NET decimal by
-    #       value in x1:x2 = 96-bit mantissa + flags. ×4 = mantissa << 2.
-    #       Skipped when sign bit (x2[63]) set → negative adds (debt) untouched.
-    #       13 real bl callers incl. SellFocusedItem.
+    #   flag+0 Sell ×4:  ItemManager.GetItemValue(this, item, mode{w2},
+    #       sellValueModifier{s0}) entry. mode==SELL(1) && flag on ->
+    #       s0 *= 4 (fadd trick: s0 doubled twice — no fp immediate needed).
+    #       Feeds BOTH the displayed shop price and the credited amount —
+    #       9 real bl callers incl. SellModeActionHandler. Buy mode untouched.
     #   flag+1 Pot auto-catch: SerializedCrabPotPOIData.CalculateCatchRoll
     #       (float roll, this) -> w0 bool. Flag on → w0=1 (always caught).
     #       Crab pots only; rod/trawl use a different path.
@@ -110,24 +111,12 @@ def main():
         return 0x34000000 | ((imm19 & 0x7FFFF) << 5) | rt
     def cbnz(rt, imm19):
         return 0x35000000 | ((imm19 & 0x7FFFF) << 5) | rt
-    def tbnz(rt, bit, imm14):
-        return 0x37000000 | (((bit >> 5) & 1) << 31) | ((bit & 31) << 19) \
-               | ((imm14 & 0x3FFF) << 5) | rt
-    def mov_r(rd, rs, wide):
-        return (0xAA0003E0 if wide else 0x2A0003E0) | (rs << 16) | rd
-    def lsr_i(rd, rn, sh, wide):      # UBFM rd,rn,#sh,#(bits-1)
-        bits = 64 if wide else 32
-        return (0xD3400000 if wide else 0x53000000) \
-               | (sh << 16) | ((bits - 1) << 10) | (rn << 5) | rd
-    def lsl_i(rd, rn, sh, wide):      # UBFM rd,rn,#(bits-sh),#(bits-sh-1)
-        bits = 64 if wide else 32
-        return (0xD3400000 if wide else 0x53000000) \
-               | ((bits - sh) << 16) | ((bits - sh - 1) << 10) | (rn << 5) | rd
-    def orr_r(rd, rn, rm, wide):
-        return (0xAA000000 if wide else 0x2A000000) | (rm << 16) | (rn << 5) | rd
-    def bfi(rd, rn, lsb, width):      # BFM rd,rn,#(64-lsb),#width-1
-        return 0xB3400000 | (((64 - lsb) & 63) << 16) | ((width - 1) << 10) \
-               | (rn << 5) | rd
+    def cmp_i(rn, imm12):
+        return 0x7100001F | ((imm12 & 0xFFF) << 10) | (rn << 5)
+    def bcond(cond, imm19):
+        return 0x54000000 | ((imm19 & 0x7FFFF) << 5) | cond
+    def fadd_s(rd, rn, rm):
+        return 0x1E202800 | (rm << 16) | (rn << 5) | rd
     def b(pc_va, tgt_va):
         return 0x14000000 | (((tgt_va - pc_va) >> 2) & 0x3FFFFFF)
     RET = 0xD65F03C0
@@ -136,27 +125,20 @@ def main():
     uf = bytearray(zin.read(uf_path))
     orig = lambda va: struct.unpack('<I', uf[va:va+4])[0]
 
-    ADDFUNDS, CATCHROLL = 0x13F6E30, 0x1289B38
+    GETITEMVAL, CATCHROLL = 0x1401B84, 0x1289B38
 
-    # stub0 @CAVE+0x00 — AddFunds(decimal amount{x1:x2}, ...): flag on && x2
-    # sign bit clear -> mantissa96 <<= 2 (decimal ×4), then resume at +4.
-    # mantissa = {x2[31:0] hi32 : x1 lo64}; <<2: new_hi = hi<<2 | lo>>62;
-    # new_lo = lo<<2 (hi top bits = overflow, discarded).
+    # stub0 @CAVE+0x00 — GetItemValue: flag on && mode==SELL -> s0 *= 4.
     stub0 = w32s(
-        orig(ADDFUNDS),                          # stp x26,x25,[sp,#-0x50]!
+        orig(GETITEMVAL),                        # sub sp,sp,#0x60
         adrp(9, CAVE + 0x04, SLOT), ldrb(10, 9, 0x528),
-        cbz(10, 9),                              # flag off -> resume
-        tbnz(2, 63, 8),                          # negative amount -> resume
-        mov_r(11, 2, False),                     # w11 = old hi32
-        mov_r(13, 1, True),                      # x13 = old lo64
-        lsr_i(12, 13, 62, True),                 # lo64 top2 -> new hi32 low
-        lsl_i(1, 13, 2, True),                   # new lo64 = lo64 << 2
-        lsl_i(15, 11, 2, False),                 # new hi32 = hi32 << 2
-        orr_r(15, 15, 12, False),                #          | lo64 top2
-        bfi(2, 15, 0, 32),                       # x2 = flags(top32) | new_hi32
-        b(CAVE + 0x30, ADDFUNDS + 4),            # resume AddFunds+4
+        cbz(10, 5),                              # flag off -> resume
+        cmp_i(2, 1),                             # mode == SELL?
+        bcond(1, 3),                             # b.ne -> resume (BUY untouched)
+        fadd_s(1, 0, 0),                         # s1 = 2*modifier
+        fadd_s(0, 1, 1),                         # s0 = 4*modifier
+        b(CAVE + 0x20, GETITEMVAL + 4),          # resume GetItemValue+4
     )
-    # stub1 @CAVE+0x34 — CalculateCatchRoll(roll, this)->bool: flag -> w0=1.
+    # stub1 @CAVE+0x20 — CalculateCatchRoll(roll, this)->bool: flag -> w0=1.
     S1 = CAVE + len(stub0)
     stub1 = w32s(
         adrp(9, S1 + 0x00, SLOT), ldrb(9, 9, 0x529),
@@ -174,7 +156,7 @@ def main():
         (0x13E358C, w32s(0x52800020, RET)),                       # entitlement -> 1
         (0x134C5B8, w32s(0x52800000, RET)),                       # research -> 0
         # toggle trampolines (original word replicated inside each stub)
-        (ADDFUNDS,  w32s(b(ADDFUNDS, CAVE))),
+        (GETITEMVAL, w32s(b(GETITEMVAL, CAVE))),
         (CATCHROLL, w32s(b(CATCHROLL, S1))),
     ]
     for off, blob in patches:
