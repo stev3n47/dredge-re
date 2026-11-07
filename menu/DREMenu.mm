@@ -186,6 +186,24 @@ static BOOL patch_apply(int i, BOOL on) {
 static UIWindow *g_handleWin = nil;
 static UIWindow *g_panelWin = nil;
 
+// Anchor a window-filling view's layer to a SCREEN point (the dot), so scale
+// animations grow/shrink toward it. layer.position is in the PARENT layer's
+// coordinate space = window-local, NOT screen coords — feeding screen coords
+// here shifts the visible content by the window's own origin while the
+// hit-test area stays put (looks fine, touches land on nothing).
+static void anchor_view_to_point(UIView *v, CGPoint screenPt, CGRect winFrame) {
+    CGFloat ax = MIN(MAX((screenPt.x - winFrame.origin.x) / winFrame.size.width, 0), 1);
+    CGFloat ay = MIN(MAX((screenPt.y - winFrame.origin.y) / winFrame.size.height, 0), 1);
+    v.layer.anchorPoint = CGPointMake(ax, ay);
+    v.layer.position = CGPointMake(ax * v.bounds.size.width,
+                                   ay * v.bounds.size.height);
+}
+static void anchor_view_reset(UIView *v) {
+    v.layer.anchorPoint = CGPointMake(0.5, 0.5);
+    v.layer.position = CGPointMake(v.bounds.size.width / 2,
+                                   v.bounds.size.height / 2);
+}
+
 @interface DREPanel : UIViewController
 @property (nonatomic, weak) UIWindow *win;
 @end
@@ -500,12 +518,7 @@ static BOOL destructive_cmd(NSString *cmd) {
     // Symmetric exit — shrink+fade back toward the handle (spatial consistency).
     CGPoint dot = g_handleWin ? CGPointMake(CGRectGetMidX(g_handleWin.frame),
                                             CGRectGetMidY(g_handleWin.frame)) : self.view.center;
-    CGRect pf = self.win.frame;
-    CGFloat ax = MIN(MAX((dot.x - pf.origin.x) / pf.size.width, 0), 1);
-    CGFloat ay = MIN(MAX((dot.y - pf.origin.y) / pf.size.height, 0), 1);
-    self.view.layer.anchorPoint = CGPointMake(ax, ay);
-    self.view.layer.position = CGPointMake(pf.origin.x + ax * pf.size.width,
-                                           pf.origin.y + ay * pf.size.height);
+    anchor_view_to_point(self.view, dot, self.win.frame);
     [UIView animateWithDuration:0.28 delay:0
         usingSpringWithDamping:0.9 initialSpringVelocity:0 options:0
         animations:^{
@@ -515,9 +528,7 @@ static BOOL destructive_cmd(NSString *cmd) {
             self.win.hidden = YES;
             self.view.transform = CGAffineTransformIdentity;
             self.view.alpha = 1;
-            self.view.layer.anchorPoint = CGPointMake(0.5, 0.5);
-            self.view.layer.position = CGPointMake(pf.origin.x + pf.size.width / 2,
-                                                   pf.origin.y + pf.size.height / 2);
+            anchor_view_reset(self.view);
         }];
 }
 @end
@@ -582,13 +593,8 @@ static int g_fadeGen = 0;
         // Origin-aware spring open: scale+fade in from the dot's position.
         CGPoint dot = CGPointMake(CGRectGetMidX(g_handleWin.frame),
                                   CGRectGetMidY(g_handleWin.frame));
-        CGRect pf = g_panelWin.frame;
-        CGFloat ax = MIN(MAX((dot.x - pf.origin.x) / pf.size.width, 0), 1);
-        CGFloat ay = MIN(MAX((dot.y - pf.origin.y) / pf.size.height, 0), 1);
         UIView *pv = vc.view;
-        pv.layer.anchorPoint = CGPointMake(ax, ay);
-        pv.layer.position = CGPointMake(pf.origin.x + ax * pf.size.width,
-                                        pf.origin.y + ay * pf.size.height);
+        anchor_view_to_point(pv, dot, g_panelWin.frame);
         pv.transform = CGAffineTransformMakeScale(0.92, 0.92);
         pv.alpha = 0;
         [UIView animateWithDuration:0.32 delay:0
@@ -597,9 +603,7 @@ static int g_fadeGen = 0;
                 pv.transform = CGAffineTransformIdentity;
                 pv.alpha = 1;
             } completion:^(BOOL d){
-                pv.layer.anchorPoint = CGPointMake(0.5, 0.5);
-                pv.layer.position = CGPointMake(pf.origin.x + pf.size.width / 2,
-                                                pf.origin.y + pf.size.height / 2);
+                anchor_view_reset(pv);
             }];
     });
 }
