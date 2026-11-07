@@ -370,7 +370,7 @@ static void anchor_view_reset(UIView *v) {
     flag_apply(i);
     state_persist();
     [self paintTog:b];
-    [self toast:[NSString stringWithFormat:@"%s %@", g_togs[i].name, g_state[i] ? "ON" : "OFF"]];
+    [self toast:[NSString stringWithFormat:@"%s %@", g_togs[i].name, g_state[i] ? @"ON" : @"OFF"]];
 }
 
 // Commands that do irreversible things get a confirm first (forgiveness
