@@ -128,6 +128,8 @@ def main():
         return 0x54000000 | ((imm19 & 0x7FFFF) << 5) | cond
     def fmul_s(rd, rn, rm):
         return 0x1E200800 | (rm << 16) | (rn << 5) | rd
+    def fmov_s(rd, imm8):
+        return 0x1E201000 | ((imm8 & 0xFF) << 13) | rd   # imm8 0x70 = 1.0f
     def b(pc_va, tgt_va):
         return 0x14000000 | (((tgt_va - pc_va) >> 2) & 0x3FFFFFF)
     RET = 0xD65F03C0
@@ -136,7 +138,16 @@ def main():
     uf = bytearray(zin.read(uf_path))
     orig = lambda va: struct.unpack('<I', uf[va:va+4])[0]
 
+    #   flag+3 Fish Quality — two sites, same flag:
+    #     a) GetSaleModifierForSize: the `ldr s1,[x19,#0x50]` size load ->
+    #        flag on forces s1=1.0 → lerp hits max-size modifier.
+    #     b) GetSaleModifierForFreshness: the `b.le` freshness tier gate ->
+    #        flag on forces the top-tier path. adrp/ldrb/cbnz don't touch
+    #        NZCV so the off path replays the fcmp flags into a local
+    #        inverted b.gt (b.cond can't reach back ~46MB to the cave).
     GETITEMVAL, CATCHROLL, BURNSTORE = 0x1401B84, 0x1289B38, 0x1476D3C
+    SIZELOAD, FRESHBR = 0x127AD70, 0x127AF68
+    FRESH_TOP, FRESH_LE = 0x127AF6C, 0x127AF8C   # fallthrough / b.le target
 
     # stub0 @CAVE+0x00 — GetItemValue: flag on && mode==SELL -> s0 *= flag f32.
     stub0 = w32s(
@@ -172,7 +183,34 @@ def main():
         ldp_x(9, 10, 16),                        # skip path: restore
         b(S2 + 0x20, BURNSTORE + 4),
     )
-    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2)] = stub0 + stub1 + stub2
+    # stub3 — GetSaleModifierForFreshness b.le gate: flag on -> top tier.
+    S3 = S2 + len(stub2)
+    stub3 = w32s(
+        stp_x(9, 10, -16),
+        adrp(9, S3 + 0x04, SLOT), ldrb(10, 9, 0x52B),
+        cbnz(10, 5),                             # flag on -> forced top tier
+        ldp_x(9, 10, 16),
+        bcond(12, 2),                            # b.gt -> not(le) -> top tier
+        b(S3 + 0x18, FRESH_LE),                  # le -> second check
+        b(S3 + 0x1C, FRESH_TOP),                 # !(le) -> top tier
+        ldp_x(9, 10, 16),                        # on path
+        b(S3 + 0x24, FRESH_TOP),
+    )
+    # stub4 — GetSaleModifierForSize ldr site: flag on -> s1 = 1.0.
+    S4 = S3 + len(stub3)
+    stub4 = w32s(
+        stp_x(9, 10, -16),
+        adrp(9, S4 + 0x04, SLOT), ldrb(10, 9, 0x52B),
+        cbz(10, 4),                              # flag off -> original load
+        ldp_x(9, 10, 16),
+        fmov_s(1, 0x70),                         # s1 = 1.0 -> max size modifier
+        b(S4 + 0x18, SIZELOAD + 4),
+        ldp_x(9, 10, 16),                        # off path
+        orig(SIZELOAD),                          # ldr s1,[x19,#0x50]
+        b(S4 + 0x24, SIZELOAD + 4),
+    )
+    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4)] \
+        = stub0 + stub1 + stub2 + stub3 + stub4
 
     patches = [
         # always-on: full game, all DLC, free research
@@ -183,6 +221,8 @@ def main():
         (GETITEMVAL, w32s(b(GETITEMVAL, CAVE))),
         (CATCHROLL, w32s(b(CATCHROLL, S1))),
         (BURNSTORE, w32s(b(BURNSTORE, S2))),
+        (SIZELOAD,  w32s(b(SIZELOAD, S4))),
+        (FRESHBR,   w32s(b(FRESHBR, S3))),
     ]
     for off, blob in patches:
         uf[off:off+len(blob)] = blob
