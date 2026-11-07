@@ -201,7 +201,7 @@ static NSArray<NSDictionary *> *g_cmds = nil;
 #define DRE_HAIR    [UIColor colorWithWhite:1 alpha:0.14]
 #define DRE_RADIUS  12.0
 
-static UIImage *dre_symbol(NSString *name, CGFloat pt, UIFontWeight w) {
+static UIImage *dre_symbol(NSString *name, CGFloat pt, UIImageSymbolWeight w) {
     UIImageSymbolConfiguration *c = [UIImageSymbolConfiguration configurationWithPointSize:pt weight:w];
     return [UIImage systemImageNamed:name withConfiguration:c];
 }
@@ -311,7 +311,7 @@ static void anchor_view_reset(UIView *v) {
     close.backgroundColor = DRE_FILL;
     close.layer.cornerRadius = 15;
     close.layer.cornerCurve = kCACornerCurveContinuous;
-    [close setImage:dre_symbol(@"xmark", 12, UIFontWeightSemibold) forState:UIControlStateNormal];
+    [close setImage:dre_symbol(@"xmark", 12, UIImageSymbolWeightSemibold) forState:UIControlStateNormal];
     close.tintColor = DRE_SUB;
     [close addTarget:self action:@selector(hidePanel) forControlEvents:UIControlEventTouchUpInside];
     close.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
@@ -323,7 +323,7 @@ static void anchor_view_reset(UIView *v) {
     sw.layer.cornerRadius = 10;
     sw.layer.cornerCurve = kCACornerCurveContinuous;
     sw.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    UIImageView *mag = [[UIImageView alloc] initWithImage:dre_symbol(@"magnifyingglass", 13, UIFontWeightMedium)];
+    UIImageView *mag = [[UIImageView alloc] initWithImage:dre_symbol(@"magnifyingglass", 13, UIImageSymbolWeightMedium)];
     mag.tintColor = DRE_SUB;
     mag.frame = CGRectMake(10, 10, 14, 14);
     [sw addSubview:mag];
@@ -462,7 +462,7 @@ static void anchor_view_reset(UIView *v) {
         b.layer.cornerRadius = DRE_RADIUS;
         b.layer.cornerCurve = kCACornerCurveContinuous;
         [b setTitle:@"  Restore Save" forState:UIControlStateNormal];
-        [b setImage:dre_symbol(@"arrow.down.doc.fill", 13, UIFontWeightMedium) forState:UIControlStateNormal];
+        [b setImage:dre_symbol(@"arrow.down.doc.fill", 13, UIImageSymbolWeightMedium) forState:UIControlStateNormal];
         b.tintColor = DRE_TEXT;
         [b setTitleColor:DRE_TEXT forState:UIControlStateNormal];
         b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
@@ -476,7 +476,7 @@ static void anchor_view_reset(UIView *v) {
 }
 
 - (CGFloat)section:(NSString *)t icon:(NSString *)icon y:(CGFloat)y {
-    UIImageView *iv = [[UIImageView alloc] initWithImage:dre_symbol(icon, 10, UIFontWeightSemibold)];
+    UIImageView *iv = [[UIImageView alloc] initWithImage:dre_symbol(icon, 10, UIImageSymbolWeightSemibold)];
     iv.tintColor = DRE_SUB;
     iv.frame = CGRectMake(2, y + 5, 12, 12);
     [_scroll addSubview:iv];
@@ -527,7 +527,7 @@ static BOOL destructive_cmd(NSString *cmd);   // fwd — defined below
 
     // icon + name on the left, state word on the right — reads as a control,
     // not a label.
-    UIImage *img = dre_symbol(@(g_togs[i].icon), 13, UIFontWeightMedium);
+    UIImage *img = dre_symbol(@(g_togs[i].icon), 13, UIImageSymbolWeightMedium);
     [b setImage:img forState:UIControlStateNormal];
     b.tintColor = on ? DRE_GREEN : DRE_SUB;
     b.imageEdgeInsets = UIEdgeInsetsMake(0, -6, 0, 0);
@@ -577,7 +577,7 @@ static BOOL destructive_cmd(NSString *cmd);   // fwd — defined below
 
 - (void)paintMult:(UIButton *)b {
     b.backgroundColor = DRE_FILL;
-    [b setImage:dre_symbol(@"multiply", 13, UIFontWeightMedium) forState:UIControlStateNormal];
+    [b setImage:dre_symbol(@"multiply", 13, UIImageSymbolWeightMedium) forState:UIControlStateNormal];
     b.tintColor = DRE_SUB;
     b.imageEdgeInsets = UIEdgeInsetsMake(0, -6, 0, 0);
     [b setTitle:[NSString stringWithFormat:@" Sell ×%.1f", g_sell_mult] forState:UIControlStateNormal];
@@ -732,7 +732,7 @@ static BOOL destructive_cmd(NSString *cmd) {
     pill.layer.shadowRadius = 10;
     pill.layer.shadowOffset = CGSizeMake(0, 4);
 
-    UIImageView *iv = [[UIImageView alloc] initWithImage:dre_symbol(icon, 14, UIFontWeightSemibold)];
+    UIImageView *iv = [[UIImageView alloc] initWithImage:dre_symbol(icon, 14, UIImageSymbolWeightSemibold)];
     iv.tintColor = tint;
     iv.frame = CGRectMake(12, 9, 18, 18);
     [pill addSubview:iv];
@@ -979,7 +979,7 @@ static void make_handle(void) {
     dot.userInteractionEnabled = YES;
     g_dot = dot;
 
-    UIImageView *t = [[UIImageView alloc] initWithImage:dre_symbol(@"fish.fill", 20, UIFontWeightSemibold)];
+    UIImageView *t = [[UIImageView alloc] initWithImage:dre_symbol(@"fish.fill", 20, UIImageSymbolWeightSemibold)];
     t.tintColor = UIColor.whiteColor;
     t.frame = CGRectMake(15, 15, 26, 26);
     t.contentMode = UIViewContentModeScaleAspectFit;
