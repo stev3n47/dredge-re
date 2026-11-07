@@ -88,6 +88,11 @@ def main():
     }, fmt=plistlib.FMT_BINARY)
 
     ip = plistlib.loads(zin.read(info_path))
+    # Stock App Store plist restricts install to iPad/Mac/Vision devices only
+    # (UISupportedDevices allow-list with zero iPhone identifiers) — iOS
+    # installd refuses iPhone installs outright. iOSGods stripped it; we must too.
+    ip.pop('UISupportedDevices', None)
+    ip.pop('ITSDRMScheme', None)  # leftover FairPlay marker, also stripped by mods
     ip['UIFileSharingEnabled'] = True
     ip['LSSupportsOpeningDocumentsInPlace'] = True
     info_bytes = plistlib.dumps(ip, fmt=plistlib.FMT_BINARY)

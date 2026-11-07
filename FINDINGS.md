@@ -190,7 +190,9 @@ Device ruled out: iOSGods IPA installs on the same iPhone 17 Pro Max / iOS 26.2 
 | `v1.5.19-stock-repack-v2` (canonical container) | FAILS → not the container either |
 | `v1.5.19-stock-raw` (untouched decrypt) | FAILS → stock IPA content is guilty |
 | `v1.0.12-hybrid-mod-stockuf` (mod + stock UnityFramework) | **INSTALLS** → stock UF exonerated |
-| `v1.0.12-hybrid-mod-stockres` (mod + stock Assets.car/strings/Info.plist) | testing |
+| `v1.0.12-hybrid-mod-stockres` (mod + stock Assets.car/strings/Info.plist) | **FAILS → root cause isolated to the resource/meta swap set** |
+
+**ROOT CAUSE:** stock `Info.plist` contains `UISupportedDevices` — an explicit allow-list of `iPad*`/`MacFamily`/`RealityFamily` model identifiers with **zero `iPhone*` entries**. iOS `installd` enforces it at install time → "Unable to Install" on every iPhone regardless of signing quality. iOSGods had stripped the key (their plist is `bplist` without it); we preserved it in every prior build. `UIDeviceFamily: [1,2]` alone would have allowed universal install — the allow-list was an additional gate. Also removed `ITSDRMScheme` (FairPlay remnant). Fix landed in `inject_menu.py` (`ip.pop(...)`) → `v1.5.19-menu-v10i`.
 
 Content delta between working (mod) and failing (stock) after bisection: `Assets.car` (143 KB vs 1 MB — prime suspect, iOS validates icon catalog at install), `Info.plist` format (XML vs bplist — valid both ways), 13× `InfoPlist.strings` (verified clean — stock just adds `CFBundleDisplayName`), `DREDGE` stub (verified clean — only the iGameGod cmd + resig), 2 small framework binaries (code identical, sig-only diffs), `_CodeSignature/CodeResources` files.
 - `v1.5.19-menu-v10g` — signing-shape match attempt: keeps stock `_CodeSignature/CodeResources` dirs (mod IPA ships them — ours previously stripped them); `LC_LOAD_DYLIB` inserted *before* `LC_CODE_SIGNATURE`; `DREMenu` signed with a real self-signed CMS cert (~1.7 KB blob) instead of ad-hoc stub; `-Wl,-no_fixup_chains` for legacy signer compat. Verified locally: real CMS superblob, no chained fixups, correct command order.
