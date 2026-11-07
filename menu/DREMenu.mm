@@ -86,9 +86,10 @@ static const tog_t g_togs[] = {
     {"Pot Auto-Catch", TOG_FLAG, 1, NULL},
     {"No Overheat",    TOG_FLAG, 2, NULL},
     {"Fish Quality",   TOG_FLAG, 3, NULL},   // size->1.0 + freshness top tier
+    {"Free Upgrades",  TOG_FLAG, 8, NULL},   // materials pass + AddUpgrade free=1
 };
-#define NTOGS 6
-static BOOL g_state[NTOGS] = {NO, NO, YES, YES, YES, YES};  // flags on; god/immune session-only
+#define NTOGS 7
+static BOOL g_state[NTOGS] = {NO, NO, YES, YES, YES, YES, YES};  // flags on; god/immune session-only
 static BOOL g_flags_init = NO;
 static float g_sell_mult = 4.0f;
 
@@ -102,14 +103,14 @@ static void flags_write(void) { for (int i = 0; i < NTOGS; i++) flag_apply(i); }
 
 // Only the flag toggles persist — god/immune game state resets each session.
 static void state_persist(void) {
-    [[NSUserDefaults standardUserDefaults] setObject:@[@(g_state[2]), @(g_state[3]), @(g_state[4]), @(g_state[5])]
+    [[NSUserDefaults standardUserDefaults] setObject:@[@(g_state[2]), @(g_state[3]), @(g_state[4]), @(g_state[5]), @(g_state[6])]
         forKey:@"dre_toggles"];
     [[NSUserDefaults standardUserDefaults] setFloat:g_sell_mult forKey:@"dre_sellmult"];
 }
 static void state_restore(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     NSArray *a = [d objectForKey:@"dre_toggles"];
-    if (a.count == 4) for (int i = 0; i < 4; i++) g_state[i + 2] = [a[i] boolValue];
+    if (a.count == 5) for (int i = 0; i < 5; i++) g_state[i + 2] = [a[i] boolValue];
     if ([d objectForKey:@"dre_sellmult"]) g_sell_mult = [d floatForKey:@"dre_sellmult"];
     if (g_sell_mult <= 0) g_sell_mult = 4.0f;
 }
@@ -264,6 +265,7 @@ static void anchor_view_reset(UIView *v) {
             if (!col) y += 42;
         }
         // Sell multiplier input on its own row under the toggle grid
+        if (col) y += 42;   // odd toggle count — finish the partial row first
         UIButton *mb = [UIButton buttonWithType:UIButtonTypeCustom];
         mb.frame = CGRectMake(0, y, bw, 36);
         mb.layer.cornerRadius = 9;

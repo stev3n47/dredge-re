@@ -126,6 +126,8 @@ def main():
         return 0x7100001F | ((imm12 & 0xFFF) << 10) | (rn << 5)
     def bcond(cond, imm19):
         return 0x54000000 | ((imm19 & 0x7FFFF) << 5) | cond
+    def tbz(rt, bit, imm14):
+        return 0x36000000 | ((bit & 0x1F) << 19) | ((imm14 & 0x3FFF) << 5) | rt
     def fmul_s(rd, rn, rm):
         return 0x1E200800 | (rm << 16) | (rn << 5) | rd
     def fmov_s(rd, imm8):
@@ -148,6 +150,14 @@ def main():
     GETITEMVAL, CATCHROLL, BURNSTORE = 0x1401B84, 0x1289B38, 0x1476D3C
     SIZELOAD, FRESHBR = 0x127AD70, 0x127AF68
     FRESH_TOP, FRESH_LE = 0x127AF6C, 0x127AF8C   # fallthrough / b.le target
+    #   flag+5 Free Upgrades — two sites, same flag:
+    #     a) ItemCountCondition.Evaluate entry -> flag on returns w0=1
+    #        (material-count checks pass; also affects quest item checks).
+    #     b) AddUpgrade 'tbnz w20,#0' free gate -> flag on forces the free
+    #        path (skips material deduction). Off path replays via local
+    #        tbz (tbz can't reach back to the cave).
+    ITEMEVAL, UPGGATE = 0x127A194, 0x1420C60
+    UPG_FREE, UPG_PAY = 0x1420CC4, 0x1420C64     # tbnz target / fallthrough
 
     # stub0 @CAVE+0x00 — GetItemValue: flag on && mode==SELL -> s0 *= flag f32.
     stub0 = w32s(
@@ -209,8 +219,34 @@ def main():
         orig(SIZELOAD),                          # ldr s1,[x19,#0x50]
         b(S4 + 0x24, SIZELOAD + 4),
     )
-    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4)] \
-        = stub0 + stub1 + stub2 + stub3 + stub4
+    # stub5 — ItemCountCondition.Evaluate entry: flag on -> w0=1 (all
+    # material-count conditions satisfied). Entry patch, x9 scratch.
+    S5 = S4 + len(stub4)
+    stub5 = w32s(
+        adrp(9, S5 + 0x00, SLOT), ldrb(9, 9, 0x530),
+        cbnz(9, 3),                              # flag on -> forced true
+        orig(ITEMEVAL),                          # stp x20,x19,[sp,#-0x20]!
+        b(S5 + 0x10, ITEMEVAL + 4),              # resume original
+        0x52800020,                              # mov w0,#1
+        RET,
+    )
+    # stub6 — AddUpgrade `tbnz w20,#0` free/deduct gate: flag on -> free
+    # path (skip material deduction). x9/x10 live -> save/restore; off
+    # path replays tbnz via a local tbz (tbz can't reach back to cave).
+    S6 = S5 + len(stub5)
+    stub6 = w32s(
+        stp_x(9, 10, -16),
+        adrp(9, S6 + 0x04, SLOT), ldrb(10, 9, 0x530),
+        cbnz(10, 5),                             # flag on -> forced free
+        ldp_x(9, 10, 16),
+        tbz(20, 0, 2),                           # free bit clear -> pay path
+        b(S6 + 0x18, UPG_FREE),                  # bit set -> free path
+        b(S6 + 0x1C, UPG_PAY),                   # pay path (orig fallthrough)
+        ldp_x(9, 10, 16),                        # on path: restore
+        b(S6 + 0x24, UPG_FREE),
+    )
+    uf[CAVE:CAVE + len(stub0) + len(stub1) + len(stub2) + len(stub3) + len(stub4) + len(stub5) + len(stub6)] \
+        = stub0 + stub1 + stub2 + stub3 + stub4 + stub5 + stub6
 
     patches = [
         # always-on: full game, all DLC, free research
@@ -223,6 +259,8 @@ def main():
         (BURNSTORE, w32s(b(BURNSTORE, S2))),
         (SIZELOAD,  w32s(b(SIZELOAD, S4))),
         (FRESHBR,   w32s(b(FRESHBR, S3))),
+        (ITEMEVAL,  w32s(b(ITEMEVAL, S5))),
+        (UPGGATE,   w32s(b(UPGGATE, S6))),
     ]
     for off, blob in patches:
         uf[off:off+len(blob)] = blob
