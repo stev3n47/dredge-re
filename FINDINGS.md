@@ -154,7 +154,7 @@ Dropped after audit (unverified or wrong semantics):
 - `v1.5.19-menu-v9b` — v9 + ad-hoc-signed `DREMenu.dylib` (re-signers only recurse into binaries that already carry `LC_CODE_SIGNATURE`; unsigned dylib → Singulous signed OK but iOS install refused).
 - `v1.5.19-menu-v10` — Four-agent audit applied: float toggles used `b +8` into mid-function (guaranteed crash) → correct `ldr s0/ret/.float`; dropped buggy static `get_SellValueModifier` patch (returned via `w0`, float methods return in `s0` — Sell is runtime-toggle only); `mprotect` checked + RX restored; dictionary enum hardened to 40-byte stride (CommandInfo is an inline value struct); il2cpp calls on main thread; ObjC++ try/catch around managed calls; **zip repack preserves exec bits** (explicit 0755 on all Mach-O) — the likely Singulous install blocker alongside device-UDID provisioning; stale `_CodeSignature`/`embedded.mobileprovision` stripped; dylib ad-hoc signed. Toggle list trimmed to the 5 verified patches (see table). No-arg commands run on tap; arg commands show min/max prompt.
 - `v1.5.19-menu-v10i` — removes stock `UISupportedDevices` device allow-list + `ITSDRMScheme` FairPlay marker from `Info.plist`. **CONFIRMED: installs and runs on iPhone via Signulous — the root cause of every prior "Unable to install".**
-- `v1.5.19-menu-v11` — **current build.** Menu UX overhaul (see audit section): transient toasts, destructive-command confirms, screen-clamped panel with spring open/close anchored to dot, right-edge dot with edge-snap + idle fade, ON/OFF persisted toggles, `CommandInfo.help` in arg prompts, save restore scans whole container and reports destination.
+- `v1.5.19-menu-v11` — **current build.** Menu UX overhaul (see audit section): transient toasts, destructive-command confirms, screen-clamped panel with spring open/close anchored to dot, right-edge dot with edge-snap + idle fade, ON/OFF persisted toggles, `CommandInfo.help` in arg prompts, save restore scans whole container and reports destination. **Regressed-and-fixed:** first upload was injected into *raw stock* IPA → no static patches (game ran in trial mode, DLC saves blocked with "no valid license"). Rebuilt onto `base-v10` (verified `mov w0,#1` @ `0x13e358c`, `mov w0,#0` @ `0x12948bc`). Verified `SaveManager.TryReplaceUnownedDLCItems` calls `GetHasEntitlement` at `0x1286588` → the save-load base/dlc1/dlc2 check now passes.
 
 ## Multi-agent audit — remaining findings
 
@@ -170,7 +170,7 @@ Dropped after audit (unverified or wrong semantics):
 **Still open (nice-to-have):**
 - Long-press dot → collapse to edge tab.
 - Search/filter for the ~25+ command list.
-- Save restore: if no `dredge-save*.bin` exists in the container, writes to `Documents/` root — if the game reads saves elsewhere it won't pick it up (user reports "missing something" when opening the restored save; v11's confirm dialog reports the destination to aid diagnosis).
+- Save restore: resolved — the "missing license" error was the unpatched base (see v11 note), not the destination folder. Restore scans Documents + Library and reports the target dir.
 
 ## Signulous install failure (iPhone) — RESOLVED
 
