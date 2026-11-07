@@ -1,8 +1,14 @@
 """Inject LC_LOAD_DYLIB for CXMenu.framework into CarXDriftRacing3 and repackage.
 
-- Weakens the iOSGods load commands (libcarx in UnityFramework, iGameGod in
-  the exe) and drops their files from the bundle — weak loads of missing
-  files skip silently, so nothing external remains.
+- Removes the iOSGods load commands entirely (libcarx in UnityFramework,
+  iGameGod in the exe) and drops their files from the bundle. Weakening to
+  LC_LOAD_WEAK_DYLIB was NOT sufficient: a weak load of a missing file
+  leaves a defunct image in the dependency graph, and dyld's
+  runInitializersBottomUpPlusUpwardLinks (hit when the exe dlopens
+  UnityFramework via CFBundle) walked it as an upward link and called a
+  null initializer — pc=0, CODESIGNING Invalid Page. Both commands are the
+  last dylib LC in their binary (ordinal 23/23 and 77/77), so excision
+  renumbers nothing.
 - Adds LC_LOAD_DYLIB '@executable_path/Frameworks/CXMenu.framework/CXMenu'
 - Bakes the resource-seam patch into UnityFramework (see stub notes below)
 - Repackages the IPA preserving exec bits and zip layout
@@ -57,20 +63,33 @@ def inject_dylib_cmd(exe: bytes, dylib_path: str) -> bytes:
     struct.pack_into('<I', b, 20, sizeofcmds + cmdsize)
     return bytes(b)
 
-def weaken_load(b: bytearray, needle: bytes) -> int:
-    """LC_LOAD_DYLIB -> LC_LOAD_WEAK_DYLIB for any load whose path contains
-    needle. The file is then removed from the bundle, so dyld skips it."""
+def remove_load(b: bytearray, needle: bytes) -> int:
+    """Excise LC_LOAD_*_DYLIB commands whose path contains needle: slide the
+    remaining load commands down over them and shrink ncmds/sizeofcmds.
+    Only safe when the removed dylib is the last dylib LC in the binary —
+    removing an earlier one renumbers every later dylib ordinal and breaks
+    existing binds."""
     ncmds = struct.unpack('<I', b[16:20])[0]
-    off = 32; hits = 0
-    for _ in range(ncmds):
+    sizeofcmds = struct.unpack('<I', b[20:24])[0]
+    lc_end = 32 + sizeofcmds
+    off = 32; hits = 0; i = 0
+    while i < ncmds:
         cmd, size = struct.unpack('<II', b[off:off+8])
-        if cmd == LC_LOAD_DYLIB:
+        if cmd in (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB):
             noff = struct.unpack('<I', b[off+8:off+12])[0]
             name = bytes(b[off+noff:off+size]).split(b'\x00')[0]
             if needle in name:
-                struct.pack_into('<I', b, off, LC_LOAD_WEAK_DYLIB)
+                b[off:lc_end-size] = b[off+size:lc_end]
+                b[lc_end-size:lc_end] = b'\x00' * size
+                sizeofcmds -= size
+                ncmds -= 1
+                lc_end -= size
                 hits += 1
+                continue
         off += size
+        i += 1
+    struct.pack_into('<I', b, 16, ncmds)
+    struct.pack_into('<I', b, 20, sizeofcmds)
     return hits
 
 def main():
@@ -86,12 +105,12 @@ def main():
     exe = bytearray(zin.read(exe_path))
     dyb = open(dylib, 'rb').read()
 
-    # iOSGods payload removal: weaken the loads, drop the files.
-    n = weaken_load(exe, b'iGameGod');   assert n == 1, f'exe iGameGod LC x{n}'
+    # iOSGods payload removal: excise the loads, drop the files.
+    n = remove_load(exe, b'iGameGod');   assert n == 1, f'exe iGameGod LC x{n}'
     exe = inject_dylib_cmd(bytes(exe), '@executable_path/Frameworks/CXMenu.framework/CXMenu')
 
     uf = bytearray(zin.read(uf_path))
-    n = weaken_load(uf, b'libcarx');     assert n == 1, f'uf libcarx LC x{n}'
+    n = remove_load(uf, b'libcarx');     assert n == 1, f'uf libcarx LC x{n}'
     orig = lambda va: struct.unpack('<I', uf[va:va+4])[0]
 
     # ---- encoders ---------------------------------------------------------
