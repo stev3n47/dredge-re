@@ -157,7 +157,32 @@ Dropped after audit (unverified or wrong semantics):
 - `v1.5.19-menu-v11` — Menu UX overhaul (see audit section). **Regressed-and-fixed:** first upload was injected into *raw stock* IPA → no static patches (game ran in trial mode, DLC saves blocked with "no valid license"). Verified `SaveManager.TryReplaceUnownedDLCItems` calls `GetHasEntitlement` at `0x1286588` → patch fixes the save-load base/dlc1/dlc2 check. **Also broken:** open/close animation set `layer.position` in screen coords instead of window-local → panel rendered offset from its hit area → all buttons dead (fixed v12).
 - `v1.5.19-menu-v13` — Runtime byte-patching removed entirely: under normal dev/Signulous signing, writing to a signed executable page needs `dynamic-codesigning` (TrollStore-only); the kernel kills the app on write → every toggle crashed instantly. All cheats baked statically.
 - `v1.5.19-menu-v14` — Real on/off toggles restored via the **iOSGods data-flag mechanism** (see below): getters get `b <stub>` into a `__TEXT`-tail code cave; stubs read flags from a dead bss page; menu writes flag bytes — zero runtime code writes, works under dev signing. **Regression:** every toggle crashed on tap — crash log showed `EXC_BREAKPOINT` in `objc_opt_respondsToSelector` inside `stringWithFormat`: the toast passed a C string (`"ON"`) to `%@` instead of `@"ON"`. The flag write succeeded; the *toast* killed it.
-- `v1.5.19-menu-v14b` — **current build.** Toast fix; toggles verified working path: `toggleBtn:` → `flag_apply` → byte/float write to `uf_base+0x46DF528`.
+- `v1.5.19-menu-v14b` — Toast fix; toggles respond but don't affect gameplay — the patched getters have zero callers (see below).
+- `v1.5.19-menu-v15` — **current build.** Toggles retargeted to verified callers: `AddFunds` decimal ×4 trampoline, `CalculateCatchRoll` auto-catch trampoline, `SetGodMode`/`SetImmuneMode` via terminal commands.
+
+## v15 — retargeted toggles (v14 stubs were dead code)
+
+The v14 stubs were byte-perfect and flag writes worked — but a `bl` scan
+showed the four patched getters have **zero direct callers**. IL2CPP inlines
+tiny accessors at call sites, so real game code reads the fields directly
+and our branches ran into a void. `GetHasEntitlement` works because it has
+31 real callers. Lesson: a patchable getter proves nothing — verify callers.
+
+v15 seams, chosen for verified reachability:
+
+- **Sell Value ×4** — `GameManager.AddFunds` entry trampoline (13 real `bl`
+  callers incl. `SellFocusedItem`). Amount is a .NET `decimal` by value in
+  `x1:x2` = 96-bit mantissa + flags. Flag on → mantissa `<<2`; skipped when
+  the sign bit (`x2[63]`) is set so negative adjustments (debt) aren't
+  quadrupled. Stub @ `0x3E46D40` in the same `__TEXT` cave.
+- **Pot Auto-Catch** — `SerializedCrabPotPOIData.CalculateCatchRoll`
+  trampoline: flag on → `mov w0,#1; ret` (always caught); else replicated
+  prologue + resume. Crab pots only; rod/trawl is a different path.
+- **God / Immune** — no patch at all: the menu fires the game's own
+  `SetGodMode`/`SetImmuneMode` terminal commands, which write the real
+  `Player` fields. Arg `1`/`0` appended iff `CommandInfo.max>0`.
+- Flags are now byte-only at `uf_base+0x46DF528` (`+0` sell, `+1` pot);
+  god/immune are session-only (game state resets) so they aren't persisted.
 
 ## Runtime toggles under dev signing — the iOSGods mechanism (v14)
 
