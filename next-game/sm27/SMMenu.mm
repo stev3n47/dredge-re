@@ -102,8 +102,8 @@ typedef struct {
 static const act_t g_squad[] = {   // club/squad-scoped rewards
     {"Cash Injection",   "banknote.fill",        0x2A02D40, NO},
     {"Team Fitness",     "heart.fill",           0x2A02A84, NO},
-    {"Facility Reduce",  "hammer.fill",          0x2A02088, NO},
-    {"Stadium Reduce",   "sportscourt.fill",     0x2A030F0, NO},
+    {"Facility Done",    "hammer.fill",          0x2A02088, NO},
+    {"Stadium Done",     "sportscourt.fill",     0x2A030F0, NO},
     {"Suspension Boost", "pause.circle.fill",    0x2A026C4, NO},
     {"Scout Report",     "magnifyingglass",      0x2A02CD8, NO},
     {"Profile Scout",    "person.crop.rectangle",0x2A02C70, NO},
@@ -130,7 +130,10 @@ static NSString *sm_give(const act_t *a) {
         if (!pid) return @"No squad loaded — pick a save first";
         *(int *)((char *)m + 0x20) = pid;
     }
-    ((fn_v_t)SMVA(a->va))(m, NULL);
+    // Reduce rewards shave a fixed amount off the current build — loop
+    // them so one tap finishes the upgrade outright.
+    int times = (a->va == 0x2A02088 || a->va == 0x2A030F0) ? 60 : 1;
+    for (int i = 0; i < times; i++) ((fn_v_t)SMVA(a->va))(m, NULL);
     return nil;
 }
 
