@@ -107,3 +107,37 @@ used after direct writes so the UI redraws.
   `FetchLatestCustomerData` may overwrite). Verify on-device.
 - VIP/edition flags are local entitlements — no StoreKit receipt is
   generated; server-gated features may still check purchases.
+
+## Upgrade completion (v5) — crash + guard fix
+
+Blindly looping `GiveFacilityUpgradeReduceReward`/`GiveStadiumUpgradeReduceReward`
+×60 crashed with SIGABRT: after the build completed, extra calls re-fired
+the completion path and threw inside the game. Fix = poll the game's own
+flags per iteration:
+
+- `Game` object: `*(0x8492748)` = `Il2CppClass*` → `+0xb8` statics →
+  `statics[0]` = live `Game` instance
+- `Game->+0x138` = `FacilityManager`; `FM->+0x10` =
+  `FacilityUnlockInProgress`, `FM->+0x28` = `RewardAdUnlock` (the
+  ad-targeted unlock; `RewardAdUnlock->+0x14` = days remaining — the
+  value passed to `OnReduceFacilityUpgradeTime`)
+- `Game->+0x190` = `g_StadiumUpgradeInProgress` (bool)
+- `Stadium.get_StadiumUpgradeFinished()` static @ `0x2CDACFC`;
+  `Stadium.ReduceStadiumUpgradeTime(int)` @ `0x2CDB034` (reward uses -7);
+  `Stadium.ProcessStadiumUpgrade()` @ `0x2CDADC8`
+
+Loop: `while (inProgress && !finished && i < 64) fire reward` — exits
+right after the completing call, so no post-completion over-fire.
+
+## Reward/pack types (v4)
+
+`AdMobRewardsController.GiveRewardedAdReward(RewardVideoType)` @
+`0x29FF778` (instance on `get_Instance()` result, `currentRewardVideoType`
+field @ +0x28). Types: Cash=1, Boosts=2, CreditsOne=3, CreditsTwo=4,
+doubles 5-8, FreePack=26. Credit types hit `ClaimRewardsFromServer` →
+server grant — persists if the server honours the claim without an ad
+impression (observed: request fires a save but no grant — likely
+server-side validation).
+
+`GiveCashReward` @ `0x2A02D40`: amount = `(n+1)×15/100` computed per call —
+looped ×20 in menu.
