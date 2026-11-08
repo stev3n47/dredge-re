@@ -144,3 +144,20 @@ DREDGE's dump isn't clobbered (restored to `tools/dredge-dump/`).
 the server authoritative-checks currency, effects may be cosmetic or
 corrected on sync. Untestable from here; on-device check: earn once with
 Boost on, restart, see if the balance persists.
+
+## v7 — auth-wall sweeper (2026-11-08)
+
+- v6 proved the login wall is inside libcarx, not iGameGod: stub iGameGod +
+  real libcarx launches AND still walls. libcarx carries a SwiftUI auth
+  module (`AuthUI.LegacyAuthToastView` — type accessor at 0xa6334).
+- Rather than defeat the check inside obfuscated libcarx code, CXMenu now
+  sweeps the UI: every 0.6s it walks window/VC/view hierarchies and hides
+  or dismisses anything whose ObjC class name mentions `AuthUI.`,
+  `AuthToast`, or `iOSGods.`. Generic SwiftUI hosting controllers embed
+  module+type names in their ObjC class name, so the match survives the
+  mod's class obfuscation.
+- Verified in package: real libcarx 5,965,344B intact, stub iGameGod
+  51,424B, CXMenu contains sweeper strings.
+- On-device wall behaviour still needs confirming — if the wall blocks
+  touch globally (e.g. full-screen view in the game's own window) it may
+  need view-hierarchy removal instead of VC-level dismissal.
