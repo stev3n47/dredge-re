@@ -203,12 +203,24 @@ def main():
     # stub entry into a bare `ret` is a safe no-op.
     carx_path = f'{app}/Frameworks/libcarx.dylib'
     carx = bytearray(zin.read(carx_path)) if (keep_iosgods or stub_igg) else None
-    DELETED_STUB = 0x47BEC
     if carx is not None:
+        DELETED_STUB = 0x47BEC
         assert struct.unpack('<I', carx[DELETED_STUB:DELETED_STUB+4])[0] == 0xD10083FF, \
             f'deleted-stub entry {struct.unpack("<I", carx[DELETED_STUB:DELETED_STUB+4])[0]:08x}'
         struct.pack_into('<I', carx, DELETED_STUB, 0xD65F03C0)  # ret
-        print(f'libcarx: deleted NSTimer-block stub @0x{DELETED_STUB:x} -> ret')
+        # Toast presenter: the wall-window construction sits behind a
+        # cbnz/cbz gate at 0x1e4e8 (-> 0x1ea9c). The block builds the
+        # window + dymFkfP toast VC + windowLevel. Force the branch so the
+        # toast is never built. Block is pure UI — 23 msgSends, no state.
+        TOAST_GATE, TOAST_END = 0x1E4E8, 0x1EA9C
+        gate = struct.unpack('<I', carx[TOAST_GATE:TOAST_GATE+4])[0]
+        assert (gate & 0xFF000000) in (0x34000000, 0xB4000000) and \
+            ((gate >> 5) & 0x7FFFF) == ((TOAST_END - TOAST_GATE) >> 2), \
+            f'toast gate {gate:08x}'
+        struct.pack_into('<I', carx, TOAST_GATE,
+                         0x14000000 | ((TOAST_END - TOAST_GATE) >> 2))  # b #end
+        print(f'libcarx: NSTimer stub @0x{DELETED_STUB:x} -> ret; '
+              f'toast gate @0x{TOAST_GATE:x} -> b 0x{TOAST_END:x}')
 
     # ---- repack -----------------------------------------------------------
     fw_info = plistlib.dumps({
