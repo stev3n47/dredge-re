@@ -158,13 +158,18 @@ static NSString *sm_give(const act_t *a) {
     if (a->va == 0x2A02088 || a->va == 0x2A030F0) {
         void *g = sm_game();
         if (!g) return @"Game not ready — get in-game first";
-        if (a->va == 0x2A02088) {  // facility: Game->FacilityManager->inProgress
+        if (a->va == 0x2A02088) {  // ALL facilities, not just RewardAdUnlock:
+            // stamp every in-progress unlock's UnlockDate (+0x18) into the
+            // past, then Facilities.ProcessUpgrades() finalizes the lot.
             void *fm = *(void **)((char *)g + 0x138);
-            if (!fm || !((char *)fm)[0x10] || !*(void **)((char *)fm + 0x28))
-                return @"No facility upgrade in progress";
-            int i = 0;
-            while (i++ < 64 && ((char *)fm)[0x10] && *(void **)((char *)fm + 0x28))
-                ((fn_v_t)SMVA(a->va))(m, NULL);
+            void *list = fm ? *(void **)((char *)fm + 0x18) : NULL;
+            int n = list ? *(int *)((char *)list + 0x18) : 0;
+            void *arr = list ? *(void **)((char *)list + 0x10) : NULL;
+            if (!arr || n <= 0) return @"No facility upgrade in progress";
+            void **us = (void **)((char *)arr + 0x20);
+            for (int i = 0; i < n && i < 64; i++)
+                if (us[i]) *(long long *)((char *)us[i] + 0x18) = 0;
+            ((fn_v_t)SMVA(0x27CB748))(NULL, NULL); // ProcessUpgrades
         } else {                    // stadium: Game->g_StadiumUpgradeInProgress
             if (!((char *)g)[0x190] || sm_stadium_done())
                 return @"No stadium upgrade in progress";
