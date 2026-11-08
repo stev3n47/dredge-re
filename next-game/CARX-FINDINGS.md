@@ -189,3 +189,32 @@ called from a block-invoke trampoline (0x45ff0) via CFRunLoop/GSEvent:
   obfuscator stripped
 Fix: entry patched to ret (void block — safe no-op). Timer now fires into
 nothing. Verified in package: 0x47bec = 0xd65f03c0.
+
+## v11 — the actual wall window (axZEGZ)
+
+v10's toast gate at `0x1e4e8` only killed the `dymFkfP` toast (lvl 2100).
+The persistent wall is the **axZEGZ window** (lvl 1001, full-screen
+SwiftUI login view, rootVC `ydCtsJWAPGghXEVfeoGWHmPYRuYCKGTL`).
+
+Chain (all in libcarx):
+- `axZEGZ`/`ydCts` are Swift classes: ObjC class objs at `0x4fbef8`/
+  `0x4fbfd0` (ro names `axZEGZPfkmikNIEaZgnuNGBx`/`ydCts…` at `0x3ef8d0`/
+  `0x3efad0`), NOT in `__objc_classlist`, no classref slots — allocated
+  via Swift stub records (`0x520880`/`0x520ca8`, accessor `0xaf450`)
+- axZEGZ `init(windowScene:)` @ `0x3755a0` (msgSendSuper2 to UIWindow)
+- Constructor @ `0x9fd60`: `objc_allocWithZone(axZEGZ)+init` → global
+  `0x58a260`, invoked via `swift_once` (token `0x4fa808`)
+- Setup fn @ `0x9fe2c`: predicate `bl 0x3b4f7c` → `cbz w0` →
+  `[window setHidden:NO]` @ `0x9fe7c`, then configures `window.ivar`
+  (the ydCts VC) via `swift_getObjCClassFromMetadata`+alloc+init
+
+**v11 patch**: force `cbz w0` @ `0x9fe74` → `b #0x9ff18` — always takes
+the not-showing path. Window is constructed (real object → all ivar
+loads safe) but `setHidden:NO` never runs. (A nil-return ctor was
+rejected: the reader does `ldr x21,[x19+x22]` on the window pointer —
+nil would crash.)
+
+Also present: a *subclass* of axZEGZ (msgSendSuper2 sites at `0xa081c`,
+`0xa09b8`, `0xa200c`, `0xa205c`, `0xa2110` build super structs naming
+axZEGZ) — the dump window was class axZEGZ itself, but if a renamed
+sibling appears, its own show site needs the same treatment.
