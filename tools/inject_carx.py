@@ -110,16 +110,22 @@ def main():
     exe = bytearray(zin.read(exe_path))
     dyb = open(dylib, 'rb').read()
 
-    keep_iosgods = len(sys.argv) > 4 and sys.argv[4] == 'keep'
-    stub_dyb = None if keep_iosgods or len(sys.argv) <= 4 else open(sys.argv[4], 'rb').read()
+    # mode: none=excise both | 'keep'=keep all | path=stub both |
+    #       'igg'=stub iGameGod only | 'carx'=stub libcarx only
+    mode = sys.argv[4] if len(sys.argv) > 4 else None
+    keep_iosgods = mode == 'keep'
+    stub_igg = mode == 'igg'
+    stub_carx = mode == 'carx'
+    stub_dyb = open('next-game/StubDylib', 'rb').read() if (stub_igg or stub_carx) else (
+        None if keep_iosgods or len(sys.argv) <= 4 else open(sys.argv[4], 'rb').read())
 
-    if stub_dyb is None and not keep_iosgods:
+    if stub_dyb is None and not keep_iosgods and not stub_igg:
         # iOSGods payload removal: excise the loads, drop the files.
         n = remove_load(exe, b'iGameGod');   assert n == 1, f'exe iGameGod LC x{n}'
     exe = inject_dylib_cmd(bytes(exe), '@executable_path/Frameworks/CXMenu.framework/CXMenu')
 
     uf = bytearray(zin.read(uf_path))
-    if stub_dyb is None and not keep_iosgods:
+    if stub_dyb is None and not keep_iosgods and not stub_carx:
         n = remove_load(uf, b'libcarx');     assert n == 1, f'uf libcarx LC x{n}'
     orig = lambda va: struct.unpack('<I', uf[va:va+4])[0]
 
@@ -242,13 +248,13 @@ def main():
                 dirs_seen.add(d)
                 zout.writestr(dir_zinfo(d), b'')
 
-    drop_prefixes = () if keep_iosgods else (
+    keep_igg_files = keep_iosgods or stub_carx   # keep iGameGod unless removing/stubbing it
+    keep_carx_file = keep_iosgods or stub_igg    # keep libcarx unless removing/stubbing it
+    drop_prefixes = () if keep_igg_files else (
         f'{app}/Frameworks/iGameGod.framework/',
     )
-    drop_files = {f'{app}/embedded.mobileprovision'} if keep_iosgods else {
-        f'{app}/Frameworks/libcarx.dylib',
-        f'{app}/embedded.mobileprovision',
-    }
+    drop_files = {f'{app}/embedded.mobileprovision'} | (
+        set() if keep_carx_file else {f'{app}/Frameworks/libcarx.dylib'})
 
     def emit(zi, data, exec_bit=None):
         emit_dirs(zi.filename)
@@ -274,20 +280,23 @@ def main():
     emit(file_zinfo(fw_plist), fw_info)
     emit(file_zinfo(info_path), info_bytes)
     if stub_dyb is not None:
-        # Neutral stub images at the original iOSGods paths — real loadable
-        # files so no defunct weak images remain in the dep graph.
-        emit(macho_zinfo(f'{app}/Frameworks/libcarx.dylib'), stub_dyb)
-        emit(macho_zinfo(f'{app}/Frameworks/iGameGod.framework/iGameGod'), stub_dyb)
-        igg_plist = plistlib.dumps({
-            'CFBundleExecutable': 'iGameGod',
-            'CFBundleIdentifier': 'com.stub.igamegod',
-            'CFBundleInfoDictionaryVersion': '6.0',
-            'CFBundleName': 'iGameGod',
-            'CFBundlePackageType': 'FMWK',
-            'CFBundleShortVersionString': '1.0',
-            'CFBundleSupportedPlatforms': ['iPhoneOS'],
-        }, fmt=plistlib.FMT_BINARY)
-        emit(file_zinfo(f'{app}/Frameworks/iGameGod.framework/Info.plist'), igg_plist)
+        # Neutral stub images at removed paths — real loadable files so the
+        # dep graph stays complete. 'igg'/'carx' modes stub only one side.
+        both = not (stub_igg or stub_carx)
+        if both or stub_carx:
+            emit(macho_zinfo(f'{app}/Frameworks/libcarx.dylib'), stub_dyb)
+        if both or stub_igg:
+            emit(macho_zinfo(f'{app}/Frameworks/iGameGod.framework/iGameGod'), stub_dyb)
+            igg_plist = plistlib.dumps({
+                'CFBundleExecutable': 'iGameGod',
+                'CFBundleIdentifier': 'com.stub.igamegod',
+                'CFBundleInfoDictionaryVersion': '6.0',
+                'CFBundleName': 'iGameGod',
+                'CFBundlePackageType': 'FMWK',
+                'CFBundleShortVersionString': '1.0',
+                'CFBundleSupportedPlatforms': ['iPhoneOS'],
+            }, fmt=plistlib.FMT_BINARY)
+            emit(file_zinfo(f'{app}/Frameworks/iGameGod.framework/Info.plist'), igg_plist)
     zout.close(); zin.close()
 
     z = zipfile.ZipFile(out)
