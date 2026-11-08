@@ -3,15 +3,48 @@
 Source IPA: iOSGods mod, game v1.18.1 (`CarXDriftRacing3`, Unity IL2CPP,
 UnityFramework 128MB, il2cpp metadata version 31).
 
-Shipped: `carx-1.18.1-menu-v3` — iOSGods payload stripped (libcarx.dylib +
-iGameGod.framework removed, their load commands **excised** from the
-command stream), independent `CXMenu.framework` injected. v1/v2 weakened
-the LCs instead and crash on launch — see below.
+Shipped: `carx-1.18.1-menu-v6` — real `libcarx.dylib` kept (its runtime
+patches are LOAD-BEARING — see v5/v6 discovery below), iGameGod replaced
+with a neutral stub, `CXMenu.framework` injected. v1–v4 all removed or
+stubbed libcarx and crash at launch.
+
+## The load-bearing discovery (v5)
+
+`v5` = stock IPA + our additions, removing NOTHING → **launches, menu
+works**. So the crash was never our injection machinery — it was removal.
+`libcarx.dylib`'s `__mod_init_func` (7 entries) applies Jailpatch runtime
+hooks *before* UF's own initializers run (bottom-up JIT order). Its
+strings show boot-critical work, not just cheats:
+
+- `Hooked GenerateFreeRideEncryptionSign @ 0x26FE11C` — request signing
+- `install NSURLSession hook`, `hook hit[dataTask]` — network interception
+- `iGameGod XXSideloadFix keychain access-group hook` — sideload shims
+- `finish achievements patched` — the actual cheats
+
+With libcarx absent/stubbed, UF's 769 initializers run on **unpatched**
+code → one tail-calls into a function that resolves to null → `pc=0` in
+`forEachInitializer`. (Pointer math: `__init_offsets` targets are
+base+offset, never 0 — so the fault is inside a callee, consistent with a
+tail-call to a function the Jailpatch hooks were meant to provide/fix.)
+
+`iGameGod.framework` (22MB, Swift) is the separate auth/login-wall
+component. libcarx has **zero** LC links and **zero** symbol imports from
+it → the two are independent. v6 stubs iGameGod only.
+
+## Earlier wrong theories (all ruled out)
+
+- Cave in live `__const` (v1) — real cause of the FIRST crash, fixed in v2
+- Defunct weak-image upward-links walk (v2/v3) — plausible but v4's
+  complete dep-graph still crashed identically; disproven
+- Malformed init tables / binds to deleted libs / LC_ROUTINES /
+  thread_starts / cryptid — all verified clean (LIEF + manual parse)
 
 ## Architecture (same pattern as DREDGE)
 
-- `tools/inject_carx.py` — injector: excises iOSGods LCs, bakes patches into
-  UnityFramework, embeds `CXMenu.framework`, repackages.
+- `tools/inject_carx.py` — injector. Modes: excise-both (broken), `keep`
+  (all stock + additions = working v5), path stub-both, `igg` (stub
+  iGameGod only — v6), `carx` (stub libcarx only). Bakes the resource-seam
+  patch into UnityFramework, embeds `CXMenu.framework`, repackages.
 - `next-game/CXMenu.mm` — menu dylib (same design system as DREMenu: floating
   dot, material panel, spring/haptic feedback). Writes flag bytes only.
 - Flag page: `__DATA` segment-tail padding at **0x7B47000** — `__common`
