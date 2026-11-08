@@ -1,0 +1,46 @@
+name: Build SMMenu.dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'next-game/sm27/SMMenu.mm'
+      - '.github/workflows/build-smmenu.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 -dynamiclib \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=15.0 \
+            -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore \
+            -fobjc-arc -O2 -lc++ -lc++abi \
+            -Wl,-no_fixup_chains \
+            -install_name '@executable_path/Frameworks/SMMenu.framework/SMMenu' \
+            -o SMMenu next-game/sm27/SMMenu.mm
+          openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+            -days 30 -nodes -subj "/CN=SMMenu/" \
+            -addext "keyUsage=critical,digitalSignature" \
+            -addext "extendedKeyUsage=critical,codeSigning" \
+            -addext "basicConstraints=critical,CA:FALSE"
+          openssl pkcs12 -export -legacy -out id.p12 -inkey key.pem -in cert.pem -passout pass:temp
+          security create-keychain -p temp t.keychain
+          security default-keychain -s t.keychain
+          security list-keychains -d user -s t.keychain
+          security unlock-keychain -p temp t.keychain
+          security import id.p12 -k t.keychain -P temp -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp t.keychain
+          codesign --force --sign "SMMenu" SMMenu
+          file SMMenu
+          otool -L SMMenu
+          codesign -dv SMMenu 2>&1 | head -5
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMMenu
+          path: SMMenu
