@@ -161,3 +161,31 @@ Boost on, restart, see if the balance persists.
 - On-device wall behaviour still needs confirming — if the wall blocks
   touch globally (e.g. full-screen view in the game's own window) it may
   need view-hierarchy removal instead of VC-level dismissal.
+
+## v9 — structural wall kill + deleted-callback crash fix (2026-11-08)
+
+### UI dump decoded (Copy-UI-tree diagnostic)
+The live hierarchy showed iOSGods injects TWO foreign windows:
+- `axZEGZPfkmikNIEaZgnuNGBx` (UIWindow subclass, lvl 1001): rootVC
+  `ydCtsJWAPGghXEVfeoGWHmPYRuYCKGTL` hosting a SwiftUI view in module
+  `xryhuah` (obfuscated AuthUI) — floating button, mostly offscreen
+- `UIWindow` lvl 2100: rootVC `dymFkfP` — blur pill + 2 labels +
+  UIProgressView = the login-blocked toast (userInteractionEnabled=0)
+
+All identifiers obfuscated — substring matchers can never keep up. The
+structural rule that survives: legit windows have UIWindow class and
+Unity/system/CX rootVC classes. v9 hides any window failing that check,
+plus keeps the name matchers as backup.
+
+### The SIGTRAP crash (v8 .ips)
+Not dyld this time — libswiftCore fatal trap INSIDE libcarx at 0x47c30,
+called from a block-invoke trampoline (0x45ff0) via CFRunLoop/GSEvent:
+- fn 0x47b00 builds an ObjC block {invoke=0x45ff0, +0x20 captured fn
+  =0x47bec} and msgSends it to a global (timer/observer registration)
+- 0x47bec is a deleted-method stub: writes 0x39 marker, loads 'Fatal
+  error', calls assertionFailure, brk #1
+- adjacent block signature v16@?0@"NSTimer"8 + v24@?0@"NSURL"8@"NSError"16
+  (ASWebAuthenticationSession completion) — auth-flow timer callback the
+  obfuscator stripped
+Fix: entry patched to ret (void block — safe no-op). Timer now fires into
+nothing. Verified in package: 0x47bec = 0xd65f03c0.
