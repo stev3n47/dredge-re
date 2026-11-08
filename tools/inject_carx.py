@@ -110,15 +110,16 @@ def main():
     exe = bytearray(zin.read(exe_path))
     dyb = open(dylib, 'rb').read()
 
-    stub_dyb = open(sys.argv[4], 'rb').read() if len(sys.argv) > 4 else None
+    keep_iosgods = len(sys.argv) > 4 and sys.argv[4] == 'keep'
+    stub_dyb = None if keep_iosgods or len(sys.argv) <= 4 else open(sys.argv[4], 'rb').read()
 
-    if stub_dyb is None:
+    if stub_dyb is None and not keep_iosgods:
         # iOSGods payload removal: excise the loads, drop the files.
         n = remove_load(exe, b'iGameGod');   assert n == 1, f'exe iGameGod LC x{n}'
     exe = inject_dylib_cmd(bytes(exe), '@executable_path/Frameworks/CXMenu.framework/CXMenu')
 
     uf = bytearray(zin.read(uf_path))
-    if stub_dyb is None:
+    if stub_dyb is None and not keep_iosgods:
         n = remove_load(uf, b'libcarx');     assert n == 1, f'uf libcarx LC x{n}'
     orig = lambda va: struct.unpack('<I', uf[va:va+4])[0]
 
@@ -241,10 +242,10 @@ def main():
                 dirs_seen.add(d)
                 zout.writestr(dir_zinfo(d), b'')
 
-    drop_prefixes = (
+    drop_prefixes = () if keep_iosgods else (
         f'{app}/Frameworks/iGameGod.framework/',
     )
-    drop_files = {
+    drop_files = {f'{app}/embedded.mobileprovision'} if keep_iosgods else {
         f'{app}/Frameworks/libcarx.dylib',
         f'{app}/embedded.mobileprovision',
     }
