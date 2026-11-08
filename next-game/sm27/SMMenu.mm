@@ -134,12 +134,6 @@ static void *sm_game(void) {
     void *stat = *(void **)((char *)cls + 0xb8);
     return stat ? *(void **)stat : NULL;
 }
-// Stadium.get_StadiumUpgradeFinished() — static bool, true once the
-// construction finish date has passed (or none is running).
-static int sm_stadium_done(void) {
-    return (int)(uintptr_t)((fn_i_t)SMVA(0x2CDACFC))(NULL);
-}
-
 // Fire a Give*Reward on AdRewardsManager. Player-scoped rewards write
 // playerId first; playerId=0 risks a null player deref inside the game,
 // so they refuse to fire without a resolved target.
@@ -170,12 +164,12 @@ static NSString *sm_give(const act_t *a) {
             for (int i = 0; i < n && i < 64; i++)
                 if (us[i]) *(long long *)((char *)us[i] + 0x18) = 0;
             ((fn_v_t)SMVA(0x27CB748))(NULL, NULL); // ProcessUpgrades
-        } else {                    // stadium: Game->g_StadiumUpgradeInProgress
-            if (!((char *)g)[0x190] || sm_stadium_done())
-                return @"No stadium upgrade in progress";
-            int i = 0;
-            while (i++ < 64 && ((char *)g)[0x190] && !sm_stadium_done())
-                ((fn_v_t)SMVA(a->va))(m, NULL);
+        } else {                    // stadium: don't touch the reward path —
+            // its completion fan-out throws re-entrantly. Write the finish
+            // date way back and run the game's own static finalizer.
+            if (!((char *)g)[0x190]) return @"No stadium upgrade in progress";
+            ((fn_pi_t)SMVA(0x2CDB034))(NULL, -36500, NULL); // ReduceStadiumUpgradeTime
+            ((fn_v_t)SMVA(0x2CDADC8))(NULL, NULL);          // ProcessStadiumUpgrade
         }
         return nil;
     }
@@ -210,17 +204,7 @@ static int sm_isvip(void *cdc) { return (int)(uintptr_t)((fn_i_t)SMVA(0x2A15528)
 
 // 0=+10k gold (AddCredits fires OnCreditBalanceChanged) 1=boosts
 // 2=cash tokens 3=traits 4=XP 5=VIP+Enhanced flags
-// 6=Gold pack claim 7=Free pack claim — GiveRewardedAdReward on the
-// controller hits the SERVER grant path, so these persist.
 static NSString *sm_wealth(int which, int *info) {
-    if (which >= 6) {
-        void *arc = sm_arc();
-        if (!arc) return @"Rewards not ready — get in-game first";
-        int type = which == 6 ? 4 : 26;   // CreditsTwo / FreePack
-        *(int *)((char *)arc + 0x28) = type; // currentRewardVideoType
-        ((fn_pi_t)SMVA(0x29FF778))(arc, type, NULL);
-        return nil;
-    }
     void *cdc = sm_cdc();
     if (!cdc) return @"Account not loaded — get in-game first";
     void *d = sm_cdata();
@@ -489,10 +473,10 @@ static void anchor_view_reset(UIView *v) {
     y = [self section:@"Wealth" icon:@"banknote.fill" y:y];
     {
         const char *names[] = {"+10k Gold", "999 Boosts", "999 Tokens", "99 Traits",
-                               "Max XP", "Unlock VIP", "Gold Pack", "Free Pack"};
+                               "Max XP", "Unlock VIP"};
         const char *icons[] = {"dollarsign.circle.fill", "bolt.fill", "ticket.fill", "star.fill",
-                               "chart.line.uptrend.xyaxis", "crown.fill", "gift.fill", "shippingbox.fill"};
-        for (int i = 0; i < 8; i++) {
+                               "chart.line.uptrend.xyaxis", "crown.fill"};
+        for (int i = 0; i < 6; i++) {
             CXButton *b = [CXButton buttonWithType:UIButtonTypeCustom];
             b.frame = CGRectMake(i % 2 ? bw + 10 : 0, y, bw, 40);
             b.layer.cornerRadius = DRE_RADIUS;
@@ -654,7 +638,7 @@ static void anchor_view_reset(UIView *v) {
             [self toast:[NSString stringWithFormat:@"flags written — VIP reads %d", info]];
         } else {
             const char *what[] = {"gold", "boosts set to 999", "tokens set to 999", "traits set to 99",
-                                  "XP maxed", "VIP + Enhanced", "gold pack claimed", "free pack claimed"};
+                                  "XP maxed", "VIP + Enhanced"};
             [self toast:[NSString stringWithFormat:@"%s — check balance", what[which]]];
         }
     } else {
