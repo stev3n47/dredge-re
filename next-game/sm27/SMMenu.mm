@@ -123,6 +123,23 @@ static const act_t g_player[] = {  // playerId-scoped rewards
 #define NACT_S 7
 #define NACT_P 6
 
+// Game singleton — the class-statics chain the upgrade rewards use:
+// *(0x8492748) = Il2CppClass* for Game, +0xb8 = static_fields, and
+// statics[0] holds the live Game object (FacilityManager @ +0x138,
+// g_StadiumUpgradeInProgress bool @ +0x190 per the 4.1.8 dump).
+static void *sm_game(void) {
+    if (!uf_base()) return NULL;
+    void *cls = *(void **)((char *)uf_base() + 0x8492748);
+    if (!cls) return NULL;
+    void *stat = *(void **)((char *)cls + 0xb8);
+    return stat ? *(void **)stat : NULL;
+}
+// Stadium.get_StadiumUpgradeFinished() — static bool, true once the
+// construction finish date has passed (or none is running).
+static int sm_stadium_done(void) {
+    return (int)(uintptr_t)((fn_i_t)SMVA(0x2CDACFC))(NULL);
+}
+
 // Fire a Give*Reward on AdRewardsManager. Player-scoped rewards write
 // playerId first; playerId=0 risks a null player deref inside the game,
 // so they refuse to fire without a resolved target.
@@ -134,12 +151,30 @@ static NSString *sm_give(const act_t *a) {
         if (!pid) return @"No squad loaded — pick a save first";
         *(int *)((char *)m + 0x20) = pid;
     }
-    // Reduce rewards shave a fixed amount off the current build — loop
-    // them so one tap finishes the upgrade outright. Cash likewise loops
-    // for a meaningful injection per tap.
-    int times = 1;
-    if (a->va == 0x2A02088 || a->va == 0x2A030F0) times = 60;
-    else if (a->va == 0x2A02D40) times = 20;
+    // Facility/Stadium Done: each reward call only shaves a fixed chunk,
+    // but over-firing past completion throws inside the game (crash).
+    // Loop while the game's own in-progress/finished flags say there's
+    // still work, so one tap finishes the build and no call over-fires.
+    if (a->va == 0x2A02088 || a->va == 0x2A030F0) {
+        void *g = sm_game();
+        if (!g) return @"Game not ready — get in-game first";
+        if (a->va == 0x2A02088) {  // facility: Game->FacilityManager->inProgress
+            void *fm = *(void **)((char *)g + 0x138);
+            if (!fm || !((char *)fm)[0x10] || !*(void **)((char *)fm + 0x28))
+                return @"No facility upgrade in progress";
+            int i = 0;
+            while (i++ < 64 && ((char *)fm)[0x10] && *(void **)((char *)fm + 0x28))
+                ((fn_v_t)SMVA(a->va))(m, NULL);
+        } else {                    // stadium: Game->g_StadiumUpgradeInProgress
+            if (!((char *)g)[0x190] || sm_stadium_done())
+                return @"No stadium upgrade in progress";
+            int i = 0;
+            while (i++ < 64 && ((char *)g)[0x190] && !sm_stadium_done())
+                ((fn_v_t)SMVA(a->va))(m, NULL);
+        }
+        return nil;
+    }
+    int times = (a->va == 0x2A02D40) ? 20 : 1; // Cash Injection loops
     for (int i = 0; i < times; i++) ((fn_v_t)SMVA(a->va))(m, NULL);
     return nil;
 }
