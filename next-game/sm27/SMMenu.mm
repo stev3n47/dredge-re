@@ -134,6 +134,57 @@ static NSString *sm_give(const act_t *a) {
     return nil;
 }
 
+// CustomerDataController.Instance — Unity-6 il2cpp stores class statics
+// behind the runtime class object: *(uf+0x84906F0) = Il2CppClass*,
+// +0xb8 = static_fields, and Instance sits at statics+0x48 (dump field
+// offset 0x48; verified: Awake stores `this` via str x19,[x8,#0x48]).
+static void *sm_cdc(void) {
+    if (!uf_base()) return NULL;
+    void *cls = *(void **)((char *)uf_base() + 0x84906F0);
+    if (!cls) return NULL;
+    void *stat = *(void **)((char *)cls + 0xb8);
+    return stat ? *(void **)((char *)stat + 0x48) : NULL;
+}
+// cdc->CustomerDataHolder(+0x20)->CustomerData(+0x10): gold@+0xb8,
+// boosts@+0x108, cashTokens@+0x48, traits@+0xd4; +0x10 = SpecialEditionStatus
+// (enhanced@+0x10, ultimate/VIP@+0x11), +0xe0->+0x64 = XP (from getters).
+static void *sm_cdata(void) {
+    void *c = sm_cdc();
+    if (!c) return NULL;
+    void *h = *(void **)((char *)c + 0x20);
+    return h ? *(void **)((char *)h + 0x10) : NULL;
+}
+// 0=+10k gold (AddCredits fires OnCreditBalanceChanged) 1=boosts
+// 2=cash tokens 3=traits 4=XP 5=VIP+Enhanced flags
+static NSString *sm_wealth(int which) {
+    void *cdc = sm_cdc();
+    if (!cdc) return @"Account not loaded — get in-game first";
+    void *d = sm_cdata();
+    if (!d) return @"Customer data not ready yet";
+    switch (which) {
+        case 0: ((fn_pi_t)SMVA(0x2A18808))(cdc, 10000, NULL); break; // AddCredits
+        case 1: ((fn_pi_t)SMVA(0x2A188A4))(cdc, 999, NULL);   break; // SetCurUserBoostAmount
+        case 2: ((fn_pi_t)SMVA(0x2A18938))(cdc, 999, NULL);   break; // SetCashTokenAmount
+        case 3: ((fn_pi_t)SMVA(0x2A189CC))(cdc, 99, NULL);    break; // SetManagerTraitPointsAmount
+        case 4: {
+            void *xp = *(void **)((char *)d + 0xe0);
+            if (!xp) return @"XP data not ready yet";
+            *(int *)((char *)xp + 0x64) = 1000000;
+            ((fn_pi_t)SMVA(0x2A18808))(cdc, 0, NULL); // AddCredits(0): fire OnCreditBalanceChanged
+            break;
+        }
+        case 5: {
+            void *se = *(void **)((char *)d + 0x10);
+            if (!se) return @"Edition data not ready yet";
+            ((char *)se)[0x10] = 1;  // IsEnhancedEditionUser
+            ((char *)se)[0x11] = 1;  // IsUltimateEditionUser == IsVIPUser
+            ((fn_pi_t)SMVA(0x2A18808))(cdc, 0, NULL);
+            break;
+        }
+    }
+    return nil;
+}
+
 // Max-all: iterate the squad list and apply the stat method per player.
 static int sm_maxall(int which) { // 0=fitness 1=morale 2=chemistry
     int n = 0; void **ps = sm_players(&n);
@@ -369,6 +420,32 @@ static void anchor_view_reset(UIView *v) {
         y += 52;
     }
 
+    y = [self section:@"Wealth" icon:@"banknote.fill" y:y];
+    {
+        const char *names[] = {"+10k Gold", "999 Boosts", "999 Tokens", "99 Traits", "Max XP", "Unlock VIP"};
+        const char *icons[] = {"dollarsign.circle.fill", "bolt.fill", "ticket.fill", "star.fill", "chart.line.uptrend.xyaxis", "crown.fill"};
+        for (int i = 0; i < 6; i++) {
+            CXButton *b = [CXButton buttonWithType:UIButtonTypeCustom];
+            b.frame = CGRectMake(i % 2 ? bw + 10 : 0, y, bw, 40);
+            b.layer.cornerRadius = DRE_RADIUS;
+            b.layer.cornerCurve = kCACornerCurveContinuous;
+            b.tag = 3300 + i;
+            b.backgroundColor = DRE_FILL;
+            [b setImage:dre_symbol(@(icons[i]), 13, UIImageSymbolWeightMedium) forState:UIControlStateNormal];
+            b.tintColor = (i >= 4) ? DRE_BLUE : DRE_SUB;
+            b.imageEdgeInsets = UIEdgeInsetsMake(0, -6, 0, 0);
+            [b setTitle:[NSString stringWithFormat:@" %s", names[i]] forState:UIControlStateNormal];
+            b.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+            [b setTitleColor:DRE_TEXT forState:UIControlStateNormal];
+            b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+            b.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 0);
+            [b addTarget:self action:@selector(wealthBtn:) forControlEvents:UIControlEventTouchUpInside];
+            [_scroll addSubview:b];
+            if (i % 2) y += 46;
+        }
+        y += 52;
+    }
+
     y = [self section:@"Diagnostics" icon:@"stethoscope" y:y];
     {
         CXButton *db = [CXButton buttonWithType:UIButtonTypeCustom];
@@ -494,6 +571,19 @@ static void anchor_view_reset(UIView *v) {
         dre_notify(UINotificationFeedbackTypeError);
         [self toast:n == 0 ? @"Squad empty" : @"Squad not loaded — get in-game first"
                icon:@"exclamationmark.triangle.fill" tint:DRE_RED];
+    }
+}
+
+- (void)wealthBtn:(UIButton *)b {
+    dre_tick();
+    int which = (int)b.tag - 3300;
+    NSString *err = sm_wealth(which);
+    if (!err) {
+        const char *what[] = {"+10k gold", "boosts set to 999", "tokens set to 999", "traits set to 99", "XP maxed", "VIP + Enhanced unlocked"};
+        [self toast:[NSString stringWithFormat:@"%s — check balance", what[which]]];
+    } else {
+        dre_notify(UINotificationFeedbackTypeError);
+        [self toast:err icon:@"exclamationmark.triangle.fill" tint:DRE_RED];
     }
 }
 
