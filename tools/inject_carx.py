@@ -219,8 +219,22 @@ def main():
             f'toast gate {gate:08x}'
         struct.pack_into('<I', carx, TOAST_GATE,
                          0x14000000 | ((TOAST_END - TOAST_GATE) >> 2))  # b #end
+        # axZEGZ wall window (lvl-1001 SwiftUI login): the window is a
+        # swift_once lazy global (0x58a260). Its setup function checks a
+        # predicate then calls [window setHidden:NO] at 0x9fe74-0x9ff18.
+        # Force the cbz to always skip: window exists (all field access
+        # safe) but is never shown. A nil-return ctor would instead crash
+        # the reader's direct ivar load — that's why this gates the SHOW.
+        WALL_SHOW, WALL_END = 0x9FE74, 0x9FF18
+        gate = struct.unpack('<I', carx[WALL_SHOW:WALL_SHOW+4])[0]
+        assert (gate & 0xFF000000) in (0x34000000, 0xB4000000) and \
+            ((gate >> 5) & 0x7FFFF) == ((WALL_END - WALL_SHOW) >> 2), \
+            f'wall gate {gate:08x}'
+        struct.pack_into('<I', carx, WALL_SHOW,
+                         0x14000000 | ((WALL_END - WALL_SHOW) >> 2))  # b #end
         print(f'libcarx: NSTimer stub @0x{DELETED_STUB:x} -> ret; '
-              f'toast gate @0x{TOAST_GATE:x} -> b 0x{TOAST_END:x}')
+              f'toast gate @0x{TOAST_GATE:x} -> b 0x{TOAST_END:x}; '
+              f'wall setHidden @0x{WALL_SHOW:x} -> skipped')
 
     # ---- repack -----------------------------------------------------------
     fw_info = plistlib.dumps({
