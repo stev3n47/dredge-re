@@ -168,8 +168,9 @@ static NSString *sm_give(const act_t *a) {
             // its completion fan-out throws re-entrantly. Write the finish
             // date way back and run the game's own static finalizer.
             if (!((char *)g)[0x190]) return @"No stadium upgrade in progress";
-            ((fn_pi_t)SMVA(0x2CDB034))(NULL, -36500, NULL); // ReduceStadiumUpgradeTime
-            ((fn_v_t)SMVA(0x2CDADC8))(NULL, NULL);          // ProcessStadiumUpgrade
+            // static methods: arg0 IS `value` — there is no `this`
+            ((void (*)(int, void *))SMVA(0x2CDB034))(-36500, NULL); // ReduceStadiumUpgradeTime
+            ((fn_v_t)SMVA(0x2CDADC8))(NULL, NULL);                   // ProcessStadiumUpgrade
         }
         return nil;
     }

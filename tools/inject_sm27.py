@@ -54,10 +54,35 @@ def inject_dylib_cmd(exe: bytes, dylib_path: str) -> bytes:
     struct.pack_into('<I', b, 20, sizeofcmds + cmdsize)
     return bytes(b)
 
+# Purchase/edition gates — patched to `mov w0,#1; ret` inside UnityFramework
+# (VA == file offset in the decrypted image). Forces every "did user buy
+# this" check true locally: VIP, Enhanced/Ultimate editions, non-consumables.
+# Server-side purchase processing is untouched and remains authoritative.
+RET1 = b'\x20\x00\x80\x52\xc0\x03\x5f\xd6'
+GATE_PATCHES = [
+    0x2A64614,  # InGameItemsContainer.HasPurchasedItem
+    0x2A64700,  # InGameItemsContainer.HasPurchasedEnhancedEdition
+    0x2A65078,  # InGameItemsContainer.HasPurchasedUltimateEdition
+    0x2A64B2C,  # InGameItemsContainer.HasPurchasedNonConsumable
+    0x2A65930,  # InGameItemsContainer.HasPurchasedNonConsumableProduct
+    0x2A65A08,  # OwnsNonConsumable (shared tail for the edition gates)
+    0x2A66C74,  # HasPurchasedAnyBundleSpecialOffer
+    0x2A153C8,  # CustomerDataController.get_IsEnhancedEditionUser
+    0x2A15490,  # CustomerDataController.get_IsUltimateEditionUser
+    0x2A15528,  # CustomerDataController.get_IsVIPUser
+]
+
+def patch_uf(data: bytes) -> bytes:
+    b = bytearray(data)
+    for off in GATE_PATCHES:
+        b[off:off+8] = RET1
+    return bytes(b)
+
 def main():
     ipa, dylib, out = sys.argv[1], sys.argv[2], sys.argv[3]
     app       = 'Payload/SM27.app'
     exe_path  = f'{app}/SM27'
+    uf_path   = f'{app}/Frameworks/UnityFramework.framework/UnityFramework'
     fw_path   = f'{app}/Frameworks/SMMenu.framework/SMMenu'
     fw_plist  = f'{app}/Frameworks/SMMenu.framework/Info.plist'
     info_path = f'{app}/Info.plist'
@@ -136,6 +161,9 @@ def main():
     for zi in zin.infolist():
         n = zi.filename
         if n in drop_files or n in (exe_path, info_path):
+            continue
+        if n == uf_path:
+            emit(zi, patch_uf(zin.read(n)))
             continue
         emit(zi, None)
     emit(macho_zinfo(exe_path), bytes(exe))
