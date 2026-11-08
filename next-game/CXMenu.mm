@@ -290,6 +290,26 @@ static void anchor_view_reset(UIView *v) {
         y += 46;
         y += 6;
     }
+
+    y = [self section:@"Diagnostics" icon:@"stethoscope" y:y];
+    {
+        CXButton *db = [CXButton buttonWithType:UIButtonTypeCustom];
+        db.frame = CGRectMake(0, y, bw, 40);
+        db.layer.cornerRadius = DRE_RADIUS;
+        db.layer.cornerCurve = kCACornerCurveContinuous;
+        db.backgroundColor = DRE_FILL;
+        [db setImage:dre_symbol(@"doc.on.clipboard", 13, UIImageSymbolWeightMedium) forState:UIControlStateNormal];
+        db.tintColor = DRE_SUB;
+        db.imageEdgeInsets = UIEdgeInsetsMake(0, -6, 0, 0);
+        [db setTitle:@" Copy UI tree" forState:UIControlStateNormal];
+        db.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+        [db setTitleColor:DRE_TEXT forState:UIControlStateNormal];
+        db.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+        db.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 0);
+        [db addTarget:self action:@selector(dumpBtn:) forControlEvents:UIControlEventTouchUpInside];
+        [_scroll addSubview:db];
+        y += 46;
+    }
     _scroll.contentSize = CGSizeMake(w, y + 20);
     _scroll.contentOffset = off;
 }
@@ -383,6 +403,46 @@ static void anchor_view_reset(UIView *v) {
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)dumpVC:(UIViewController *)vc into:(NSMutableString *)s depth:(int)d {
+    int guard = 0;
+    for (UIViewController *c = vc; c && guard++ < 20; c = c.presentedViewController) {
+        [s appendFormat:@"%*sVC %@ presenting=%@\n", d, "",
+            NSStringFromClass(c.class), NSStringFromClass(c.presentedViewController.class)];
+        for (UIViewController *ch in c.childViewControllers)
+            [self dumpVC:ch into:s depth:d + 2];
+    }
+}
+
+- (void)dumpView:(UIView *)v into:(NSMutableString *)s depth:(int)d {
+    if (d > 24) return;
+    [s appendFormat:@"%*sV %@ hid=%d f=%@\n", d, "",
+        NSStringFromClass(v.class), v.hidden, NSStringFromCGRect(v.frame)];
+    for (UIView *sv in v.subviews) [self dumpView:sv into:s depth:d + 2];
+}
+
+- (void)dumpBtn:(UIButton *)b {
+    NSMutableString *s = [NSMutableString new];
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *ws = (UIWindowScene *)sc;
+        [s appendFormat:@"SCENE %@ act=%ld wins=%lu\n", NSStringFromClass(sc.class),
+            (long)sc.activationState, (unsigned long)ws.windows.count];
+        for (UIWindow *w in ws.windows) {
+            [s appendFormat:@" WIN %@ lvl=%.0f hid=%d userInt=%d sz=%@ rootVC=%@\n",
+                NSStringFromClass(w.class), w.windowLevel, w.hidden,
+                w.userInteractionEnabled, NSStringFromCGSize(w.bounds.size),
+                NSStringFromClass(w.rootViewController.class)];
+            if (w == g_handleWin || w == g_panelWin) continue;
+            [self dumpVC:w.rootViewController.presentedViewController into:s depth:4];
+            for (UIViewController *ch in w.rootViewController.childViewControllers)
+                [self dumpVC:ch into:s depth:4];
+            [self dumpView:w into:s depth:4];
+        }
+    }
+    UIPasteboard.generalPasteboard.string = s;
+    [self toast:@"UI tree copied to clipboard" icon:@"doc.on.clipboard" tint:DRE_GREEN];
 }
 
 // Transient toast — pill with SF icon, slides up with a spring, interruptible.
@@ -674,9 +734,15 @@ static void make_handle(void) {
 // names for generic Swift classes embed the module + type names, so substring
 // matching survives the mod's ObjC-class obfuscation.
 static BOOL cx_wall_name(NSString *n) {
-    return n && ([n containsString:@"AuthUI."] ||
+    // Match both demangled ("AuthUI.LegacyAuthToastView") and mangled
+    // ("_TtGC7SwiftUI19UIHostingControllerV6AuthUI19LegacyAuthToastView")
+    // ObjC runtime names. Any SwiftUI hosting controller in a Unity game is
+    // foreign, so those are caught too.
+    return n && ([n containsString:@"AuthUI"] ||
                  [n containsString:@"AuthToast"] ||
-                 [n containsString:@"iOSGods."]);
+                 [n containsString:@"iOSGods"] ||
+                 [n containsString:@"UIHostingController"] ||
+                 [n containsString:@"SwiftUI."]);
 }
 
 static void cx_sweep_views(UIView *v) {
@@ -713,6 +779,9 @@ static void sweep_auth_wall(void) {
             }
             cx_sweep_vcs(r.presentedViewController);
             for (UIViewController *ch in r.childViewControllers) cx_sweep_vcs(ch);
+            // Orphaned views: a hosting VC's view can sit in a window whose
+            // rootVC is unrelated — walk the window's own subviews too.
+            cx_sweep_views(w);
             if (r.isViewLoaded) cx_sweep_views(r.view);
         }
     }
