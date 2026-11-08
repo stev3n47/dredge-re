@@ -42,10 +42,14 @@ typedef void  (*fn_pi_t)(void *, int, void *);              // (this, int, info)
 typedef void  (*fn_pip_t)(void *, int, void *, void *);     // (this,int,ptr,info)
 typedef void  (*fn_fp_t)(float, void *, void *);            // (float,ptr,info) static
 
-// AdMobRewardsController.get_Instance() -> +0x48 adRewardsManager
-static void *sm_mgr(void) {
+// AdMobRewardsController.get_Instance()
+static void *sm_arc(void) {
     if (!uf_base()) return NULL;
-    void *c = ((fn_i_t)SMVA(0x29FE794))(NULL);
+    return ((fn_i_t)SMVA(0x29FE794))(NULL);
+}
+// -> +0x48 adRewardsManager
+static void *sm_mgr(void) {
+    void *c = sm_arc();
     return c ? *(void **)((char *)c + 0x48) : NULL;
 }
 
@@ -131,8 +135,11 @@ static NSString *sm_give(const act_t *a) {
         *(int *)((char *)m + 0x20) = pid;
     }
     // Reduce rewards shave a fixed amount off the current build — loop
-    // them so one tap finishes the upgrade outright.
-    int times = (a->va == 0x2A02088 || a->va == 0x2A030F0) ? 60 : 1;
+    // them so one tap finishes the upgrade outright. Cash likewise loops
+    // for a meaningful injection per tap.
+    int times = 1;
+    if (a->va == 0x2A02088 || a->va == 0x2A030F0) times = 60;
+    else if (a->va == 0x2A02D40) times = 20;
     for (int i = 0; i < times; i++) ((fn_v_t)SMVA(a->va))(m, NULL);
     return nil;
 }
@@ -157,15 +164,30 @@ static void *sm_cdata(void) {
     void *h = *(void **)((char *)c + 0x20);
     return h ? *(void **)((char *)h + 0x10) : NULL;
 }
+// Read-back helpers so toasts can show whether the writes actually landed.
+static int sm_gold(void *cdc)  { return (int)(uintptr_t)((fn_i_t)SMVA(0x2A1565C))(cdc); }
+static int sm_isvip(void *cdc) { return (int)(uintptr_t)((fn_i_t)SMVA(0x2A15528))(cdc); }
+
 // 0=+10k gold (AddCredits fires OnCreditBalanceChanged) 1=boosts
 // 2=cash tokens 3=traits 4=XP 5=VIP+Enhanced flags
-static NSString *sm_wealth(int which) {
+// 6=Gold pack claim 7=Free pack claim — GiveRewardedAdReward on the
+// controller hits the SERVER grant path, so these persist.
+static NSString *sm_wealth(int which, int *info) {
+    if (which >= 6) {
+        void *arc = sm_arc();
+        if (!arc) return @"Rewards not ready — get in-game first";
+        int type = which == 6 ? 4 : 26;   // CreditsTwo / FreePack
+        *(int *)((char *)arc + 0x28) = type; // currentRewardVideoType
+        ((fn_pi_t)SMVA(0x29FF778))(arc, type, NULL);
+        return nil;
+    }
     void *cdc = sm_cdc();
     if (!cdc) return @"Account not loaded — get in-game first";
     void *d = sm_cdata();
     if (!d) return @"Customer data not ready yet";
     switch (which) {
-        case 0: ((fn_pi_t)SMVA(0x2A18808))(cdc, 10000, NULL); break; // AddCredits
+        case 0: ((fn_pi_t)SMVA(0x2A18808))(cdc, 10000, NULL);
+            *info = sm_gold(cdc); break; // AddCredits
         case 1: ((fn_pi_t)SMVA(0x2A188A4))(cdc, 999, NULL);   break; // SetCurUserBoostAmount
         case 2: ((fn_pi_t)SMVA(0x2A18938))(cdc, 999, NULL);   break; // SetCashTokenAmount
         case 3: ((fn_pi_t)SMVA(0x2A189CC))(cdc, 99, NULL);    break; // SetManagerTraitPointsAmount
@@ -182,6 +204,7 @@ static NSString *sm_wealth(int which) {
             ((char *)se)[0x10] = 1;  // IsEnhancedEditionUser
             ((char *)se)[0x11] = 1;  // IsUltimateEditionUser == IsVIPUser
             ((fn_pi_t)SMVA(0x2A18808))(cdc, 0, NULL);
+            *info = sm_isvip(cdc);
             break;
         }
     }
@@ -425,9 +448,11 @@ static void anchor_view_reset(UIView *v) {
 
     y = [self section:@"Wealth" icon:@"banknote.fill" y:y];
     {
-        const char *names[] = {"+10k Gold", "999 Boosts", "999 Tokens", "99 Traits", "Max XP", "Unlock VIP"};
-        const char *icons[] = {"dollarsign.circle.fill", "bolt.fill", "ticket.fill", "star.fill", "chart.line.uptrend.xyaxis", "crown.fill"};
-        for (int i = 0; i < 6; i++) {
+        const char *names[] = {"+10k Gold", "999 Boosts", "999 Tokens", "99 Traits",
+                               "Max XP", "Unlock VIP", "Gold Pack", "Free Pack"};
+        const char *icons[] = {"dollarsign.circle.fill", "bolt.fill", "ticket.fill", "star.fill",
+                               "chart.line.uptrend.xyaxis", "crown.fill", "gift.fill", "shippingbox.fill"};
+        for (int i = 0; i < 8; i++) {
             CXButton *b = [CXButton buttonWithType:UIButtonTypeCustom];
             b.frame = CGRectMake(i % 2 ? bw + 10 : 0, y, bw, 40);
             b.layer.cornerRadius = DRE_RADIUS;
@@ -580,10 +605,18 @@ static void anchor_view_reset(UIView *v) {
 - (void)wealthBtn:(UIButton *)b {
     dre_tick();
     int which = (int)b.tag - 3300;
-    NSString *err = sm_wealth(which);
+    int info = -1;
+    NSString *err = sm_wealth(which, &info);
     if (!err) {
-        const char *what[] = {"+10k gold", "boosts set to 999", "tokens set to 999", "traits set to 99", "XP maxed", "VIP + Enhanced unlocked"};
-        [self toast:[NSString stringWithFormat:@"%s — check balance", what[which]]];
+        if (which == 0 && info >= 0) {
+            [self toast:[NSString stringWithFormat:@"+10k fired — gold now %d", info]];
+        } else if (which == 5 && info >= 0) {
+            [self toast:[NSString stringWithFormat:@"flags written — VIP reads %d", info]];
+        } else {
+            const char *what[] = {"gold", "boosts set to 999", "tokens set to 999", "traits set to 99",
+                                  "XP maxed", "VIP + Enhanced", "gold pack claimed", "free pack claimed"};
+            [self toast:[NSString stringWithFormat:@"%s — check balance", what[which]]];
+        }
     } else {
         dre_notify(UINotificationFeedbackTypeError);
         [self toast:err icon:@"exclamationmark.triangle.fill" tint:DRE_RED];
