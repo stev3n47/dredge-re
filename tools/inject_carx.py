@@ -194,6 +194,22 @@ def main():
     struct.pack_into('<I', uf, SITE, b(SITE, CAVE))
     print(f'patched AddResource madd @0x{SITE:x} -> stub @0x{CAVE:x} ({len(stub)}B)')
 
+    # ---- libcarx: deleted-callback trap fix --------------------------------
+    # libcarx registers an NSTimer block whose invoke target was stripped by
+    # the iOSGods obfuscator into a "deleted method" stub: it loads the
+    # 'Fatal error' assertion and hits brk #1 (SIGTRAP) when the timer fires
+    # — observed crash: libswiftCore trap via CFRunLoop/GraphicsServices.
+    # The block signature is v16@?0@"NSTimer"8 (void return), so turning the
+    # stub entry into a bare `ret` is a safe no-op.
+    carx_path = f'{app}/Frameworks/libcarx.dylib'
+    carx = bytearray(zin.read(carx_path)) if (keep_iosgods or stub_igg) else None
+    DELETED_STUB = 0x47BEC
+    if carx is not None:
+        assert struct.unpack('<I', carx[DELETED_STUB:DELETED_STUB+4])[0] == 0xD10083FF, \
+            f'deleted-stub entry {struct.unpack("<I", carx[DELETED_STUB:DELETED_STUB+4])[0]:08x}'
+        struct.pack_into('<I', carx, DELETED_STUB, 0xD65F03C0)  # ret
+        print(f'libcarx: deleted NSTimer-block stub @0x{DELETED_STUB:x} -> ret')
+
     # ---- repack -----------------------------------------------------------
     fw_info = plistlib.dumps({
         'CFBundleDevelopmentRegion': 'en',
@@ -273,7 +289,11 @@ def main():
             continue
         if n in (exe_path, uf_path, info_path):
             continue
+        if n == carx_path and carx is not None:
+            continue
         emit(zi, None)
+    if carx is not None:
+        emit(macho_zinfo(carx_path), bytes(carx))
     emit(macho_zinfo(exe_path), bytes(exe))
     emit(macho_zinfo(uf_path), bytes(uf))
     emit(macho_zinfo(fw_path), dyb)

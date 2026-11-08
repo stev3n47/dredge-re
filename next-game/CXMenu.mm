@@ -734,15 +734,28 @@ static void make_handle(void) {
 // names for generic Swift classes embed the module + type names, so substring
 // matching survives the mod's ObjC-class obfuscation.
 static BOOL cx_wall_name(NSString *n) {
-    // Match both demangled ("AuthUI.LegacyAuthToastView") and mangled
-    // ("_TtGC7SwiftUI19UIHostingControllerV6AuthUI19LegacyAuthToastView")
-    // ObjC runtime names. Any SwiftUI hosting controller in a Unity game is
-    // foreign, so those are caught too.
+    // Known iOSGods wall identifiers — plain names, mangled ObjC names
+    // (module/type names survive as substrings), and the obfuscated class
+    // names observed in the live UI dump (libcarx 1.18.1 build).
     return n && ([n containsString:@"AuthUI"] ||
                  [n containsString:@"AuthToast"] ||
                  [n containsString:@"iOSGods"] ||
                  [n containsString:@"UIHostingController"] ||
-                 [n containsString:@"SwiftUI."]);
+                 [n containsString:@"SwiftUI."] ||
+                 [n containsString:@"xryhuah"] ||
+                 [n containsString:@"JmteLmmli"] || [n containsString:@"JmteCdbe"] ||
+                 [n containsString:@"axZEGZPfkmikNIEaZgnuNGBx"] ||
+                 [n containsString:@"ydCtsJWAPGghXEVfeoGWHmPYRuYCKGTL"] ||
+                 [n containsString:@"tPNJZyUVfKuuXCEzeuZhzZjtjoDGT"] ||
+                 [n containsString:@"dymFkfP"]);
+}
+
+// Structural catch-all: in a Unity game every legit window rootVC is a
+// Unity/system class or one of ours. Anything else is injected foreign UI.
+static BOOL cx_sys_name(NSString *n) {
+    return !n || [n hasPrefix:@"UI"] || [n hasPrefix:@"_UI"] ||
+               [n hasPrefix:@"Unity"] || [n hasPrefix:@"CX"] ||
+               [n hasPrefix:@"GK"] || [n hasPrefix:@"PU"];
 }
 
 static void cx_sweep_views(UIView *v) {
@@ -772,7 +785,11 @@ static void sweep_auth_wall(void) {
         for (UIWindow *w in ((UIWindowScene *)s).windows) {
             if (w == g_handleWin || w == g_panelWin) continue;
             UIViewController *r = w.rootViewController;
-            if (cx_wall_name(NSStringFromClass(w.class)) ||
+            NSString *wc = NSStringFromClass(w.class);
+            BOOL foreignWin = ![wc isEqualToString:@"UIWindow"] &&
+                              ![wc hasPrefix:@"_UI"] && ![wc hasPrefix:@"UI"];
+            if (foreignWin || (r && !cx_sys_name(NSStringFromClass(r.class))) ||
+                cx_wall_name(wc) ||
                 cx_wall_name(NSStringFromClass(r.class))) {
                 w.hidden = YES; w.userInteractionEnabled = NO;
                 continue;
