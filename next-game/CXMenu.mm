@@ -667,6 +667,59 @@ static void make_handle(void) {
     schedule_fade();
 }
 
+#pragma mark - iOSGods auth-wall sweeper
+
+// libcarx's login wall is a SwiftUI view (AuthUI.LegacyAuthToastView) rendered
+// by a hosting controller in its own window or a presented VC. ObjC runtime
+// names for generic Swift classes embed the module + type names, so substring
+// matching survives the mod's ObjC-class obfuscation.
+static BOOL cx_wall_name(NSString *n) {
+    return n && ([n containsString:@"AuthUI."] ||
+                 [n containsString:@"AuthToast"] ||
+                 [n containsString:@"iOSGods."]);
+}
+
+static void cx_sweep_views(UIView *v) {
+    for (UIView *s in [v.subviews reverseObjectEnumerator]) {
+        if (cx_wall_name(NSStringFromClass(s.class))) {
+            s.hidden = YES; s.userInteractionEnabled = NO;
+            continue;
+        }
+        cx_sweep_views(s);
+    }
+}
+
+static void cx_sweep_vcs(UIViewController *vc) {
+    for (; vc; vc = vc.presentedViewController) {
+        if (cx_wall_name(NSStringFromClass(vc.class))) {
+            if (vc.isViewLoaded) { vc.view.hidden = YES; vc.view.userInteractionEnabled = NO; }
+            [vc.presentingViewController dismissViewControllerAnimated:NO completion:nil];
+            return;
+        }
+        for (UIViewController *ch in vc.childViewControllers) cx_sweep_vcs(ch);
+    }
+}
+
+static void sweep_auth_wall(void) {
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if (![s isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)s).windows) {
+            if (w == g_handleWin || w == g_panelWin) continue;
+            UIViewController *r = w.rootViewController;
+            if (cx_wall_name(NSStringFromClass(w.class)) ||
+                cx_wall_name(NSStringFromClass(r.class))) {
+                w.hidden = YES; w.userInteractionEnabled = NO;
+                continue;
+            }
+            cx_sweep_vcs(r.presentedViewController);
+            for (UIViewController *ch in r.childViewControllers) cx_sweep_vcs(ch);
+            if (r.isViewLoaded) cx_sweep_views(r.view);
+        }
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ sweep_auth_wall(); });
+}
+
 #pragma mark - bootstrap
 
 static void poll_ready(void) {
@@ -687,6 +740,7 @@ static void cx_init(void) {
     if (uf_base()) { g_flags_init = YES; state_restore(); flags_write(); }
     dispatch_async(dispatch_get_main_queue(), ^{
         poll_ready();
+        sweep_auth_wall();
         [NSNotificationCenter.defaultCenter
             addObserverForName:UIApplicationDidBecomeActiveNotification
             object:nil queue:nil
