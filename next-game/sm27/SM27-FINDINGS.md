@@ -61,3 +61,49 @@ GiveCashReward if the latter proves cosmetic/capped.
 - `tools/inject_sm27.py` — inject `SMMenu.framework` LC into the SM27
   exe; clean IPA as base (asignpatch stays optional if sideload issues)
 - No LCs to strip, no Unity patch — pure additive injection
+
+## CustomerDataController (Wealth section — v2)
+
+`CustomerDataController` (TypeDefIndex 1760) is the account wallet:
+GoldBalance / BoostsBalance / CashTokenBalance / TraitsBalance / XP +
+`SpecialEditionStatus` (enhanced/ultimate=V IAP flags).
+
+**Instance resolution** — Unity 6 il2cpp keeps class statics behind the
+runtime class object:
+
+    cls      = *(uf + 0x84906F0)          // Il2CppClass* for CDC
+    statics  = *(cls + 0xb8)              // static_fields
+    cdc      = *(statics + 0x48)          // Instance (dump offset 0x48)
+    holder   = *(cdc + 0x20)              // CustomerDataHolder
+    data     = *(holder + 0x10)           // CustomerData
+
+Verified against `Awake` (`str x19,[x8,#0x48]` = `Instance = this`) and
+`AddCredits` (reads `statics+0x8` = OnCreditBalanceChanged delegate —
+dump offset 0x8 — and invokes it via `+0x18` method ptr).
+
+**CustomerData field map** (from getter/setter disasm):
+
+| Field | Offset | Access |
+|---|---|---|
+| Gold (credits) | `+0xb8` int | `AddCredits(int)` @ `0x2A18808` adds + fires event |
+| Boosts | `+0x108` int | `SetCurUserBoostAmount(int)` @ `0x2A188A4` sets |
+| CashTokens | `+0x48` int | `SetCashTokenAmount(int)` @ `0x2A18938` sets |
+| TraitPoints | `+0xd4` int | `SetManagerTraitPointsAmount(int)` @ `0x2A189CC` sets |
+| XP | `+0xe0` → `+0x64` int | direct write (no setter found) |
+| Editions | `+0x10` → `+0x10`/`+0x11` bytes | direct write |
+
+`data+0x10` = `SpecialEditionStatus` object: `IsEnhancedEditionUser`@+0x10,
+`IsUltimateEditionUser`@+0x11. `IsVIPUser()` @ `0x2A15528` tail-calls
+`IsUltimateEditionUser` — VIP == ultimate flag in this build.
+`SetCreditAmount(int,string)` @ `0x2A18540` also exists (set+source).
+
+Refresh trick: `AddCredits(cdc, 0)` fires `OnCreditBalanceChanged` —
+used after direct writes so the UI redraws.
+
+## Caveats
+
+- These write the *local* CustomerData snapshot. Persistence depends on
+  the game's save/sync path (`SaveUserManagerProfile` /
+  `FetchLatestCustomerData` may overwrite). Verify on-device.
+- VIP/edition flags are local entitlements — no StoreKit receipt is
+  generated; server-gated features may still check purchases.
