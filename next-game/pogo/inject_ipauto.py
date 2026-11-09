@@ -134,9 +134,9 @@ def main():
     # extract_version 20, exec bit on mach-o
     def dir_zinfo(name):
         zi = zipfile.ZipInfo(name); zi.create_system = 3
-        zi.external_attr = 0o40755 << 16
+        zi.external_attr = (0o40755 << 16) | 0x10  # S_IFDIR|0755 + DOS dir bit
         zi.compress_type = zipfile.ZIP_STORED
-        zi.extract_version = 20; zi.create_version = 20
+        zi.extract_version = 10; zi.create_version = 10
         return zi
     def norm(zi, exec_bit):
         zi.extra = b''; zi.flag_bits = 0
@@ -165,6 +165,10 @@ def main():
         if n.endswith('embedded.mobileprovision'):
             continue
         if n in (exe_path, info_path):
+            continue
+        if n.endswith('/'):
+            # keep dir entries as directories — emit() would stamp them as files
+            zout.writestr(dir_zinfo(n), b'')
             continue
         emit(zi, zin.read(n))
     emit(macho_zinfo(exe_path), exe)
