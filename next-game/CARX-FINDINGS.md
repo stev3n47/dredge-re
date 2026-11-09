@@ -269,3 +269,24 @@ Dr3PlayerResourcesUtils.AddResource (factor<0 -> skip madd). Two gaps:
 
 Satella/Auto-RevenueCat are StoreKit receipt/entitlement tweaks — not
 applicable to in-game CR/gold purchases, which are fully client-side.
+
+## v20 — Free Purchases: IntStaticResource.get_amount forced to ~1B
+
+v19's HasResource gate turned out to patch a dead path — a bl/b scan of
+__text shows the Dr3PlayerResourcesUtils statics have no direct callers;
+the codebase routes everything through interface vtables (blr).
+
+The real car-shop afford check: CarShopBuyItemWidgetController caches
+`m_soft` (IIntResource) and gates buy on `m_soft.amount >= price`.
+IntStaticResource is the ONLY concrete IIntResource — one getter serves
+every soft/hard/fans read. Gated its get_amount @0x28be5ec
+(`ldr w0,[x0,#0x30]; ret`) on flag+1 to return 0x3FFFFFFF (~1.07B):
+mov w0,#0xFFFF + movk w0,#0x3FFF,lsl#16 + ret. set_amount untouched —
+server sync still writes true values; reads always report ~1B.
+
+Purchase executor: CarShopBuyerController.BuyProduct @0x2f7a508 ->
+shopPlayer.BuyShopInternalProduct(productId) = CmdBuyShopInternalProduct
+REST call; server responds {products, reward, diff} or 609
+notenoughmoney. If the server independently validates balance, the
+client gate bypass is necessary-but-not-sufficient — on-device test
+decides whether purchases complete or the server still rejects.
