@@ -111,9 +111,11 @@ def main():
     # invalidates its CMS blob, and strict re-signers (Signulous) pre-verify
     # and refuse invalidly-signed binaries. Unsigned re-signs cleanly.
     exe = strip_codesig(exe)
-    # Same for the injected framework: a truncated-but-unfixed __LINKEDIT
-    # leaves a segment extending past EOF, which can corrupt re-signing.
-    dyb = strip_codesig(open(dylib, 'rb').read())
+    # Keep the framework's CI signature intact: re-signers enumerate nested
+    # binaries by their existing CMS blob. A stripped dylib gets skipped, stays
+    # unsigned, and iOS kills the app when it loads — before any constructor
+    # runs (no crash report).
+    dyb = open(dylib, 'rb').read()
 
     fw_info = plistlib.dumps({
         'CFBundleExecutable': 'IPAuto',
