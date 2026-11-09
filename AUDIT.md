@@ -156,6 +156,37 @@ below; ones marked ✅ were applied on this branch.
 
 ---
 
+## SpooferPro (follow-up — 2026-11-09 pm)
+
+The `spooferpro-0.435.1-unlocked` GitHub release shipped a hand-patched
+`libSpooferPro.dylib` with no injector or findings doc in the repo —
+only the IPA was uploaded. Pulled both v1 and v2 assets, diffed them
+(exactly 16 bytes of divergence at `0xbcf70` and `0x7da430`), used REA
+methodology without the native engine (binary not supported by the
+plain CLI, no Hopper/Ghidra configured in this session) — fell back to
+`llvm-objdump` + a mini ARM64 decoder + BL xref scan.
+
+Six patch sites identified and documented in
+[`next-game/spooferpro/SPOOFERPRO-FINDINGS.md`](next-game/spooferpro/SPOOFERPRO-FINDINGS.md):
+
+- ✅ Four tier wrappers at `0x7d9ae0, 0x7d9bec, 0x7d9edc, 0x7da154`
+- ✅ Fifth gate at `0x7da430` (13 BL callers verified)
+- ✅ LEVEL getter at `0xbcf70` (forced to `mov x0, #0xff; ret`)
+- ⚠️ "Central compare" not pinpointed without a stock reference —
+  structurally most likely `0x7cff64` (131 BL callers; every gate caller
+  does `bl 0x7cff64; bl 0x7daXXX`), but its first two words in both v1
+  and v2 are a real prologue, not a trivial-return patch. Flagged for
+  v3; needs either an on-device test of remaining gated rows or a
+  diff against a stock SpooferPro dylib.
+
+Written `tools/inject_spooferpro.py` that reproduces the release
+byte-for-byte: given the v1 IPA it produces an IPA whose
+`libSpooferPro.dylib` has SHA-256 matching the shipped v2 exactly
+(`be3e5ec…`). Idempotent — re-running on v2 is a no-op. Bails loudly if
+any site's word is neither the stock value nor the patched value, so a
+future dylib version is caught at patch time instead of silently
+miscompiling.
+
 ### Still to do (next session)
 
 1. Unity HTTPBodyStream path for iPoGo — requires `NSURLProtocol` or
@@ -163,5 +194,6 @@ below; ones marked ✅ were applied on this branch.
 2. CarX `inject_carx.py` idempotency across all gated-bool patches
    (prologue-shape guard).
 3. Extract `tools/machoutil.py` to kill 400 lines of duplication across
-   the four injectors.
+   the five injectors.
 4. Verify the ASSUMED PokemonProto field numbers from an on-device log.
+5. SpooferPro "central compare" — see above.

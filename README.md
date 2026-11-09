@@ -14,6 +14,7 @@ runtime is load-bearing and has to be stubbed rather than removed.
 | `next-game/sm27/` | SM27 | [next-game/sm27/SM27-FINDINGS.md](next-game/sm27/SM27-FINDINGS.md) | [tools/inject_sm27.py](tools/inject_sm27.py) | [next-game/sm27/SMMenu.mm](next-game/sm27/SMMenu.mm) |
 | `next-game/` | CarX Drift Racing 3 1.18.1 | [next-game/CARX-FINDINGS.md](next-game/CARX-FINDINGS.md) | [tools/inject_carx.py](tools/inject_carx.py) | [next-game/CXMenu.mm](next-game/CXMenu.mm) |
 | `next-game/pogo/` | iPoGo (Pokemon Go v0.435.1) | [next-game/pogo/POGO-FINDINGS.md](next-game/pogo/POGO-FINDINGS.md) | [next-game/pogo/inject_ipauto.py](next-game/pogo/inject_ipauto.py) | [next-game/pogo/IPAuto.m](next-game/pogo/IPAuto.m) |
+| `next-game/spooferpro/` | SpooferPro 0.435.1 (Pokemon Go 0.743) | [next-game/spooferpro/SPOOFERPRO-FINDINGS.md](next-game/spooferpro/SPOOFERPRO-FINDINGS.md) | [tools/inject_spooferpro.py](tools/inject_spooferpro.py) | *(entitlement patches only — no menu dylib)* |
 
 See also: [AUDIT.md](AUDIT.md) — the running whole-project findings doc.
 
@@ -43,11 +44,12 @@ Each injector takes `<input.ipa> <menu dylib> <out.ipa>` plus
 per-game flags. Examples:
 
 ```sh
-python tools/inject_menu.py   DREDGE.ipa          build/DREMenu.dylib  out.ipa
-python tools/inject_sm27.py   SM27.ipa            build/SMMenu.dylib   out.ipa
-python tools/inject_carx.py   CarX.ipa            build/CXMenu.dylib   out.ipa  igg
+python tools/inject_menu.py       DREDGE.ipa              build/DREMenu.dylib  out.ipa
+python tools/inject_sm27.py       SM27.ipa                build/SMMenu.dylib   out.ipa
+python tools/inject_carx.py       CarX.ipa                build/CXMenu.dylib   out.ipa  igg
+python tools/inject_spooferpro.py SpooferPro-stock.ipa                         out.ipa
 python next-game/pogo/inject_ipauto.py \
-                              ipogo-4.6.1.ipa     build/IPAuto.dylib   out.ipa
+                                  ipogo-4.6.1.ipa         build/IPAuto.dylib   out.ipa
 ```
 
 `inject_carx.py` has modes: `keep` (keep all iOSGods payloads — v5 working
