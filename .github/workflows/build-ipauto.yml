@@ -41,8 +41,23 @@ jobs:
           file IPAuto
           otool -L IPAuto
           codesign -dv IPAuto 2>&1 | head -5
+      - name: Compile probe dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 -dynamiclib \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=13.0 \
+            -fno-objc-arc -fblocks -O2 -fno-objc-exceptions \
+            -Wl,-undefined,dynamic_lookup -lSystem \
+            -install_name '@executable_path/Frameworks/IPAuto.framework/IPAuto' \
+            -o probe next-game/pogo/probe.c
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: IPAuto
           path: IPAuto
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe
+          path: probe
