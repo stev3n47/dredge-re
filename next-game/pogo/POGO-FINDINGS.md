@@ -103,3 +103,27 @@ UIFileSharingEnabled, repacks (zip shape = iOSGods convention).
 - Virtual Go+ (fake CBPeripheral protocol — biggest single feature)
 - block-non-shiny flee method id (capture once: press run button while logging)
 - bag-full batch release (needs bag count field — off by default)
+
+## Sideload signing: SpooferPro's layout (the shape that works)
+
+SpooferPro-0.435.1-0.743.RLS.ipa survives the same re-sign pipeline that
+produced `code signature invalid` on our foreign .framework:
+
+- tweak = **bare** `Frameworks/libSpooferPro.dylib` (~30MB, zip attr 0x81a4
+  0644, signed superblob in IPA); resources live separately in
+  `libSpooferPro.bundle/` (not a loadable framework)
+- injection point = **FBAEMKit.framework**, not the stub:
+  `LC_LOAD_DYLIB @rpath/libSpooferPro.dylib` inserted before LC_CODE_SIGNATURE
+  (stock rpaths push down 0x38); FBAEMKit's CMS left stale
+- stub 100% untouched — original Apple signature still valid
+- dylib LC_ID_DYLIB is junk (`/Library/MobileSubstrate/...SpooferPro.dylib`,
+  the jailbreak build repackaged) — proves install name is load-irrelevant
+- rpath resolution: FBAEMKit already has LC_RPATH @executable_path/Frameworks
+
+v10 adopts this exactly: inject_ipauto.py now patches FBAEMKit + ships
+`Frameworks/libIPAuto.dylib` (0644) + leaves all sigs + stub pristine.
+Also see `libPGProtos.dylib` (ID `@rpath/libbypass.dylib` — renamed jb lib).
+
+Hypothesis for our earlier failures: re-signer mis-seals foreign .framework
+bundles (bundle-aware nested-code path) but signs bare dylibs as plain
+binaries. FBAEMKit injection also dodges any "did the stub change" checks.
