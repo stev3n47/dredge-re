@@ -440,7 +440,7 @@ def main():
         # keep _CodeSignature dirs — the working iOSGods IPA ships them
         # (stale) and some signers expect a previously-signed bundle shape;
         # only drop the device-specific provisioning profile
-        if n.endswith('embedded.mobileprovision'):
+        if n.endswith('/embedded.mobileprovision'):
             continue
         if n == exe_path or n == info_path or n == uf_path:
             continue
