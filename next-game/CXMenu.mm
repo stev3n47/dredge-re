@@ -12,6 +12,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <mach-o/dyld.h>
+#import <dlfcn.h>
 #import <string.h>
 
 #pragma mark - UnityFramework helpers
@@ -743,6 +744,9 @@ static BOOL cx_wall_name(NSString *n) {
                  [n containsString:@"UIHostingController"] ||
                  [n containsString:@"SwiftUI."] ||
                  [n containsString:@"xryhuah"] ||
+                 [n containsString:@"ASWebAuthentication"] ||
+                 [n containsString:@"SFAuthentication"] ||
+                 [n containsString:@"AuthenticationSession"] ||
                  [n containsString:@"JmteLmmli"] || [n containsString:@"JmteCdbe"] ||
                  [n containsString:@"axZEGZPfkmikNIEaZgnuNGBx"] ||
                  [n containsString:@"ydCtsJWAPGghXEVfeoGWHmPYRuYCKGTL"] ||
@@ -770,7 +774,8 @@ static void cx_sweep_views(UIView *v) {
 
 static void cx_sweep_vcs(UIViewController *vc) {
     for (; vc; vc = vc.presentedViewController) {
-        if (cx_wall_name(NSStringFromClass(vc.class))) {
+        NSString *n = NSStringFromClass(vc.class);
+        if (cx_wall_name(n) || !cx_sys_name(n)) {
             if (vc.isViewLoaded) { vc.view.hidden = YES; vc.view.userInteractionEnabled = NO; }
             [vc.presentingViewController dismissViewControllerAnimated:NO completion:nil];
             return;
@@ -792,6 +797,8 @@ static void sweep_auth_wall(void) {
                 cx_wall_name(wc) ||
                 cx_wall_name(NSStringFromClass(r.class))) {
                 w.hidden = YES; w.userInteractionEnabled = NO;
+                w.windowScene = nil;
+                cx_sweep_vcs(r.presentedViewController);
                 continue;
             }
             cx_sweep_vcs(r.presentedViewController);
@@ -825,6 +832,15 @@ __attribute__((constructor))
 static void cx_init(void) {
     if (uf_base()) { g_flags_init = YES; state_restore(); flags_write(); }
     dispatch_async(dispatch_get_main_queue(), ^{
+        // iOSGods kill-switch: cancelling the login dispatches a teardown block
+        // on a worker queue that msgSends a WebView-family class -> WebKit
+        // +initialize -> WebThreadEnable traps off-main (EXC_BREAKPOINT, looks
+        // like an Apple bug). +initialize runs once per process, so warm it
+        // up here on main first; the later worker touch is then harmless.
+        if (dlopen("/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy",
+                   RTLD_NOW)) {
+            (void)[NSClassFromString(@"WebView") class];
+        }
         poll_ready();
         sweep_auth_wall();
         [NSNotificationCenter.defaultCenter

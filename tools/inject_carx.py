@@ -122,7 +122,8 @@ def main():
     if stub_dyb is None and not keep_iosgods and not stub_igg:
         # iOSGods payload removal: excise the loads, drop the files.
         n = remove_load(exe, b'iGameGod');   assert n == 1, f'exe iGameGod LC x{n}'
-    exe = inject_dylib_cmd(bytes(exe), '@executable_path/Frameworks/CXMenu.framework/CXMenu')
+    if b'CXMenu.framework/CXMenu' not in bytes(exe):
+        exe = inject_dylib_cmd(bytes(exe), '@executable_path/Frameworks/CXMenu.framework/CXMenu')
 
     uf = bytearray(zin.read(uf_path))
     if stub_dyb is None and not keep_iosgods and not stub_carx:
@@ -188,11 +189,28 @@ def main():
         b(SB+0x3C, SITE + 4),                     # +0x3C return
     )
     assert len(stub) <= (0x6998000 - CAVE)
-    assert orig(SITE) == madd(23, 8, 22, 23), f'site word {orig(SITE):08x}'
-    assert uf[CAVE:CAVE+len(stub)] == b'\x00' * len(stub), 'cave not empty'
-    uf[CAVE:CAVE+len(stub)] = stub
-    struct.pack_into('<I', uf, SITE, b(SITE, CAVE))
-    print(f'patched AddResource madd @0x{SITE:x} -> stub @0x{CAVE:x} ({len(stub)}B)')
+    if orig(SITE) == b(SITE, CAVE):
+        print(f'AddResource seam already patched @0x{SITE:x}')
+    else:
+        assert orig(SITE) == madd(23, 8, 22, 23), f'site word {orig(SITE):08x}'
+        assert uf[CAVE:CAVE+len(stub)] == b'\x00' * len(stub), 'cave not empty'
+        uf[CAVE:CAVE+len(stub)] = stub
+        struct.pack_into('<I', uf, SITE, b(SITE, CAVE))
+        print(f'patched AddResource madd @0x{SITE:x} -> stub @0x{CAVE:x} ({len(stub)}B)')
+
+    # iOS 26.2 crash (seen on-device): the per-frame [GCController controllers]
+    # poll dies inside SAObjects on a corrupted pointer — unrelated to the
+    # auth work, kills the game mid-load after the wall is dismissed. The
+    # poll fn at 0xfea0 is tiny (guard global, else call controllers). Its
+    # caller uses the return value (the controllers array), so a bare ret
+    # leaves x0 = caller's arg -> doesNotRecognizeSelector abort. Patch the
+    # entry to `mov x0, xzr; ret` — caller sees nil, [nil x] is a no-op.
+    GCFN = 0xFEA0
+    w = orig(GCFN)
+    if w != 0xAA1F03E0:
+        assert w in (0xF003B848, 0xD65F03C0), f'gc poll entry {w:08x}'
+        struct.pack_into('<II', uf, GCFN, 0xAA1F03E0, 0xD65F03C0)
+        print(f'GCController poll @0x{GCFN:x} -> return nil')
 
     # ---- libcarx: deleted-callback trap fix --------------------------------
     # libcarx registers an NSTimer block whose invoke target was stripped by
@@ -204,21 +222,31 @@ def main():
     carx_path = f'{app}/Frameworks/libcarx.dylib'
     carx = bytearray(zin.read(carx_path)) if (keep_iosgods or stub_igg) else None
     if carx is not None:
+        def patch_word(addr, exp, want_word, label):
+            # Idempotent: accept either the expected original or our value.
+            w = struct.unpack('<I', carx[addr:addr+4])[0]
+            if w == want_word:
+                print(f'{label} already patched @0x{addr:x}')
+                return
+            assert w == exp, f'{label} word {w:08x} != {exp:08x}'
+            struct.pack_into('<I', carx, addr, want_word)
+        def gate_b(GATE, END, label):
+            # cbz/cbnz -> unconditional b END (idempotent).
+            exp_word = 0x14000000 | ((END - GATE) >> 2)
+            w = struct.unpack('<I', carx[GATE:GATE+4])[0]
+            if w == exp_word:
+                print(f'{label} already forced @0x{GATE:x}'); return
+            assert (w & 0xFF000000) in (0x34000000, 0xB4000000) and \
+                ((w >> 5) & 0x7FFFF) == ((END - GATE) >> 2), f'{label} {w:08x}'
+            struct.pack_into('<I', carx, GATE, exp_word)
         DELETED_STUB = 0x47BEC
-        assert struct.unpack('<I', carx[DELETED_STUB:DELETED_STUB+4])[0] == 0xD10083FF, \
-            f'deleted-stub entry {struct.unpack("<I", carx[DELETED_STUB:DELETED_STUB+4])[0]:08x}'
-        struct.pack_into('<I', carx, DELETED_STUB, 0xD65F03C0)  # ret
+        patch_word(DELETED_STUB, 0xD10083FF, 0xD65F03C0, 'deleted-stub')
         # Toast presenter: the wall-window construction sits behind a
         # cbnz/cbz gate at 0x1e4e8 (-> 0x1ea9c). The block builds the
         # window + dymFkfP toast VC + windowLevel. Force the branch so the
         # toast is never built. Block is pure UI — 23 msgSends, no state.
         TOAST_GATE, TOAST_END = 0x1E4E8, 0x1EA9C
-        gate = struct.unpack('<I', carx[TOAST_GATE:TOAST_GATE+4])[0]
-        assert (gate & 0xFF000000) in (0x34000000, 0xB4000000) and \
-            ((gate >> 5) & 0x7FFFF) == ((TOAST_END - TOAST_GATE) >> 2), \
-            f'toast gate {gate:08x}'
-        struct.pack_into('<I', carx, TOAST_GATE,
-                         0x14000000 | ((TOAST_END - TOAST_GATE) >> 2))  # b #end
+        gate_b(TOAST_GATE, TOAST_END, 'toast gate')
         # axZEGZ wall window (lvl-1001 SwiftUI login): the window is a
         # swift_once lazy global (0x58a260). Its setup function checks a
         # predicate then calls [window setHidden:NO] at 0x9fe74-0x9ff18.
@@ -226,15 +254,35 @@ def main():
         # safe) but is never shown. A nil-return ctor would instead crash
         # the reader's direct ivar load — that's why this gates the SHOW.
         WALL_SHOW, WALL_END = 0x9FE74, 0x9FF18
-        gate = struct.unpack('<I', carx[WALL_SHOW:WALL_SHOW+4])[0]
-        assert (gate & 0xFF000000) in (0x34000000, 0xB4000000) and \
-            ((gate >> 5) & 0x7FFFF) == ((WALL_END - WALL_SHOW) >> 2), \
-            f'wall gate {gate:08x}'
-        struct.pack_into('<I', carx, WALL_SHOW,
-                         0x14000000 | ((WALL_END - WALL_SHOW) >> 2))  # b #end
+        gate_b(WALL_SHOW, WALL_END, 'wall gate')
+        # v12 — the axZEGZ SUBCLASS wall window (v11 still gated on device).
+        # Its setup fn has the same os_log-probe shape but INVERTED: `cbz w0`
+        # at 0xa2278 branches PAST its epilogue INTO the show block (which
+        # ends in [x20 setHidden:NO] @0xa22e4). "Never show" = never branch;
+        # nop the cbz so it always falls into the epilogue (early ret).
+        SUB_GATE = 0xA2278
+        w = struct.unpack('<I', carx[SUB_GATE:SUB_GATE+4])[0]
+        if w != 0xD503201F:
+            assert (w & 0xFF000000) in (0x34000000, 0xB4000000) and \
+                ((w >> 5) & 0x7FFFF) == ((0xA229C - SUB_GATE) >> 2), \
+                f'sub gate {w:08x}'
+            struct.pack_into('<I', carx, SUB_GATE, 0xD503201F)  # nop
+        # Two more wall-family config gates with the axZEGZ shape (cbz skips
+        # the ivar-config block) — force the skip unconditionally.
+        gate_b(0xA0AC4, 0xA0B38, 'cfg gate a0ac4')
+        gate_b(0xA1F8C, 0xA204C, 'cfg gate a1f8c')
+        # More obfuscator "deleted method" stubs like 0x47bec — standalone
+        # stubs (marker index + 'Fatal error' + assertionFailure + brk) that
+        # the auth/decline flow can hit. Entry -> ret (void-safe).
+        for STUB in (0x30E234, 0x31D024):
+            w = struct.unpack('<I', carx[STUB:STUB+4])[0]
+            if w != 0xD65F03C0:
+                struct.pack_into('<I', carx, STUB, 0xD65F03C0)
         print(f'libcarx: NSTimer stub @0x{DELETED_STUB:x} -> ret; '
               f'toast gate @0x{TOAST_GATE:x} -> b 0x{TOAST_END:x}; '
-              f'wall setHidden @0x{WALL_SHOW:x} -> skipped')
+              f'wall setHidden @0x{WALL_SHOW:x} -> skipped; '
+              f'sub gate @0x{SUB_GATE:x} -> nop; cfg gates '
+              f'0xa0ac4/0xa1f8c -> skipped; deleted stubs 0x30e234/0x31d024 -> ret')
 
     # ---- repack -----------------------------------------------------------
     fw_info = plistlib.dumps({
@@ -314,6 +362,8 @@ def main():
         if n in drop_files or n.startswith(drop_prefixes):
             continue
         if n in (exe_path, uf_path, info_path):
+            continue
+        if n.startswith(f'{app}/Frameworks/CXMenu.framework/'):
             continue
         if n == carx_path and carx is not None:
             continue
