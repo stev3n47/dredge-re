@@ -111,7 +111,7 @@ def main():
         return zi
 
     zout = zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED)
-    dirs_seen = set()
+    dirs_seen = {z.filename for z in zin.infolist() if z.filename.endswith('/')}
     def emit_dirs(path):
         parts = path.split('/')
         for i in range(1, len(parts)):
