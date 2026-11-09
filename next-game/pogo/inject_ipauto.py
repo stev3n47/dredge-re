@@ -62,6 +62,39 @@ def inject_dylib_cmd(exe: bytes, dylib_path: str) -> bytes:
     struct.pack_into('<I', b, 20, sizeofcmds + cmdsize)
     return bytes(b)
 
+def strip_codesig(exe: bytes) -> bytes:
+    b = bytearray(exe)
+    ncmds, sizeofcmds = struct.unpack('<II', b[16:24])
+    off = 32
+    cs_off = cs_sz = None
+    data_off = None
+    linkedit = []
+    for i in range(ncmds):
+        cmd, sz = struct.unpack('<II', b[off:off+8])
+        if cmd == LC_CODE_SIGNATURE:
+            cs_off, cs_sz = off, sz
+            data_off = struct.unpack('<I', b[off+8:off+12])[0]
+        if cmd == 0x19:
+            linkedit.append(off)
+        off += sz
+    if cs_off is None:
+        return exe
+    end = 32 + sizeofcmds
+    b[cs_off:end-cs_sz] = b[cs_off+cs_sz:end]
+    del b[end-cs_sz:end]
+    struct.pack_into('<I', b, 16, ncmds - 1)
+    struct.pack_into('<I', b, 20, sizeofcmds - cs_sz)
+    # truncate at the superblob offset (it's the tail); shrink __LINKEDIT filesize to match
+    if data_off and data_off < len(b):
+        for off in linkedit:
+            name = b[off+8:off+24].split(b'\0')[0]
+            if name == b'__LINKEDIT':
+                fileoff, filesize = struct.unpack('<QQ', b[off+40:off+56])
+                if fileoff + filesize > data_off:
+                    struct.pack_into('<Q', b, off+48, data_off - fileoff)
+        del b[data_off:]
+    return bytes(b)
+
 def main():
     ipa, dylib, out = sys.argv[1], sys.argv[2], sys.argv[3]
     exe_path  = 'Payload/PokmonGO.app/PokmonGO'
@@ -72,6 +105,10 @@ def main():
     zin = zipfile.ZipFile(ipa)
     exe = inject_dylib_cmd(zin.read(exe_path),
                            '@executable_path/Frameworks/IPAuto.framework/IPAuto')
+    # Strip the stub's now-stale LC_CODE_SIGNATURE: editing any signed binary
+    # invalidates its CMS blob, and strict re-signers (Signulous) pre-verify
+    # and refuse invalidly-signed binaries. Unsigned re-signs cleanly.
+    exe = strip_codesig(exe)
     dyb = open(dylib, 'rb').read()
 
     fw_info = plistlib.dumps({
