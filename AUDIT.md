@@ -179,13 +179,32 @@ Six patch sites identified and documented in
   v3; needs either an on-device test of remaining gated rows or a
   diff against a stock SpooferPro dylib.
 
-Written `tools/inject_spooferpro.py` that reproduces the release
-byte-for-byte: given the v1 IPA it produces an IPA whose
-`libSpooferPro.dylib` has SHA-256 matching the shipped v2 exactly
-(`be3e5ec…`). Idempotent — re-running on v2 is a no-op. Bails loudly if
-any site's word is neither the stock value nor the patched value, so a
-future dylib version is caught at patch time instead of silently
-miscompiling.
+**v2 and v3 both crash on-device at launch** (reported by the maintainer
+2026-11-09). Pulled v3 and diffed: v3 reverted the fifth gate and tried
+`mov x0, #4; ret` at `0xbcf70` (instead of v2's `#0xff`). Same crash.
+Root cause: the stock LEVEL getter at `0xbcf70` is a 4.5 KB function
+with **required TLS side effects** — it conditionally performs an
+atomic op on the slot at `0x1bac75c` and reads several globals. Both v2
+and v3 overwrite the function entry, so those side effects never run
+and downstream code that depends on the TLS slot crashes on first
+dereference.
+
+**Fix (proposed v4):** patch 4 bytes at `0xbdbc8` — the function's
+single `mov x0, x21` at the epilogue — to `mov x0, #0xff`. The function
+runs in full, every side effect preserved, only the return value is
+overridden. Hand-verified build has SHA-256 `7143ec16…`. The injector
+produces this exact byte sequence from the v1 IPA under
+`--no-fifth-gate` (kept out of caution since v3 reverted it; can be
+re-enabled with the default once on-device-confirmed).
+
+`tools/inject_spooferpro.py` now reproduces every shipped release
+byte-for-byte: v2 (`be3e5ec…`) with `--no-level-override
+--level-getter-entry`, v3 (`658578b2…`) with `--no-fifth-gate
+--level-getter-entry --level-entry-value 4`, and v4 proposed
+(`7143ec16…`) as the default. Idempotent — re-running on any output is
+a no-op. Bails loudly if any site's word is neither the stock value nor
+a known patched value, so a future dylib version is caught at patch
+time instead of silently miscompiling.
 
 ### Still to do (next session)
 
