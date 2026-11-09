@@ -1,0 +1,48 @@
+name: Build IPAuto.dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'next-game/pogo/**'
+      - '.github/workflows/build-ipauto.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 -dynamiclib \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=13.0 \
+            -fno-objc-arc -fblocks -O2 -fno-objc-exceptions \
+            -nostdlib -Wl,-undefined,dynamic_lookup \
+            -install_name '@executable_path/Frameworks/IPAuto.framework/IPAuto' \
+            -o IPAuto next-game/pogo/IPAuto.m
+          # Sign with a real (self-signed) cert, NOT ad-hoc: sideload re-signers
+          # enumerate binaries to re-sign by their CMS signature; a 1KB ad-hoc
+          # stub may be skipped -> unsigned nested code fails iOS install.
+          openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+            -days 30 -nodes -subj "/CN=IPAuto/" \
+            -addext "keyUsage=critical,digitalSignature" \
+            -addext "extendedKeyUsage=critical,codeSigning" \
+            -addext "basicConstraints=critical,CA:FALSE"
+          openssl pkcs12 -export -legacy -out id.p12 -inkey key.pem -in cert.pem -passout pass:temp
+          security create-keychain -p temp t.keychain
+          security default-keychain -s t.keychain
+          security list-keychains -d user -s t.keychain
+          security unlock-keychain -p temp t.keychain
+          security import id.p12 -k t.keychain -P temp -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp t.keychain
+          codesign --force --sign "IPAuto" IPAuto
+          file IPAuto
+          otool -L IPAuto
+          codesign -dv IPAuto 2>&1 | head -5
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IPAuto
+          path: IPAuto
