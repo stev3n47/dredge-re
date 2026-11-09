@@ -218,3 +218,54 @@ Also present: a *subclass* of axZEGZ (msgSendSuper2 sites at `0xa081c`,
 `0xa09b8`, `0xa200c`, `0xa205c`, `0xa2110` build super structs naming
 axZEGZ) — the dump window was class axZEGZ itself, but if a renamed
 sibling appears, its own show site needs the same treatment.
+
+## v12 — subclass wall gate + decline-crash stubs
+
+v11's axZEGZ gate patch landed but the wall still showed — there's a
+SECOND window class: an axZEGZ SUBCLASS with its own setup fn whose
+os_log-probe gate is structurally INVERTED. At 0xa2278 `cbz w0` branches
+PAST its epilogue INTO the show block (sel_0x360 chain ending in
+[x20 setHidden:NO] @0xa22e4). For the subclass, "never show" = never
+branch — patched the cbz to `nop` so it always falls into the early ret.
+Two sibling config gates with the axZEGZ shape (cbz skips the ivar-config
+block) also forced: 0xa0ac4 -> b 0xa0b38, 0xa1f8c -> b 0xa204c.
+
+Decline crash: declining the login hits more obfuscator "deleted method"
+stubs (marker index + 'Fatal error' + assertionFailure + brk). Nop'd the
+two standalone stubs found via the 'Fatal error' xref: 0x30e234 and
+0x31d024 -> ret. Four more 'Fatal error' sites exist inside larger
+functions (0x33afbc, 0x33b160, 0x33b2fc, 0x372848) — left alone; revisit
+if decline still traps.
+
+CXMenu sweeper hardened: foreign windows now also get `windowScene = nil`
+(can't be re-shown by a later setHidden:NO) + their presented-VC chains
+dismissed; `cx_sweep_vcs` now dismisses ANY presented VC that isn't
+system/Unity/CX-shaped (structural, no name dependency — catches generic
+UIHostingController auth VCs inside Unity's window). Added
+ASWebAuthentication/SFAuthentication/AuthenticationSession matchers.
+NOTE: the CXMenu.mm changes need the CI macOS build; carx-v12.ipa was
+packed with the previous compiled CXMenu.
+
+inject_carx.py is now idempotent — patch sites accept either the stock
+word or our patched word, CXMenu LC/zip entries dedup, so versions can
+chain (v12 was built off carx-v11.ipa).
+
+## v19 — Free Purchases: afford-check + ChangeResource spend gates
+
+The original Free Purchases only zeroed the debit inside
+Dr3PlayerResourcesUtils.AddResource (factor<0 -> skip madd). Two gaps:
+
+1) Shops gate purchases on HasResource(playerResources, resource, count)
+   @0x283d8f8 first — insufficient balance -> "not enough funds" and the
+   spend never reaches AddResource. flag-gated to return true (flag+1).
+
+2) ChangeResource(playerResources, resource, count) debits via direct
+   `add w8,w8,w20; str w8,[x19,#off]` per field — bypasses the madd seam.
+   New gate_spend variant: flag on && w20<0 (spend) -> `add w8,w8,wzr`
+   writes balance back unchanged; w20>=0 (earn) replays the real add.
+   Fields covered: Soft @0x282e304 (#0x10), Hard @0x282e344 (#0x14),
+   Fans @0x282e384 (#0x18). Fuel/CampaignCardFreeTry don't go through
+   ChangeResource — they ride AddResource, already covered.
+
+Satella/Auto-RevenueCat are StoreKit receipt/entitlement tweaks — not
+applicable to in-game CR/gold purchases, which are fully client-side.

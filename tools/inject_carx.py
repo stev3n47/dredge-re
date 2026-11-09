@@ -212,6 +212,109 @@ def main():
         struct.pack_into('<II', uf, GCFN, 0xAA1F03E0, 0xD65F03C0)
         print(f'GCController poll @0x{GCFN:x} -> return nil')
 
+    # ---- gated bool predicates --------------------------------------------
+    # Same seam model as AddResource: entry gets `b cave`; the cave checks
+    # a flag byte in SLOT — flag on -> `mov w0,#v; ret`; flag off -> replay
+    # the displaced first instruction + jump back (untouched behavior).
+    next_cave = CAVE + len(stub)
+    def gate(site, flag_off, ret_val, label):
+        nonlocal next_cave
+        cv = next_cave
+        gs = w32s(
+            adrp(9, cv, SLOT),
+            ldrb(9, 9, (SLOT & 0xFFF) + flag_off),
+            cbz(9, 3),                      # flag off -> orig path @+0x14
+            0x52800020 if ret_val else 0x52800000,  # mov w0,#1 / mov w0,#0
+            0xD65F03C0,                     # ret
+            orig(site),                     # replay displaced instr
+            b(cv + 0x18, site + 4),         # back into the function
+        )
+        assert len(gs) == 0x1C
+        assert cv + len(gs) <= 0x6998000, 'text pad exhausted'
+        if orig(site) == b(site, cv):
+            print(f'{label} gate already patched @0x{site:x}')
+        else:
+            assert uf[cv:cv+len(gs)] == b'\x00' * len(gs), 'cave not empty'
+            uf[cv:cv+len(gs)] = gs
+            struct.pack_into('<I', uf, site, b(site, cv))
+            print(f'{label} gate @0x{site:x} -> flag+{flag_off}')
+        next_cave = cv + 0x20
+
+    gate(0x28F314C, 2, 1, 'all-tracks')      # BattlePassUtils.IsUnlockedTrack
+    gate(0x28D2980, 3, 1, 'all-vinyls')      # PlayerVinylsModel.IsUnlocked
+    gate(0x4D19BC0, 4, 0, 'no-interstitial') # AdsUtils.IsAvailableShowInterstitial
+
+    # Instant stand operations — flag 5. GetOperationsAndTimeFor* return
+    # ValueTuple<float time, operations> built through a shared ctor; each
+    # site either fmuls the final time or stores it into the tuple local.
+    # Flag on -> `fmov sN, wzr` before the instruction -> time = 0 while the
+    # operations list stays intact. SwapNode delegates into the shared
+    # worker at 0x2841c48/0x28429a4 so its path is covered by sites 1-2.
+    def gate_zero(site, sreg, flag_off, label):
+        nonlocal next_cave
+        cv = next_cave
+        gs = w32s(
+            adrp(9, cv, SLOT),
+            ldrb(9, 9, (SLOT & 0xFFF) + flag_off),
+            cbz(9, 2),                      # flag off -> orig @+0x10
+            0x1E2703E0 | sreg,              # fmov sN, wzr
+            orig(site),                     # replay displaced instr
+            b(cv + 0x14, site + 4),         # back into the function
+        )
+        assert len(gs) == 0x18
+        assert cv + len(gs) <= 0x6998000, 'text pad exhausted'
+        if orig(site) == b(site, cv):
+            print(f'{label} gate already patched @0x{site:x}')
+        else:
+            assert uf[cv:cv+len(gs)] == b'\x00' * len(gs), 'cave not empty'
+            uf[cv:cv+len(gs)] = gs
+            struct.pack_into('<I', uf, site, b(site, cv))
+            print(f'{label} gate @0x{site:x} -> flag+{flag_off}')
+        next_cave = cv + 0x20
+
+    gate_zero(0x2842144, 0, 5, 'instant-parts')  # SwapParts/SwapNode fmul tail
+    gate_zero(0x2842E04, 0, 5, 'instant-repair') # Repair fmul tail
+    gate_zero(0x28472D0, 0, 5, 'instant-fromcar')# FromCar str s0 -> tuple local
+    gate_zero(0x28473A8, 0, 5, 'instant-fromnode')
+    gate_zero(0x28434CC, 8, 5, 'instant-paint')  # Paint str s8 -> tuple local
+
+    # Free Purchases completeness (same flag+1 as the AddResource skip):
+    # 1) the UI afford-check HasResource -> "not enough funds" blocks the
+    #    purchase before any debit; force true so the spend path runs.
+    gate(0x283D8F8, 1, 1, 'afford-check')
+    # 2) ChangeResource debits via `add w8,w8,w20; str` per field — bypasses
+    #    the madd seam. Flag on && w20<0 (spend) -> write balance back
+    #    unchanged; earns (w20>=0) replay the real add.
+    def gate_spend(site, flag_off, label):
+        nonlocal next_cave
+        cv = next_cave
+        gs = w32s(
+            adrp(9, cv, SLOT),
+            ldrb(9, 9, (SLOT & 0xFFF) + flag_off),
+            cbz(9, 6),                      # flag off -> orig @+0x20
+            cmp_i(20, 0),                   # count sign
+            bcond(0xB, 2),                  # spend -> zero-add @+0x18
+            b(cv + 0x14, cv + 0x20),        # earn -> orig
+            0x0B1F0108,                     # add w8, w8, wzr (keep balance)
+            b(cv + 0x1C, site + 4),
+            orig(site),
+            b(cv + 0x24, site + 4),
+        )
+        assert len(gs) == 0x28
+        assert cv + len(gs) <= 0x6998000, 'text pad exhausted'
+        if orig(site) == b(site, cv):
+            print(f'{label} gate already patched @0x{site:x}')
+        else:
+            assert uf[cv:cv+len(gs)] == b'\x00' * len(gs), 'cave not empty'
+            uf[cv:cv+len(gs)] = gs
+            struct.pack_into('<I', uf, site, b(site, cv))
+            print(f'{label} gate @0x{site:x} -> flag+{flag_off}')
+        next_cave = cv + 0x28
+
+    gate_spend(0x282E304, 1, 'spend-soft')   # ChangeResource Soft field
+    gate_spend(0x282E344, 1, 'spend-hard')   # ChangeResource Hard field
+    gate_spend(0x282E384, 1, 'spend-fans')   # ChangeResource Fans field
+
     # ---- libcarx: deleted-callback trap fix --------------------------------
     # libcarx registers an NSTimer block whose invoke target was stripped by
     # the iOSGods obfuscator into a "deleted method" stub: it loads the
@@ -278,6 +381,22 @@ def main():
             w = struct.unpack('<I', carx[STUB:STUB+4])[0]
             if w != 0xD65F03C0:
                 struct.pack_into('<I', carx, STUB, 0xD65F03C0)
+        # iOSGods kill-switch engine (device crash logs): cancelling the
+        # ASWebAuth session dispatches a teardown block whose captured fn
+        # is the obfuscator's shared table-walker at 0x475ec. It iterates
+        # a poisoned class table — msgSend on a WebView class traps in
+        # WebKitInitialize off-main (EXC_BREAKPOINT); next a CloudKit
+        # object traps under swift_dynamicCast/__forwarding__. The same
+        # engine is tail-called by helper 0x4c158's stage-2 and 4 other
+        # wrappers — all iOSGods/Jailpatch machinery; game code never
+        # calls into it. Return nil: teardown no-ops, callers get the
+        # "empty" result. Our cheats (UF seam + CXMenu) are independent.
+        ENG = 0x475EC
+        w = struct.unpack('<I', carx[ENG:ENG+4])[0]
+        if w != 0xAA1F03E0:
+            assert w == 0xA9BA6FFC, f'engine entry {w:08x}'
+            struct.pack_into('<II', carx, ENG, 0xAA1F03E0, 0xD65F03C0)
+            print(f'engine @0x{ENG:x} -> return nil')
         print(f'libcarx: NSTimer stub @0x{DELETED_STUB:x} -> ret; '
               f'toast gate @0x{TOAST_GATE:x} -> b 0x{TOAST_END:x}; '
               f'wall setHidden @0x{WALL_SHOW:x} -> skipped; '
