@@ -31,7 +31,9 @@ typedef int BOOL;
 #define nil ((id)0)
 typedef struct objc_object NSString, NSData, NSNumber, NSArray, NSMutableArray,
     NSMutableData, NSMutableDictionary, NSDictionary, NSURL, NSMutableURLRequest,
-    NSURLSession, NSURLSessionTask, NSURLResponse, NSError, NSFileManager, NSFileHandle;
+    NSURLSession, NSURLSessionTask, NSURLResponse, NSError, NSFileManager, NSFileHandle,
+    UIApplication, UIWindow, UIView, UIButton, UIColor, UIAlertController, UIAlertAction,
+    UIPanGestureRecognizer;
 
 extern id objc_msgSend();
 extern void *objc_autoreleasePoolPush(void);
@@ -48,7 +50,15 @@ extern IMP method_getImplementation(Method);
 extern IMP method_setImplementation(Method, IMP);
 extern int objc_sync_enter(id);
 extern int objc_sync_exit(id);
+extern Class objc_allocateClassPair(Class, const char *, size_t);
+extern void objc_registerClassPair(Class);
+extern BOOL class_addMethod(Class, SEL, IMP, const char *);
+extern id dispatch_get_main_queue(void);
+extern void dispatch_async(id, id);
 extern void *_Block_copy(const void *);
+
+typedef struct { double x, y; } CGPoint;
+typedef struct { double x, y, w, h; } CGRect;
 
 #define S(s) sel_registerName(s)
 #define C(s) objc_getClass(s)
@@ -142,6 +152,11 @@ static int gMonCount;
 static wbuf gBatch;                    // field-2 fixed64 uids for batch release
 static int gBatchN;
 
+// on-screen UI (floating IP button + alert-sheet toggles)
+static NSString *gCfgPath;
+static id gBtn, gTarget;
+static int gUIInit, gCleanOnce;
+
 #define M_HOLO_INV   4
 #define M_ENCOUNTER 102
 #define M_CATCH     103
@@ -159,9 +174,10 @@ static void load_config(void) {
     id docs = SEND(SEND(paths, S("lastObject")), S("path"));
     gLogPath = objc_retain(SEND(docs, S("stringByAppendingPathComponent:"), nsstr("ipauto.log")));
     NSString *cfg = SEND(docs, S("stringByAppendingPathComponent:"), nsstr("ipauto.json"));
+    gCfgPath = objc_retain(cfg);
     id d = SEND(C("NSData"), S("dataWithContentsOfFile:"), cfg);
     if (d) {
-        gCfg = objc_retain(SEND(C("NSJSONSerialization"), S("JSONObjectWithData:options:error:"), d, 0, nil));
+        gCfg = objc_retain(SEND(SEND(C("NSJSONSerialization"), S("JSONObjectWithData:options:error:"), d, 0, nil), S("mutableCopy")));
     }
     if (!gCfg) {
         // minimal safe defaults — written for user to edit
@@ -172,7 +188,7 @@ static void load_config(void) {
             "\"iv_pct_min\":90,\"bag_threshold\":1800,"
             "\"keep_species\":[],\"drop_species\":[]}";
         id jd = SEND(nsstr(json), S("dataUsingEncoding:"), 4);
-        gCfg = objc_retain(SEND(C("NSJSONSerialization"), S("JSONObjectWithData:options:error:"), jd, 0, nil));
+        gCfg = objc_retain(SEND(SEND(C("NSJSONSerialization"), S("JSONObjectWithData:options:error:"), jd, 0, nil), S("mutableCopy")));
         SEND(jd, S("writeToFile:atomically:"), cfg, YES);
     }
     gKeepSpecies = objc_retain(SEND(gCfg, S("objectForKey:"), nsstr("keep_species")));
@@ -328,8 +344,10 @@ static void walk_mons(const uint8_t *d, uint32_t n, int depth) {
 }
 
 // ---- response dispatch -----------------------------------------------------------
+static void ensure_ui(void);
 static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
     @synchronized (gSyncObj) {
+    ensure_ui();
     // refresh envelope template (session/auth values ride the game's own)
     if (gTemplate) objc_release(gTemplate);
     gTemplate = objc_retain(reqBody);
@@ -394,12 +412,15 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
                 SEND(gPending, S("addObject:"), SEND(C("NSNumber"), S("numberWithUnsignedLongLong:"), uid));
             }
         } else if (m == M_HOLO_INV) {
-            if (cfg_i("bag_full_clean")) {
+            if (cfg_i("bag_full_clean") || gCleanOnce) {
                 gMode = 1; gMonCount = 0;
                 walk_mons(val, len, 0);
                 int thresh = cfg_i("bag_threshold");
-                if (gMonCount >= (thresh > 0 ? thresh : 1)) {
-                    ipalog("[IPAuto] bag full: %d mons >= %d — cleaning", gMonCount, thresh);
+                if (gCleanOnce || gMonCount >= (thresh > 0 ? thresh : 1)) {
+                    ipalog("[IPAuto] bag clean%s: %d mons%s — cleaning",
+                           gCleanOnce ? " (manual)" : "", gMonCount,
+                           gCleanOnce ? "" : " >= threshold");
+                    gCleanOnce = 0;
                     gMode = 2; walk_mons(val, len, 0);
                 }
                 gMode = 0;
@@ -419,6 +440,148 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
         free(gBatch.p); gBatch.p = NULL; gBatch.cap = gBatch.len = 0; gBatchN = 0;
     }
     }
+}
+
+// ---- on-screen UI ---------------------------------------------------------------
+static void persist_cfg(void) {
+    id d = SEND(C("NSJSONSerialization"), S("dataWithJSONObject:options:error:"), gCfg, 0, nil);
+    SEND(d, S("writeToFile:atomically:"), gCfgPath, YES);
+}
+
+static void cfg_set(const char *key, int v) {
+    SEND(gCfg, S("setObject:forKey:"), SEND(C("NSNumber"), S("numberWithInt:"), v), nsstr(key));
+    persist_cfg();
+}
+
+static id front_vc(void) {
+    id app = SEND(C("UIApplication"), S("sharedApplication"));
+    id wins = SEND(app, S("windows"));
+    id win = (uintptr_t)SEND(wins, S("count")) ? SEND(wins, S("objectAtIndex:"), 0) : nil;
+    id vc = SEND(win, S("rootViewController"));
+    id pvc;
+    while ((pvc = SEND(vc, S("presentedViewController")))) vc = pvc;
+    return vc;
+}
+
+static void present_sheet(void);
+
+typedef void (^ActH)(id);
+static void add_act(id alert, id vc, const char *title, int style, ActH h) {
+    SEND(alert, S("addAction:"),
+         SEND(C("UIAlertAction"), S("actionWithTitle:style:handler:"), nsstr(title), style, h));
+}
+
+static void add_toggle(id alert, id vc, const char *key, const char *label) {
+    char t[160];
+    snprintf(t, sizeof t, "%s:  %s", label, cfg_i(key) ? "ON" : "off");
+    add_act(alert, vc, t, 0, ^(id a) {
+        cfg_set(key, !cfg_i(key));
+        SEND(vc, S("dismissViewControllerAnimated:completion:"), NO,
+             ^{ present_sheet(); });
+    });
+}
+
+static void add_num(id alert, id vc, const char *key, const char *label, int step, int lo, int hi) {
+    char t[160];
+    int cur = cfg_i(key);
+    snprintf(t, sizeof t, "-  %s  (%d)", label, cur);
+    add_act(alert, vc, t, 0, ^(id a) {
+        int v = cur - step; cfg_set(key, v < lo ? lo : v);
+        SEND(vc, S("dismissViewControllerAnimated:completion:"), NO, ^{ present_sheet(); });
+    });
+    snprintf(t, sizeof t, "+  %s  (%d)", label, cur);
+    add_act(alert, vc, t, 0, ^(id a) {
+        int v = cur + step; cfg_set(key, v > hi ? hi : v);
+        SEND(vc, S("dismissViewControllerAnimated:completion:"), NO, ^{ present_sheet(); });
+    });
+}
+
+static void present_sheet(void) {
+    void *p = objc_autoreleasePoolPush();
+    id vc = front_vc();
+    if (!vc) { ipalog("[IPAuto] no root vc — sheet skipped"); objc_autoreleasePoolPop(p); return; }
+    char msg[160];
+    snprintf(msg, sizeof msg, "IV min %d%%   |   bag at %d%s",
+             cfg_i("iv_pct_min"), cfg_i("bag_threshold"),
+             gCleanOnce ? "   |   clean armed" : "");
+    id alert = SEND(C("UIAlertController"), S("alertControllerWithTitle:message:preferredStyle:"),
+                    nsstr("IPAuto"), nsstr(msg), 1);
+    add_toggle(alert, vc, "release_on_catch", "Release on Catch");
+    add_toggle(alert, vc, "bag_full_clean", "Bag-Full Auto Clean");
+    add_num(alert, vc, "iv_pct_min", "IV min", 5, 0, 100);
+    add_num(alert, vc, "bag_threshold", "bag at", 100, 0, 4000);
+    add_toggle(alert, vc, "keep_shiny", "Keep Shiny");
+    add_toggle(alert, vc, "keep_hundo", "Keep 100% IV");
+    add_toggle(alert, vc, "keep_favorite", "Keep Favorite");
+    add_toggle(alert, vc, "keep_buddy", "Keep Buddy");
+    add_toggle(alert, vc, "keep_lucky", "Keep Lucky");
+    add_toggle(alert, vc, "keep_legendary", "Keep Legendary");
+    add_act(alert, vc, gCleanOnce ? "Clean armed — open your bag" : "Clean Bag Now", 2, ^(id a) {
+        gCleanOnce = 1;
+        ipalog("[IPAuto] manual bag clean armed");
+        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
+    });
+    add_act(alert, vc, "Done", 1, nil);
+    SEND(vc, S("presentViewController:animated:completion:"), alert, YES, nil);
+    objc_autoreleasePoolPop(p);
+}
+
+static void tgt_tap(id self, SEL _c, id sender) { present_sheet(); }
+
+static void tgt_pan(id self, SEL _c, id gr) {
+    void *p = objc_autoreleasePoolPush();
+    id v = SEND(gr, S("view"));
+    CGPoint t = ((CGPoint (*)(id, SEL, id))objc_msgSend)(gr, S("translationInView:"), v);
+    CGPoint c = ((CGPoint (*)(id, SEL))objc_msgSend)(v, S("center"));
+    c.x += t.x; c.y += t.y;
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(v, S("setCenter:"), c);
+    CGPoint z = {0, 0};
+    ((void (*)(id, SEL, CGPoint, id))objc_msgSend)(gr, S("setTranslation:inView:"), z, v);
+    objc_autoreleasePoolPop(p);
+}
+
+static void ensure_ui(void) {
+    if (gUIInit) return;
+    gUIInit = 1;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        void *p = objc_autoreleasePoolPush();
+        Class tc = objc_allocateClassPair(C("NSObject"), "IPAutoTgt", 0);
+        if (tc) {
+            class_addMethod(tc, S("ipTap:"), (IMP)tgt_tap, "v@:@");
+            class_addMethod(tc, S("ipPan:"), (IMP)tgt_pan, "v@:@");
+            objc_registerClassPair(tc);
+        } else {
+            tc = C("IPAutoTgt");  // already registered on a retry
+        }
+        gTarget = objc_retain(SEND(SEND((id)tc, S("alloc")), S("init")));
+
+        id app = SEND(C("UIApplication"), S("sharedApplication"));
+        id wins = SEND(app, S("windows"));
+        id win = (uintptr_t)SEND(wins, S("count")) ? SEND(wins, S("objectAtIndex:"), 0) : nil;
+        if (win) {
+            id btn = SEND(C("UIButton"), S("buttonWithType:"), 0);
+            CGRect f = {18, 130, 52, 52};
+            ((void (*)(id, SEL, CGRect))objc_msgSend)(btn, S("setFrame:"), f);
+            SEND(btn, S("setTitle:forState:"), nsstr("IP"), 0);
+            SEND(btn, S("setTitleColor:forState:"), SEND(C("UIColor"), S("whiteColor")), 0);
+            id bg = ((id (*)(id, SEL, double, double, double, double))objc_msgSend)(
+                     C("UIColor"), S("colorWithRed:green:blue:alpha:"), 0.08, 0.08, 0.10, 0.65);
+            SEND(btn, S("setBackgroundColor:"), bg);
+            id lyr = SEND(btn, S("layer"));
+            ((void (*)(id, SEL, double))objc_msgSend)(lyr, S("setCornerRadius:"), 26.0);
+            SEND(btn, S("addTarget:action:forControlEvents:"), gTarget, S("ipTap:"), 64);
+            id pan = SEND(SEND(C("UIPanGestureRecognizer"), S("alloc")),
+                          S("initWithTarget:action:"), gTarget, S("ipPan:"));
+            SEND(btn, S("addGestureRecognizer:"), pan);
+            SEND(win, S("addSubview:"), btn);
+            gBtn = objc_retain(btn);
+            ipalog("[IPAuto] UI button added");
+        } else {
+            gUIInit = 0;
+            ipalog("[IPAuto] no window for UI yet");
+        }
+        objc_autoreleasePoolPop(p);
+    });
 }
 
 // ---- swizzle ---------------------------------------------------------------------
