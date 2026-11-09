@@ -55,6 +55,8 @@ extern void objc_registerClassPair(Class);
 extern BOOL class_addMethod(Class, SEL, IMP, const char *);
 extern id dispatch_get_main_queue(void);
 extern void dispatch_async(id, id);
+extern long long dispatch_time(long long, long long);
+extern void dispatch_after(long long, id, id);
 extern void *_Block_copy(const void *);
 
 typedef struct { double x, y; } CGPoint;
@@ -453,10 +455,29 @@ static void cfg_set(const char *key, int v) {
     persist_cfg();
 }
 
-static id front_vc(void) {
+static id game_window(void) {
     id app = SEND(C("UIApplication"), S("sharedApplication"));
+    // iOS13+ scene path first: connectedScenes -> UIWindowScene -> windows
+    id scenes = SEND(app, S("connectedScenes"));
+    id objs = scenes ? SEND(scenes, S("allObjects")) : nil;
+    unsigned n = objs ? (unsigned)(uintptr_t)SEND(objs, S("count")) : 0;
+    for (unsigned i = 0; i < n; i++) {
+        id scene = SEND(objs, S("objectAtIndex:"), i);
+        if (!SEND(scene, S("respondsToSelector:"), S("windows"))) continue;
+        id sw = SEND(scene, S("windows"));
+        if (sw && (uintptr_t)SEND(sw, S("count")))
+            return SEND(sw, S("objectAtIndex:"), 0);
+    }
+    // legacy fallback
     id wins = SEND(app, S("windows"));
-    id win = (uintptr_t)SEND(wins, S("count")) ? SEND(wins, S("objectAtIndex:"), 0) : nil;
+    if (wins && (uintptr_t)SEND(wins, S("count")))
+        return SEND(wins, S("objectAtIndex:"), 0);
+    id kw = SEND(app, S("keyWindow"));
+    return kw;
+}
+
+static id front_vc(void) {
+    id win = game_window();
     id vc = SEND(win, S("rootViewController"));
     id pvc;
     while ((pvc = SEND(vc, S("presentedViewController")))) vc = pvc;
@@ -555,9 +576,7 @@ static void ensure_ui(void) {
         }
         gTarget = objc_retain(SEND(SEND((id)tc, S("alloc")), S("init")));
 
-        id app = SEND(C("UIApplication"), S("sharedApplication"));
-        id wins = SEND(app, S("windows"));
-        id win = (uintptr_t)SEND(wins, S("count")) ? SEND(wins, S("objectAtIndex:"), 0) : nil;
+        id win = game_window();
         if (win) {
             id btn = SEND(C("UIButton"), S("buttonWithType:"), 0);
             CGRect f = {18, 130, 52, 52};
@@ -577,8 +596,14 @@ static void ensure_ui(void) {
             gBtn = objc_retain(btn);
             ipalog("[IPAuto] UI button added");
         } else {
-            gUIInit = 0;
-            ipalog("[IPAuto] no window for UI yet");
+            static int retries;
+            if (++retries < 10) {
+                gUIInit = 0;
+                dispatch_after(dispatch_time(0, 3000000000LL), dispatch_get_main_queue(), ^{
+                    ensure_ui();
+                });
+            }
+            ipalog("[IPAuto] no window for UI yet (retry %d)", retries);
         }
         objc_autoreleasePoolPop(p);
     });
@@ -587,13 +612,32 @@ static void ensure_ui(void) {
 // ---- swizzle ---------------------------------------------------------------------
 typedef id (*DataTaskImp)(id, SEL, id, id);
 static DataTaskImp orig_dt;
+typedef id (*DataTaskImp2)(id, SEL, id);
+static DataTaskImp2 orig_dt2;
+static NSMutableArray *gHosts;         // distinct hosts logged once
+
+static void log_host(id request) {
+    NSString *h = SEND(SEND(request, S("URL")), S("host"));
+    if (!h) return;
+    if (!gHosts) gHosts = objc_retain(SEND(SEND(C("NSMutableArray"), S("alloc")), S("init")));
+    if (!SEND(gHosts, S("containsObject:"), h)) {
+        SEND(gHosts, S("addObject:"), h);
+        ipalog("[IPAuto] req host: %s", SEND(h, S("UTF8String")));
+    }
+}
 
 // block-copy helpers (no BlocksRuntime header)
 extern void *_Block_copy(const void *);
 typedef void (^handler_t)(NSData *, NSURLResponse *, NSError *);
 
+static id hook_dt2(id self, SEL _cmd, id request) {
+    log_host(request);
+    return orig_dt2(self, _cmd, request);
+}
+
 static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
     void *p = objc_autoreleasePoolPush();
+    log_host(request);
     id result = nil;
     id url = SEND(request, S("URL"));
     NSString *u = SEND(url, S("absoluteString"));
@@ -627,6 +671,11 @@ typedef void (*DelImp)(id, SEL, id, id, id);
 
 static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
     void *p = objc_autoreleasePoolPush();
+    static int logged_recv;
+    if (!logged_recv) {
+        logged_recv = 1;
+        ipalog("[IPAuto] delegate didReceiveData hit on %s", class_getName(object_getClass(self)));
+    }
     @synchronized ((id)gTaskBuf) {
         id buf = SEND(gTaskBuf, S("objectForKey:"), task);
         if (!buf) {
@@ -644,6 +693,11 @@ static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
 
 static void hook_done(id self, SEL _cmd, id session, id task, id err) {
     void *p = objc_autoreleasePoolPush();
+    static int logged_done;
+    if (!logged_done) {
+        logged_done = 1;
+        ipalog("[IPAuto] delegate didComplete hit on %s", class_getName(object_getClass(self)));
+    }
     id buf = nil;
     @synchronized ((id)gTaskBuf) {
         buf = SEND(gTaskBuf, S("objectForKey:"), task);
@@ -653,6 +707,11 @@ static void hook_done(id self, SEL _cmd, id session, id task, id err) {
         id req = SEND(task, S("originalRequest"));
         NSString *u = SEND(SEND(req, S("URL")), S("absoluteString"));
         id body = SEND(req, S("HTTPBody"));
+        if (u && SEND(u, S("containsString:"), nsstr("nianticlabs.com")))
+            ipalog("[IPAuto] niantic task done: %s req=%ldB resp=%ldB err=%d",
+                   SEND(u, S("UTF8String")),
+                   (long)(uintptr_t)SEND(body, S("length")),
+                   (long)(uintptr_t)SEND(buf, S("length")), !!err);
         if (!err && u && SEND(u, S("containsString:"), nsstr("/plfe/rpc2"))) {
             if (body && (uintptr_t)SEND(body, S("length")) > 50)
                 handle_response(body, buf, u);
@@ -689,6 +748,10 @@ static SessImp orig_swc;
 static id hook_swc(id self, SEL _cmd, id config, id delegate, id queue) {
     id session = orig_swc(self, _cmd, config, delegate, queue);
     void *p = objc_autoreleasePoolPush();
+    if (delegate)
+        ipalog("[IPAuto] session w/ delegate %s", class_getName(object_getClass(delegate)));
+    else
+        ipalog("[IPAuto] session w/o delegate");
     swizzle_delegate(delegate);
     objc_autoreleasePoolPop(p);
     return session;
@@ -707,6 +770,12 @@ __attribute__((constructor)) static void ipauto_init(void) {
     method_setImplementation(m, (IMP)hook_dt);
     ipalog("[IPAuto] hooked %s", sel_getName(s));
 
+    SEL s2 = S("dataTaskWithRequest:");
+    Method m2 = class_getInstanceMethod(C("NSURLSession"), s2);
+    orig_dt2 = (DataTaskImp2)method_getImplementation(m2);
+    method_setImplementation(m2, (IMP)hook_dt2);
+    ipalog("[IPAuto] hooked %s", sel_getName(s2));
+
     SEL sw = S("sessionWithConfiguration:delegate:delegateQueue:");
     Method mw = class_getInstanceMethod(object_getClass((id)C("NSURLSession")), sw);
     if (mw) {
@@ -715,5 +784,9 @@ __attribute__((constructor)) static void ipauto_init(void) {
     } else {
         ipalog("[IPAuto] +sessionWithConfiguration:delegate:delegateQueue: NOT FOUND");
     }
+    // button appears unconditionally — don't wait for first rpc2 hit
+    dispatch_after(dispatch_time(0, 4000000000LL), dispatch_get_main_queue(), ^{
+        ensure_ui();
+    });
     objc_autoreleasePoolPop(p);
 }
