@@ -271,19 +271,71 @@ python tools/inject_spooferpro_plus.py  patched.ipa  SPPlus  final.ipa     # add
 # flash final.ipa with TrollStore / Signulous / AltStore
 ```
 
-### Features working today (ported from IPAuto)
+### Safety discipline (critical — IPAuto's heritage of "never worked right")
+
+Every automation feature in this dylib reads PokemonProto fields whose
+numbers are **inferred, not read from a .proto for this build**. If any
+of them is wrong (e.g. `shiny` lives in a different nested field on
+v0.743 than it did on v0.241), the parse returns all zeros and
+`should_keep` would say "release" for genuine keepers. The cost of a
+silent wrong answer is a wiped bag.
+
+Three concentric safety rails, from outside in:
+
+1. **`dry_run: true` by default.** Every release — single or batched —
+   is logged with full context and *nothing is posted to Niantic*.
+   The on-screen sheet shows `DRY-RUN` in large text and the toggle
+   is the first row. You must deliberately flip it to go live.
+2. **`bag_clean_max: 50` (% of bag) per-batch safety abort.** If the
+   keep-rule evaluator decides to release more than 50% of the bag in
+   one HOLO_INVENTORY response, the batch is aborted with a loud log.
+   Set `bag_clean_max` higher (up to 100) only after on-device
+   verification.
+3. **`parse_looks_broken()` fail-safe in `should_keep()`.** When a mon
+   has `species <= 0 || species > 1500`, OR every scalar we extract
+   is at its memset-zero default (atk=def=sta=0 AND no flags set AND
+   egg=0), the mon is assumed to be a parse miss and kept
+   unconditionally. This catches the common case where ASSUMED proto
+   field numbers are off by one or two.
+
+### Features working today (ported from IPAuto with safety hardening)
 
 - `release_on_catch` — on CATCH_POKEMON=103 response status=SUCCESS,
   splice RELEASE_POKEMON=112 for the captured uid, with keep-rules
   evaluated against the mon's data from the next HOLO_INVENTORY delta.
-  Default **off** until on-device log confirms the PokemonProto fields
-  (dumps the raw blob hex when the uid guess fails).
+  Default **off**. Each release goes through `should_keep` which has
+  the parse-looks-broken fail-safe, and then through `release_pokemon`
+  which respects `dry_run`. On the catch response itself, if uid is
+  unset but status=SUCCESS, the raw blob is logged as hex so the user
+  can eyeball the correct field.
 - `bag_full_clean` — on HOLO_INVENTORY=4 with mon count >= threshold,
-  batch-release everything that fails keep rules.
-- Manual "Clean Bag Now" action in the sheet.
+  batch-release non-keepers in ONE spliced request. Safety abort fires
+  if the batch exceeds `bag_clean_max` percent of the bag. Default
+  **off**.
+- Manual "Clean Bag Now" action in the sheet (gCleanOnce) — same
+  safety rails as the automatic path.
+- **Keep-rule evaluator (`should_keep`)**, ordered:
+    1. `parse_looks_broken()` → keep (unconditional fail-safe).
+    2. egg → keep (never releases eggs).
+    3. `keep_species` match → keep.
+    4. `drop_species` match → release. (Was broken in IPAuto: IV%
+       check short-circuited, and a mon in `drop_species` with IV ≥
+       `iv_pct_min` was NEVER dropped. Fixed by reordering.)
+    5. favorite/buddy/lucky/shiny/hundo/legendary flags → keep (each
+       gated by its `keep_*` toggle).
+    6. IV% ≥ `iv_pct_min` → keep. (Formula now uses rounded-to-nearest:
+       `(sum*100 + 22) / 45` so 40/45 reads as 89% matching the
+       in-game display, not the truncated 88% of the IPAuto port.)
+    7. Fallthrough → release.
 - Rotated log at `Documents/sppro_plus.log(.1)` capped at 1 MB.
-- `encounter_log` — on ENCOUNTER=102 / DISK_ENCOUNTER=145, log the wild
-  Pokémon's species, IV, shiny flag.
+- `encounter_log` — on ENCOUNTER=102 / DISK_ENCOUNTER=145, log the
+  wild Pokémon's species, IV, shiny flag.
+- **`requests_field`** config override: Niantic's RequestEnvelope has
+  used field 4 for `repeated Request requests` since v0.117+. The
+  old auto-detector picked wrong when the first observed envelope
+  only carried low-id methods. Now hardcoded to 4 with a config
+  override — the first envelope's top-level field layout is logged
+  once so a mismatch is obvious.
 - `auto_catch` (new) — on ENCOUNTER=102 (or DISK_ENCOUNTER=145), splice
   CATCH_POKEMON=103 with a configurable pokeball (field 2: 1=Poké /
   2=Great / 3=Ultra / 4=Master), reticle=1.95 (excellent), spin=1.0

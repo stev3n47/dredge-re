@@ -230,7 +230,12 @@ static void load_config(void) {
         // v0.435 are inferred, not read from a .proto. If any of them are
         // wrong, release_on_catch=true would transfer a desired keeper.
         const char *json =
-            "{\"release_on_catch\":false,\"bag_full_clean\":false,"
+            // Safety-first defaults — flip off once sppro_plus.log confirms
+            // every PokemonProto field (shiny/fav/buddy/lucky/atk/def/sta/
+            // uid) is parsing correctly for your Pokémon GO version. See
+            // SPOOFERPRO-FINDINGS.md "on-device verification order".
+            "{\"dry_run\":true,\"bag_clean_max\":50,"
+            "\"release_on_catch\":false,\"bag_full_clean\":false,"
             "\"keep_shiny\":true,\"keep_hundo\":true,\"keep_favorite\":true,"
             "\"keep_buddy\":true,\"keep_lucky\":true,\"keep_legendary\":true,"
             "\"iv_pct_min\":90,\"bag_threshold\":1800,"
@@ -290,19 +295,52 @@ static void parse_mon(const uint8_t *d, uint32_t n, mon_t *m) {
     }
 }
 
+// Fail-safe keep check: returns 1 if the mon's parsed state looks like a
+// proto-field miss (so we won't release what we don't understand). The
+// condition is intentionally loose — a legitimate parse of a wild mon has
+// species in [1..1025], and at least one of the IV/flag fields takes a
+// non-default value with overwhelming probability.
+static int parse_looks_broken(const mon_t *m) {
+    if (m->species <= 0 || m->species > 1500) return 1;
+    // All zeros across every scalar we extract is the signature of wrong
+    // field numbers: on a real parse, uid != 0 (set by field 1) and at
+    // least one of atk/def/sta is ≥ 1 for ~99.9% of mons, OR one of the
+    // binary flags is set, OR egg is set.
+    if (m->atk == 0 && m->def == 0 && m->sta == 0 &&
+        m->fav == 0 && m->shiny == 0 && m->buddy == 0 &&
+        m->lucky == 0 && m->egg == 0) return 1;
+    return 0;
+}
+
 static int should_keep(const mon_t *m) {
+    // Fail-safe: if the parse looks broken (ASSUMED field numbers wrong),
+    // keep by default. Prevents mass unintended release when the port
+    // hasn't been verified against the current PokemonGO build.
+    if (parse_looks_broken(m)) return 1;
+
     if (m->egg) return 1;
+
+    // Species-level overrides evaluate BEFORE IV% so drop_species actually
+    // drops (the prior order let IV% ≥ min short-circuit the drop).
+    if (m->species >= 0) {
+        id sp = SEND(C("NSNumber"), S("numberWithInt:"), m->species);
+        if (SEND(gKeepSpecies, S("containsObject:"), sp)) return 1;
+        if (SEND(gDropSpecies, S("containsObject:"), sp)) return 0;
+    }
+
     if (m->fav && cfg_i("keep_favorite")) return 1;
     if (m->buddy && cfg_i("keep_buddy")) return 1;
     if (m->lucky && cfg_i("keep_lucky")) return 1;
     if (m->shiny && cfg_i("keep_shiny")) return 1;
     if (m->atk == 15 && m->def == 15 && m->sta == 15 && cfg_i("keep_hundo")) return 1;
     if (is_legendary(m->species) && cfg_i("keep_legendary")) return 1;
-    if ((m->atk + m->def + m->sta) * 100 / 45 >= cfg_i("iv_pct_min")) return 1;
-    if (m->species >= 0) {
-        id sp = SEND(C("NSNumber"), S("numberWithInt:"), m->species);
-        if (SEND(gKeepSpecies, S("containsObject:"), sp)) return 1;
-        if (SEND(gDropSpecies, S("containsObject:"), sp)) return 0;
+    // IV% uses rounded-to-nearest not truncated-down, so 40/45 reads 89%
+    // (matches in-game display) instead of 88%.
+    int iv_min = cfg_i("iv_pct_min");
+    if (iv_min > 0) {
+        int sum = m->atk + m->def + m->sta;
+        int pct = (sum * 100 + 22) / 45;  // +22 rounds to nearest
+        if (pct >= iv_min) return 1;
     }
     return 0;
 }
@@ -353,6 +391,11 @@ static void post_env(NSData *envBody) {
 
 static void release_pokemon(uint64_t pid) {
     if (!gTemplate) { ipalog("[SP+] no template — release skipped"); return; }
+    if (cfg_i("dry_run")) {
+        ipalog("[SP+] DRY-RUN release uid=%llu (dry_run=1; set to 0 to really release)",
+               pid);
+        return;
+    }
     wbuf msg = {0};
     wb_f64(&msg, 2, pid);  // pokemon_ids (repeated fixed64, field 2)
     wb_f64(&msg, 1, pid);  // pokemon_id  (legacy single,  field 1)
@@ -426,6 +469,11 @@ static void auto_catch(uint64_t eid, const char *spawn_id) {
     if (!gTemplate) { ipalog("[SP+] auto-catch: no template"); return; }
     if (!eid || !spawn_id || !*spawn_id) {
         ipalog("[SP+] auto-catch: missing eid=%llu or spawn='%s'", eid, spawn_id);
+        return;
+    }
+    if (cfg_i("dry_run")) {
+        ipalog("[SP+] DRY-RUN auto-catch eid=%llu spawn=%s (dry_run=1; nothing posted)",
+               eid, spawn_id);
         return;
     }
     int ball = cfg_i("auto_catch_ball");
@@ -531,24 +579,34 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
     gRPCURL = objc_retain(url);
 
     // collect request method ids in order (each request blob = {type varint, msg bytes})
-    // detect requests field on first envelope: element whose inner type >= 50
-    // (platform request types stay small), else field with most elements
+    // Niantic's RequestEnvelope has used field 4 for the repeated `requests`
+    // list since v0.117+ (community-reversed proto). We default to 4 and
+    // only override from a user-provided "requests_field" config value — the
+    // old auto-detect was prone to picking wrong when the first observed
+    // envelope only carried a low-id method (e.g., HOLO_INV=4 < 50). Log the
+    // first envelope's top-level field layout once so a user-visible
+    // mismatch is obvious in sppro_plus.log.
     if (!gLoggedEnv) {
         gLoggedEnv = 1;
+        int override = cfg_i("requests_field");
+        if (override >= 3 && override < 64) {
+            gRequestsField = override;
+        }
+        // Dump the top-level field layout for diagnosis.
         const uint8_t *dd = (const uint8_t *)SEND(reqBody, S("bytes"));
         pb_t bb = { dd, dd + (size_t)(uintptr_t)SEND(reqBody, S("length")) };
         uint32_t num, wire, len; const uint8_t *val; uint64_t v;
-        int score[64] = {0};
-        while (pb_field(&bb, &num, &wire, &val, &len, &v)) {
-            if (wire != 2 || num >= 64 || num < 3) continue;
-            pb_t sb = { val, val + len }; uint32_t n2, w2, l2; const uint8_t *v2; uint64_t u;
-            if (pb_field(&sb, &n2, &w2, &v2, &l2, &u) && w2 == 0)
-                score[num] = (u >= 50) ? 100 : score[num] + 1;
+        char layout[400]; int lo = 0;
+        int field_count[64] = {0};
+        while (pb_field(&bb, &num, &wire, &val, &len, &v) && num < 64) {
+            field_count[num]++;
         }
-        int best = 4, bs = 0;
-        for (int i = 3; i < 64; i++) if (score[i] > bs) { bs = score[i]; best = i; }
-        gRequestsField = best;
-        ipalog("[SP+] requests field = %d", gRequestsField);
+        for (int i = 0; i < 64 && lo < 380; i++)
+            if (field_count[i]) lo += snprintf(layout + lo, sizeof layout - lo,
+                                               "f%d×%d ", i, field_count[i]);
+        ipalog("[SP+] rpc2 envelope layout: %s", layout);
+        ipalog("[SP+] requests field = %d (override via sppro_plus.json "
+               "\"requests_field\" if your build differs)", gRequestsField);
     }
     // collect request method ids in order, only from the requests field
     uint32_t methods[64]; int nM = 0;
@@ -701,12 +759,34 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
     }
     // one batched METHOD_RELEASE_POKEMON for bag cleanup (repeated pokemon_ids)
     if (gBatchN) {
-        NSData *req = build_request(M_RELEASE, gBatch.p, gBatch.len);
-        if (gTemplate) {
-            NSData *env = env_with_request(gTemplate, gRequestsField,
-                (const uint8_t *)SEND(req, S("bytes")), (size_t)(uintptr_t)SEND(req, S("length")));
-            ipalog("[SP+] bagclean releasing %d mons seq=%lu", gBatchN, ++gSeq);
-            post_env(env);
+        // Safety abort: if the keep-rule evaluator says "release more than
+        // half the bag" on a single HOLO_INVENTORY, almost certainly the
+        // PokemonProto field numbers (ASSUMED) are wrong for this game
+        // build — every mon parses as 0/0/0 IV with no flags set and
+        // `should_keep` says 0. Abort with a loud log instead of wiping
+        // the user's collection; the parse_looks_broken() fail-safe in
+        // should_keep catches the common case, this is the last-chance
+        // backstop for a pathological parse that slips past it.
+        int bag_size = gMonCount;  // populated by the earlier mode=1 walk
+        int cap = cfg_i("bag_clean_max");
+        if (cap <= 0) cap = 50;    // never release more than this % of bag
+        if (bag_size > 0 && (gBatchN * 100 / bag_size) > cap) {
+            ipalog("[SP+] bagclean ABORT: would release %d of %d mons (>%d%%) — "
+                   "parse likely wrong, check the encounter log and "
+                   "sppro_plus.json first", gBatchN, bag_size, cap);
+        } else if (cfg_i("dry_run")) {
+            ipalog("[SP+] DRY-RUN bagclean %d mons of %d (dry_run=1; set to 0 "
+                   "to really release)", gBatchN, bag_size);
+        } else {
+            NSData *req = build_request(M_RELEASE, gBatch.p, gBatch.len);
+            if (gTemplate) {
+                NSData *env = env_with_request(gTemplate, gRequestsField,
+                    (const uint8_t *)SEND(req, S("bytes")),
+                    (size_t)(uintptr_t)SEND(req, S("length")));
+                ipalog("[SP+] bagclean releasing %d of %d mons seq=%lu",
+                       gBatchN, bag_size, ++gSeq);
+                post_env(env);
+            }
         }
         free(gBatch.p); gBatch.p = NULL; gBatch.cap = gBatch.len = 0; gBatchN = 0;
     }
@@ -790,12 +870,19 @@ static void present_sheet(void) {
     void *p = objc_autoreleasePoolPush();
     id vc = front_vc();
     if (!vc) { ipalog("[SP+] no root vc — sheet skipped"); objc_autoreleasePoolPop(p); return; }
-    char msg[160];
-    snprintf(msg, sizeof msg, "IV min %d%%   |   bag at %d%s",
+    char msg[224];
+    snprintf(msg, sizeof msg,
+             "%s   |   IV min %d%%   |   bag at %d%s",
+             cfg_i("dry_run") ? "DRY-RUN" : "LIVE",
              cfg_i("iv_pct_min"), cfg_i("bag_threshold"),
              gCleanOnce ? "   |   clean armed" : "");
     id alert = SEND(C("UIAlertController"), S("alertControllerWithTitle:message:preferredStyle:"),
                     nsstr("SpooferProPlus"), nsstr(msg), 1);
+    // Dry-run FIRST so users can't miss it. With dry_run on, every release
+    // call is logged but nothing is posted — use to validate keep rules
+    // against a real inventory before flipping to live.
+    add_toggle(alert, vc, "dry_run", "DRY-RUN (log, don't release)");
+    add_num(alert, vc, "bag_clean_max", "Bag-clean max % of bag (safety)", 5, 10, 100);
     add_toggle(alert, vc, "release_on_catch", "Release on Catch");
     add_toggle(alert, vc, "bag_full_clean", "Bag-Full Auto Clean");
     add_num(alert, vc, "iv_pct_min", "IV min", 5, 0, 100);
