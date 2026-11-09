@@ -147,18 +147,90 @@ account's real subscription status. Client patches unlock the UI but
 server-proxied features may remain gated. The v2 release notes already
 call this out.
 
-## Still to do
+## On-device status: v4 launches but Pro/Elite rows stay grayed
 
-1. Flash the proposed v4 IPA and confirm it (a) launches and (b) ungrays
-   the menu rows that v1 leaves grayed. If any rows stay grayed, they
-   read LEVEL via a different path and need their own patch.
-2. Pin down the actual "central compare" address — needs a stock (pre-mod)
-   libSpooferPro.dylib to diff against, OR enough on-device testing of v4
-   to find any remaining gated menu row.
-3. Verify the paywall-string `__cfstring` wrapper VA and its xrefs; its
-   caller function is the actual rate-limiter and may need its own patch
-   if "unlimited access" is not implied by the tier=255 result.
-4. Add a receipt-validation bypass for any server-proxied SpooferPro
-   features. Likely lives in the same dylib's auth/JWT flow — look for
-   `NSURLRequest` setters, SwiftProtobuf receipts, or App Store API
-   calls (`SKPaymentTransactionObserver`).
+v4 as built (fifth gate stock, LEVEL epilogue override at `0xbdbc8` →
+`0xff`) launches cleanly, but Pro/Elite menu rows remain disabled.
+
+### What static analysis showed (2026-11-09)
+
+The "LEVEL getter" label from the release notes appears to be wrong:
+
+- `0xbcf70` has only 2 direct BL callers.
+- Caller 1 at `0xbbb3c` is inside the function at `0xbb7a4`, which
+  `__objc_const @ 0x181d2a8` identifies as **`.cxx_destruct`** — a C++
+  destructor, not an entitlement check.
+- Caller 2 at `0xbddb4` is inside `0xbdce8`, which only one BL caller
+  (`0x7da5f0`) invokes, and uses the return in `csel x20, x0, x20, lt`
+  — a `min(x0, x20)` bounds computation, not a gate check.
+
+So `0xbcf70` isn't what grayed menu rows read. v4's epilogue-override
+there is harmless but also useless for the grayed-row problem.
+
+The four tier wrappers and the fifth gate are called via BL with the
+pattern `cbz w0, <fail>` or `cmp w0, #1; b.ne <fail>` — they are real
+gate functions, and all return 1 (Pro) as expected. Features that call
+them directly DO get through. Pro/Elite rows that stay grayed are
+therefore reading tier state via a *different* code path.
+
+Likely paths, all behind indirect dispatch:
+
+- Swift witness-table dispatch on the obfuscated tier class
+  `m7b0kltierv88d9uurjwk` (ObjC class @ `0x1a006b8`, class_ro_t @
+  `0x193fc30`). Its ObjC side has **zero methods, ivars, properties**
+  (`baseMethods = 0`, `ivars = 0`, `baseProperties = 0`, `instSize = 8`,
+  `flags = 0x80`): the whole class is Swift-internal. None of its state
+  is reachable through ObjC runtime walks.
+- A stored tier value in `__bss` or `__thread_bss` written at runtime.
+  The TLS slot at `0x1bac75c` that we saw the "getter" touch is one
+  candidate; the others are heap ivars on the tier class, unknowable
+  from a static image.
+- Server-driven: a receipt-check response that sets the tier at startup.
+
+`0x7cff64` ("central compare" candidate) has 131 BL callers, but a
+mechanical pass of the 3 insns after each BL shows **129 of them ignore
+the return** (no cmp/cbz/mov consumes `w0`/`x0`). It's a side-effect /
+telemetry helper, not a gate. The two that DO use the return
+(`0x50e36c`, `0x9689e4`) are exposed in the injector as
+`--pregate-override` for an experiment.
+
+### Next moves to try
+
+| Move | Flag | Risk |
+|---|---|---|
+| Try the pre-gate return override anyway (2 of 131 callers use it) | `--pregate-override` | low — only one `ldr x0,[x8]` becomes `mov x0,#1` |
+| Vary the LEVEL epilogue value (maybe tier is an enum, not a magnitude) | `--level-value 1`, `--level-value 2`, `--level-value 3` | low |
+| On-device dynamic diagnosis — recommended | — | needs device |
+
+### For dynamic diagnosis (recommended path)
+
+The static graph can't tell us which function reads the tier at UI
+render time. The quickest way to find it on-device:
+
+- Install the v4 build and open the menu with Pro/Elite rows visible.
+- Attach `debugserver`/LLDB to the running `PokmonGO` process (TrollStore
+  jailed users: Frida with CoreTrust bypass, or use an unsigned
+  `debugserver` via `ldid` on a jailbroken device).
+- `image list libSpooferPro` to find the slide; break on `0x7cff64`,
+  `0xbcf70`, each of the 4 tier wrappers, and `0x7da430`. Tap a grayed
+  row — see which (if any) are hit at the moment of render vs. tap.
+- If none are hit at render time, break on common UI setters —
+  `-[UITableViewCell setAlpha:]`, `-[UIView setUserInteractionEnabled:]`,
+  `-[UIControl setEnabled:]` — filter to the row's cell and walk the
+  backtrace back into `libSpooferPro`.
+- The function at the top of that backtrace is the real tier getter.
+  Overwrite its epilogue (or mid-function value load) the same way we
+  fixed `0xbdbc8`.
+
+### Also worth investigating
+
+1. Receipt-validation bypass for server-proxied SpooferPro features.
+   Likely lives in the same dylib's auth/JWT flow — look for
+   `NSURLSession` + `SwiftProtobuf` + `Downstream_SubscriptionResponse`
+   handlers. The class `Downstream_SubscriptionResponse` is in the ObjC
+   class list and its methods are enumerable.
+2. The paywall string's 5 xref sites (`0x2fe1d0`, `0x3cccac`, `0x4ade84`,
+   `0x6a9634`, `0x986e08`) all sit in functions with **0 BL callers** —
+   they're reached only through indirect dispatch, same as the tier
+   readers. Any patch to their enclosing functions would be
+   diagnostic-only.

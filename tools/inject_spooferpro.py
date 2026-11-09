@@ -83,6 +83,15 @@ LEVEL_ENTRY = (0x000bcf70, 0xd10203ff,
 # is substituted. See SPOOFERPRO-FINDINGS.md for the epilogue dump.
 LEVEL_EPILOGUE_OFF = 0xbdbc8
 
+# Experimental: override the return of the "pre-gate" function at 0x7cff64
+# via its epilogue-adjacent return-value load at 0x7d03e4
+# (`ldr x0, [x8, #0]` → `mov x0, #<imm>`).  129 of its 131 BL callers ignore
+# the return, but the remaining 2 (at 0x50e36c, 0x9689e4) use it and might
+# feed the UI-render path that still gates Pro/Elite rows. Try this only as
+# a diagnostic if the main patches don't ungrey the UI.
+PREGATE_RET_OFF = 0x7d03e4
+PREGATE_STOCK   = 0xf9400100  # ldr x0, [x8, #0]
+
 
 def rd_u32(b, off):
     return struct.unpack_from('<I', b, off)[0]
@@ -150,6 +159,20 @@ def patch_dylib(dyb: bytes, args) -> bytes:
                              f'{MOV_X0_X21:08x} (mov x0, x21) or a movz; '
                              'the function may have shifted — re-dump.')
 
+    if args.pregate_override:
+        off = PREGATE_RET_OFF
+        enc = mov_x0_imm16(args.pregate_value)
+        w = rd_u32(b, off)
+        if w == enc:
+            print(f'  0x{off:08x}  pre-gate return override (experimental)  already patched')
+        elif w == PREGATE_STOCK or (w & 0x7f80001f) == 0xd2800000:
+            print(f'  0x{off:08x}  pre-gate return override (experimental)  '
+                  f'write mov x0,#{args.pregate_value} (was {w:08x})')
+            wr_u32(b, off, enc)
+        else:
+            raise SystemExit(f'error: 0x{off:08x} is {w:08x}, expected '
+                             f'{PREGATE_STOCK:08x} (ldr x0,[x8]) or a movz.')
+
     return bytes(b)
 
 
@@ -194,6 +217,13 @@ def main():
                    help='reproduce shipped-v2/v3 BAD entry-point patch (crashes)')
     p.add_argument('--level-entry-value', type=int, default=0xFF,
                    help='value for the entry-point patch (v2=255, v3=4)')
+    p.add_argument('--pregate-override', action='store_true',
+                   default=False,
+                   help='EXPERIMENTAL: force return of 0x7cff64 "pre-gate" '
+                        'function via epilogue override at 0x7d03e4. Try only '
+                        'if default build leaves Pro/Elite rows grayed.')
+    p.add_argument('--pregate-value', type=int, default=1,
+                   help='value for pre-gate return override (default 1)')
     args = p.parse_args()
     ipa_in, ipa_out = args.input, args.output
 
