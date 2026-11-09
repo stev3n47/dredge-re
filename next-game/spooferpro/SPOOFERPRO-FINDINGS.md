@@ -282,8 +282,20 @@ python tools/inject_spooferpro_plus.py  patched.ipa  SPPlus  final.ipa     # add
   batch-release everything that fails keep rules.
 - Manual "Clean Bag Now" action in the sheet.
 - Rotated log at `Documents/sppro_plus.log(.1)` capped at 1 MB.
-- `encounter_log` (new) — on ENCOUNTER=102 / DISK_ENCOUNTER=145, log
-  the wild Pokemon's species, IV, shiny flag.
+- `encounter_log` — on ENCOUNTER=102 / DISK_ENCOUNTER=145, log the wild
+  Pokémon's species, IV, shiny flag.
+- `auto_catch` (new) — on ENCOUNTER=102 (or DISK_ENCOUNTER=145), splice
+  CATCH_POKEMON=103 with a configurable pokeball (field 2: 1=Poké /
+  2=Great / 3=Ultra / 4=Master), reticle=1.95 (excellent), spin=1.0
+  (curveball), hit_pokemon=true. encounter_id (fixed64 field 1) and
+  spawn_point_id (string field 4) are scanned from the response via a
+  conservative field walk (`parse_encounter_ids`): fixed64 at depth
+  ≤2 and a 12..64-char hex string. Delay is `auto_catch_delay_ms` ms
+  (default 1200) via `dispatch_after` to avoid instant-throw
+  fingerprinting. Composes with `release_on_catch` — a successful
+  auto-catch feeds the uid into the next HOLO_INVENTORY keep-rule
+  evaluator, so you can auto-catch + auto-release-if-not-keeper in one
+  flow.
 
 ### Features scaffolded, awaiting on-device config
 
@@ -302,14 +314,13 @@ python tools/inject_spooferpro_plus.py  patched.ipa  SPPlus  final.ipa     # add
     4. Set `"flee_method_id": <id>` in `sppro_plus.json` and flip the
        block toggles on.
 
-### Features to add next (choose one)
+### Features to add next
 
 | Feature | Approach | Complexity |
 |---|---|---|
-| Auto-catch | On ENCOUNTER=102, splice CATCH_POKEMON=103 with chosen ball + curveball + modifiers | medium (ball-selection UI + GREAT/EXCELLENT state) |
-| Auto-spin pokestops | il2cpp hook on `FortSearchGuiController` OR rpc2 splice FORT_SEARCH=101 | medium |
-| Berry feeding | USE_ITEM_ENCOUNTER with berry item id | low |
-| Nearby-shiny alert | GET_MAP_OBJECTS=106 scan + local notification | medium |
+| Auto-spin pokestops | rpc2 splice FORT_SEARCH=101 — needs the nearest fort_id from GET_MAP_OBJECTS=106 and current player GPS | medium |
+| Berry feeding | USE_ITEM_ENCOUNTER with berry item id — Nanab for throw-help, Pinap for double candy | low |
+| Nearby-shiny alert | GET_MAP_OBJECTS=106 / nearby scan + `UNUserNotificationCenter` local notification | medium |
 | Journal of everything caught | SQLite in Documents, UI tab | medium-high |
-| Teleport to coordinates (safer than SpooferPro's own, with cooldown) | Hook CLLocationManager OR game's GPS fallback | medium |
+| Teleport to coordinates (with cooldown) | Swizzle `CLLocationManager startUpdatingLocation` to feed our own coords | medium |
 | Bulk evolve | EVOLVE_POKEMON method spam from inventory | low |

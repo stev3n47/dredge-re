@@ -237,7 +237,9 @@ static void load_config(void) {
             "\"keep_species\":[],\"drop_species\":[],"
             "\"encounter_log\":true,"
             "\"block_non_shiny\":false,\"block_non_hundo\":false,"
-            "\"block_non_shundo\":false,\"flee_method_id\":0}";
+            "\"block_non_shundo\":false,\"flee_method_id\":0,"
+            "\"auto_catch\":false,\"auto_catch_ball\":1,"
+            "\"auto_catch_delay_ms\":1200}";
         id jd = SEND(nsstr(json), S("dataUsingEncoding:"), 4);
         gCfg = objc_retain(SEND(SEND(C("NSJSONSerialization"), S("JSONObjectWithData:options:error:"), jd, 0, nil), S("mutableCopy")));
         SEND(jd, S("writeToFile:atomically:"), cfg, YES);
@@ -362,6 +364,124 @@ static void release_pokemon(uint64_t pid) {
     post_env(env);
 }
 
+// ---- auto-catch -----------------------------------------------------------------
+// CatchPokemonProto fields (community-reversed proto, cross-checked against
+// v0.241+ builds — field numbers have been stable since v0.117):
+//   1 fixed64 encounter_id
+//   2 varint  pokeball        (ITEM_POKE_BALL=1, GREAT=2, ULTRA=3, MASTER=4)
+//   3 float32 normalized_reticle_size  (1.0 = fully closed, 1.95 ~ excellent)
+//   4 string  spawn_point_id
+//   5 bool    hit_pokemon
+//   6 float32 spin_modifier   (1.0 = perfect curveball)
+//   7 float32 normalized_hit_position  (0..1)
+//
+// The ENCOUNTER=102 response (EncounterOutProto) carries wild_pokemon in
+// field 1 (per v0.241 community proto). WildPokemonProto fields observed:
+//   1 fixed64 encounter_id
+//   2 string  spawn_point_id   (ALTERNATIVELY nested inside pokemon_display;
+//                               proto versions have varied — we scan both.)
+// We walk the response conservatively: capture any fixed64 at depth <=2 as a
+// candidate encounter_id and any string of length 12..64 as spawn_point_id.
+static void parse_encounter_ids(const uint8_t *d, uint32_t n,
+                                uint64_t *out_eid, char *out_spawn,
+                                size_t spawn_cap) {
+    *out_eid = 0; out_spawn[0] = 0;
+    pb_t b = { d, d + n };
+    uint32_t num, wire, len; const uint8_t *val; uint64_t v;
+    while (pb_field(&b, &num, &wire, &val, &len, &v)) {
+        if (wire == 1 && !*out_eid) {
+            // fixed64 — plausible encounter_id (16 hex digits in logs)
+            *out_eid = v;
+        } else if (wire == 2) {
+            // Could be a string spawn_point_id, or a submessage to recurse.
+            // spawn_point_id is 12..64 printable chars, all hex digits.
+            int looks_spawn = (len >= 12 && len <= 64);
+            for (unsigned i = 0; i < len && looks_spawn; i++) {
+                uint8_t c = val[i];
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                      (c >= 'A' && c <= 'F'))) { looks_spawn = 0; break; }
+            }
+            if (looks_spawn && !out_spawn[0]) {
+                unsigned clip = (unsigned)(len < spawn_cap - 1 ? len : spawn_cap - 1);
+                memcpy(out_spawn, val, clip); out_spawn[clip] = 0;
+            } else if (len >= 8 && !(*out_eid && out_spawn[0])) {
+                // recurse one level
+                uint64_t eid2 = 0; char spawn2[64] = {0};
+                parse_encounter_ids(val, len, &eid2, spawn2, sizeof spawn2);
+                if (eid2 && !*out_eid) *out_eid = eid2;
+                if (spawn2[0] && !out_spawn[0]) {
+                    strncpy(out_spawn, spawn2, spawn_cap - 1);
+                    out_spawn[spawn_cap - 1] = 0;
+                }
+            }
+        }
+    }
+}
+
+static void wb_fixed32(wbuf *w, uint32_t num, uint32_t v) {
+    wb_tag(w, num, 5); wb_put(w, &v, 4);
+}
+
+static void auto_catch(uint64_t eid, const char *spawn_id) {
+    if (!gTemplate) { ipalog("[SP+] auto-catch: no template"); return; }
+    if (!eid || !spawn_id || !*spawn_id) {
+        ipalog("[SP+] auto-catch: missing eid=%llu or spawn='%s'", eid, spawn_id);
+        return;
+    }
+    int ball = cfg_i("auto_catch_ball");
+    if (ball < 1 || ball > 4) ball = 1;  // default Poké Ball
+    // Reticle 1.95 = Excellent. Spin 1.0 = curveball. Hit position center.
+    float reticle = 1.95f, spin = 1.0f, hit_pos = 0.5f;
+    uint32_t rb, sb, hb;
+    memcpy(&rb, &reticle, 4); memcpy(&sb, &spin, 4); memcpy(&hb, &hit_pos, 4);
+
+    wbuf msg = {0};
+    // field 1 fixed64 encounter_id
+    wb_tag(&msg, 1, 1);
+    wb_put(&msg, &eid, 8);
+    // field 2 varint pokeball
+    wb_var(&msg, 2, (uint64_t)ball);
+    // field 3 float32 normalized_reticle_size
+    wb_fixed32(&msg, 3, rb);
+    // field 4 string spawn_point_id
+    wb_bytes(&msg, 4, spawn_id, strlen(spawn_id));
+    // field 5 bool hit_pokemon
+    wb_var(&msg, 5, 1);
+    // field 6 float32 spin_modifier
+    wb_fixed32(&msg, 6, sb);
+    // field 7 float32 normalized_hit_position
+    wb_fixed32(&msg, 7, hb);
+
+    NSData *req = build_request(M_CATCH, msg.p, msg.len);
+    free(msg.p);
+    NSData *env = env_with_request(gTemplate, gRequestsField,
+        (const uint8_t *)SEND(req, S("bytes")),
+        (size_t)(uintptr_t)SEND(req, S("length")));
+    ipalog("[SP+] auto-catch eid=%llu ball=%d spawn=%s seq=%lu",
+           eid, ball, spawn_id, ++gSeq);
+    post_env(env);
+}
+
+static void auto_catch_delayed(uint64_t eid, const char *spawn_id) {
+    int delay_ms = cfg_i("auto_catch_delay_ms");
+    if (delay_ms < 0) delay_ms = 0;
+    if (delay_ms > 60000) delay_ms = 60000;  // sanity cap
+    // Copy spawn_id into a heap buffer the block captures.
+    size_t slen = strlen(spawn_id);
+    char *copy = (char *)malloc(slen + 1);
+    memcpy(copy, spawn_id, slen + 1);
+    void (^fire)(void) = ^{
+        auto_catch(eid, copy);
+        free(copy);
+    };
+    if (delay_ms == 0) {
+        fire();
+    } else {
+        dispatch_after(dispatch_time(0, (long long)delay_ms * 1000000LL),
+                       dispatch_get_main_queue(), _Block_copy(fire));
+    }
+}
+
 // ---- inventory walk: find PokemonProto blobs recursively -------------------------
 static void walk_mons(const uint8_t *d, uint32_t n, int depth);
 
@@ -479,6 +599,22 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
                 SEND(gPending, S("addObject:"), SEND(C("NSNumber"), S("numberWithUnsignedLongLong:"), uid));
             }
         } else if (m == M_ENCOUNTER || m == M_DISK_ENC) {
+            // Auto-catch path: fire CATCH_POKEMON=103 with configured ball
+            // + excellent reticle + curveball. Reads encounter_id and
+            // spawn_point_id from the ENCOUNTER response via conservative
+            // field scan (see parse_encounter_ids). Composes with
+            // release_on_catch — after a successful catch the uid lands
+            // in gPending and the next HOLO_INV handles the keep rules.
+            if (cfg_i("auto_catch")) {
+                uint64_t eid = 0; char spawn[64] = {0};
+                parse_encounter_ids(val, len, &eid, spawn, sizeof spawn);
+                if (eid && spawn[0]) {
+                    auto_catch_delayed(eid, spawn);
+                } else {
+                    ipalog("[SP+] auto-catch skipped (eid=%llu spawn='%s')",
+                           eid, spawn);
+                }
+            }
             // Encounter blocker (block-non-shiny / block-non-hundo /
             // block-non-shundo). Parse the wild Pokemon's display and
             // either log it (diagnostic) or splice a flee request.
@@ -671,6 +807,9 @@ static void present_sheet(void) {
     add_toggle(alert, vc, "keep_lucky", "Keep Lucky");
     add_toggle(alert, vc, "keep_legendary", "Keep Legendary");
     add_toggle(alert, vc, "encounter_log", "Log Encounters");
+    add_toggle(alert, vc, "auto_catch", "Auto-Catch (excellent + curveball)");
+    add_num(alert, vc, "auto_catch_ball", "Ball (1=Poké 2=Gt 3=Ult 4=Mstr)", 1, 1, 4);
+    add_num(alert, vc, "auto_catch_delay_ms", "Auto-Catch delay (ms)", 200, 0, 10000);
     add_toggle(alert, vc, "block_non_shiny", "Block Non-Shiny (needs flee_method_id)");
     add_toggle(alert, vc, "block_non_hundo", "Block Non-Hundo (needs flee_method_id)");
     add_toggle(alert, vc, "block_non_shundo", "Block Non-Shundo (needs flee_method_id)");
