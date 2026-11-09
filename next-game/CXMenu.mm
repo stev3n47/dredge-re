@@ -54,9 +54,10 @@ static const tog_t g_togs[] = {
     {"All Tracks",       "flag.checkered",        2},
     {"All Vinyls",       "paintbrush.fill",       3},
     {"No Interstitials", "nosign",                4},
+    {"Instant Ops",      "bolt.fill",             5},
 };
-#define NTOGS 5
-static BOOL g_state[NTOGS] = {YES, YES, YES, YES, YES};
+#define NTOGS 6
+static BOOL g_state[NTOGS] = {YES, YES, YES, YES, YES, YES};
 static BOOL g_flags_init = NO;
 static int32_t g_mult = 10000;   // i32 at flag+4 — earn multiplier
 
@@ -77,7 +78,8 @@ static void flags_write(void) {
 static void state_persist(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     [d setObject:@[@(g_state[0]), @(g_state[1]), @(g_state[2]),
-                   @(g_state[3]), @(g_state[4])] forKey:@"cx_toggles"];
+                   @(g_state[3]), @(g_state[4]), @(g_state[5])]
+           forKey:@"cx_toggles"];
     [d setInteger:g_mult forKey:@"cx_mult"];
 }
 static void state_restore(void) {
