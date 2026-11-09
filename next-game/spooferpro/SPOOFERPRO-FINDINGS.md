@@ -234,3 +234,82 @@ render time. The quickest way to find it on-device:
    they're reached only through indirect dispatch, same as the tier
    readers. Any patch to their enclosing functions would be
    diagnostic-only.
+
+## SpooferProPlus — add-our-own-on-top approach
+
+Static patching can't reach the obfuscated Swift tier dispatch; dynamic
+analysis is the only way to pin down the tier read path. So instead of
+continuing to fight the mod's own UI, we inject our own feature dylib
+alongside — the same strategy IPAuto uses for iPoGo.
+
+### Files
+
+- `next-game/spooferpro/SpooferProPlus.m` — feature-parity fork of
+  `next-game/pogo/IPAuto.m`, renamed to avoid any symbol collision.
+  Includes: NSURLSession class-cluster swizzle (with per-class original
+  IMPs), protobuf rpc2 parser, release-on-catch, bag-cleaner, keep rules
+  (shiny/100IV/favorite/buddy/lucky/legendary/IV%/species), log rotation
+  at 1 MB, floating "SP+" button with alert-sheet toggles.
+- `tools/inject_spooferpro_plus.py` — ships the dylib as
+  `Payload/PokmonGO.app/Frameworks/SPPlus.framework/SPPlus`, adds
+  `LC_LOAD_DYLIB` on the stub, strips the stub's now-stale
+  `LC_CODE_SIGNATURE`, enables `UIFileSharingEnabled` so
+  `Documents/sppro_plus.{json,log}` are visible in Files.app. Verifies
+  the input really is a SpooferPro IPA (looks for
+  `Frameworks/libSpooferPro.dylib`).
+- `.github/workflows/build-spooferpro-plus.yml` — builds SPPlus on
+  `macos-latest` with a self-signed cert (NOT ad-hoc — Signulous-style
+  re-signers enumerate nested binaries by their CMS blob) and a
+  re-sign + verify pass that mirrors the IPAuto workflow.
+
+### Usage
+
+```sh
+# From the shipped SpooferPro-v1 IPA, which is the known-working build:
+python tools/inject_spooferpro.py       SpooferPro-v1.ipa  patched.ipa     # optional: fifth-gate + LEVEL-safe
+python tools/inject_spooferpro_plus.py  patched.ipa  SPPlus  final.ipa     # adds SP+ feature dylib
+# flash final.ipa with TrollStore / Signulous / AltStore
+```
+
+### Features working today (ported from IPAuto)
+
+- `release_on_catch` — on CATCH_POKEMON=103 response status=SUCCESS,
+  splice RELEASE_POKEMON=112 for the captured uid, with keep-rules
+  evaluated against the mon's data from the next HOLO_INVENTORY delta.
+  Default **off** until on-device log confirms the PokemonProto fields
+  (dumps the raw blob hex when the uid guess fails).
+- `bag_full_clean` — on HOLO_INVENTORY=4 with mon count >= threshold,
+  batch-release everything that fails keep rules.
+- Manual "Clean Bag Now" action in the sheet.
+- Rotated log at `Documents/sppro_plus.log(.1)` capped at 1 MB.
+- `encounter_log` (new) — on ENCOUNTER=102 / DISK_ENCOUNTER=145, log
+  the wild Pokemon's species, IV, shiny flag.
+
+### Features scaffolded, awaiting on-device config
+
+- `block_non_shiny` / `block_non_hundo` / `block_non_shundo` — toggles
+  live in the sheet AND the ENCOUNTER=102 handler already parses the
+  wild Pokemon and evaluates the criteria. **Blocking requires a valid
+  `flee_method_id` in `sppro_plus.json`** — the method id for
+  "RUN_FROM_ENCOUNTER" varies by Pokémon GO version and isn't in our
+  known-ids table for v0.743. Steps to enable:
+    1. Install the app with the encounter blocker toggles OFF but
+       `encounter_log=true`.
+    2. In Pokémon GO, attempt to flee a wild encounter manually with the
+       standard Run button.
+    3. Open `Documents/sppro_plus.log` from Files.app. The first rpc2
+       round-trip after the flee will log the method id used.
+    4. Set `"flee_method_id": <id>` in `sppro_plus.json` and flip the
+       block toggles on.
+
+### Features to add next (choose one)
+
+| Feature | Approach | Complexity |
+|---|---|---|
+| Auto-catch | On ENCOUNTER=102, splice CATCH_POKEMON=103 with chosen ball + curveball + modifiers | medium (ball-selection UI + GREAT/EXCELLENT state) |
+| Auto-spin pokestops | il2cpp hook on `FortSearchGuiController` OR rpc2 splice FORT_SEARCH=101 | medium |
+| Berry feeding | USE_ITEM_ENCOUNTER with berry item id | low |
+| Nearby-shiny alert | GET_MAP_OBJECTS=106 scan + local notification | medium |
+| Journal of everything caught | SQLite in Documents, UI tab | medium-high |
+| Teleport to coordinates (safer than SpooferPro's own, with cooldown) | Hook CLLocationManager OR game's GPS fallback | medium |
+| Bulk evolve | EVOLVE_POKEMON method spam from inventory | low |
