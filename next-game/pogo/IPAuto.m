@@ -58,6 +58,8 @@ extern void dispatch_async(id, id);
 extern long long dispatch_time(long long, long long);
 extern void dispatch_after(long long, id, id);
 extern void *_Block_copy(const void *);
+extern int objc_getClassList(Class *, int);
+extern Class class_getSuperclass(Class);
 
 typedef struct { double x, y; } CGPoint;
 typedef struct { double x, y, w, h; } CGRect;
@@ -72,7 +74,10 @@ static NSString *nsstr(const char *c) {
 }
 
 // ---- logging -------------------------------------------------------------------
-static NSString *gLogPath;
+// Rotates at ~1 MB to .1 to keep Documents from growing unboundedly over a
+// long play session (ipalog hit count is dominated by HOLO_INV mon dumps).
+#define IPA_LOG_MAX (1 * 1024 * 1024)
+static NSString *gLogPath, *gLogPath1;
 static void ipalog(const char *fmt, ...) {
     char buf[2048];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
@@ -80,6 +85,14 @@ static void ipalog(const char *fmt, ...) {
     id fm = SEND(C("NSFileManager"), S("defaultManager"));
     if (!SEND(fm, S("fileExistsAtPath:"), gLogPath))
         SEND(nsstr(""), S("writeToFile:atomically:encoding:error:"), gLogPath, YES, 4, nil);
+    // rotate if oversized
+    id attrs = SEND(fm, S("attributesOfItemAtPath:error:"), gLogPath, nil);
+    id sz = attrs ? SEND(attrs, S("objectForKey:"), nsstr("NSFileSize")) : nil;
+    if (sz && (long long)(intptr_t)SEND(sz, S("longLongValue")) > IPA_LOG_MAX && gLogPath1) {
+        SEND(fm, S("removeItemAtPath:error:"), gLogPath1, nil);
+        SEND(fm, S("moveItemAtPath:toPath:error:"), gLogPath, gLogPath1, nil);
+        SEND(nsstr(""), S("writeToFile:atomically:encoding:error:"), gLogPath, YES, 4, nil);
+    }
     id h = SEND(C("NSFileHandle"), S("fileHandleForWritingAtPath:"), gLogPath);
     SEND(h, S("seekToEndOfFile"));
     id line = SEND(nsstr(buf), S("stringByAppendingString:"), nsstr("\n"));
@@ -144,9 +157,12 @@ static unsigned long gSeq;
 // delegate-capture state (UnityWebRequest path)
 static NSMutableDictionary *gTaskBuf;  // NSURLSessionTask -> NSMutableData
 static id gSyncObj;
-static Class gSwz[8];                  // delegate classes already swizzled
-static IMP gSwzData[8], gSwzDone[8];
-static int gNSwz;
+// Grown dynamically — Unity + iPoGo + WebKit + any plugin stack can each
+// bring its own delegate class, and a fixed 8-slot table silently dropped
+// later ones. NULL until first swizzle_delegate.
+static Class *gSwz;
+static IMP *gSwzData, *gSwzDone;
+static int gNSwz, gSwzCap;
 
 // inventory walk modes
 static int gMode;                      // 0=none 1=count 2=clean 3=pending
@@ -175,6 +191,7 @@ static void load_config(void) {
     paths = SEND(paths, S("URLsForDirectory:inDomains:"), 9, 1);
     id docs = SEND(SEND(paths, S("lastObject")), S("path"));
     gLogPath = objc_retain(SEND(docs, S("stringByAppendingPathComponent:"), nsstr("ipauto.log")));
+    gLogPath1 = objc_retain(SEND(docs, S("stringByAppendingPathComponent:"), nsstr("ipauto.log.1")));
     NSString *cfg = SEND(docs, S("stringByAppendingPathComponent:"), nsstr("ipauto.json"));
     gCfgPath = objc_retain(cfg);
     id d = SEND(C("NSData"), S("dataWithContentsOfFile:"), cfg);
@@ -182,9 +199,14 @@ static void load_config(void) {
         gCfg = objc_retain(SEND(SEND(C("NSJSONSerialization"), S("JSONObjectWithData:options:error:"), d, 0, nil), S("mutableCopy")));
     }
     if (!gCfg) {
-        // minimal safe defaults — written for user to edit
+        // Defaults are safe-by-default: release_on_catch OFF until the user
+        // has reviewed ipauto.log and confirmed the first logged catch shows
+        // the correct uid and the first logged mon shows the correct
+        // shiny/fav/buddy/lucky fields — PokemonProto field numbers for
+        // v0.435 are inferred, not read from a .proto. If any of them are
+        // wrong, release_on_catch=true would transfer a desired keeper.
         const char *json =
-            "{\"release_on_catch\":true,\"bag_full_clean\":false,"
+            "{\"release_on_catch\":false,\"bag_full_clean\":false,"
             "\"keep_shiny\":true,\"keep_hundo\":true,\"keep_favorite\":true,"
             "\"keep_buddy\":true,\"keep_lucky\":true,\"keep_legendary\":true,"
             "\"iv_pct_min\":90,\"bag_threshold\":1800,"
@@ -205,7 +227,12 @@ static int is_legendary(int s) {
         382,383,384,385,386,480,481,482,483,484,485,486,487,488,489,490,491,492,493,494,
         638,639,640,641,642,643,644,645,646,647,648,649,716,717,718,719,720,721,785,786,
         787,788,789,790,791,792,800,801,802,807,808,809,888,889,890,891,892,893,894,895,
-        896,897,898,905};
+        896,897,898,905,
+        // Gen 9 legendaries/mythicals/paradox (Scarlet/Violet + DLC)
+        984,985,986,987,988,989,990,991,992,993,994,995,996,997,998,999,1000,1001,
+        1002,1003,1004,1005,1006,1007,1008,1009,1010,
+        1014,1015,1016,1017,  // Loyal Three
+        1020,1021,1022,1023,1024,1025};
     for (unsigned i = 0; i < sizeof L / sizeof *L; i++) if (L[i] == s) return 1;
     return 0;
 }
@@ -387,7 +414,10 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
         if (pb_field(&sb, &n2, &w2, &v2, &l2, &u) && w2 == 0 && u > 0 && u < 1000)
             methods[nM++] = (uint32_t)u;
     }
-    if (gSeq++ == 0) {
+    gSeq++;
+    static int logged_methods;
+    if (!logged_methods) {
+        logged_methods = 1;
         char line[600]; int o = 0;
         for (int i = 0; i < nM && o < 580; i++) o += snprintf(line + o, sizeof line - o, "%d ", methods[i]);
         ipalog("[IPAuto] methods: %s", line);
@@ -409,6 +439,14 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
                 else if (n2 == 3 && w2 == 0) uid = u;   // captured uid ASSUMED
             }
             ipalog("[IPAuto] catch status=%llu uid=%llu", status, uid);
+            if (status == 1 && !uid) {
+                // field 3 guess wrong: dump the whole blob hex so the user
+                // can eyeball the correct field for their game version.
+                char hex[513]; unsigned n = len < 256 ? len : 256;
+                for (unsigned i = 0; i < n; i++) snprintf(hex + i*2, 3, "%02x", val[i]);
+                hex[n*2] = 0;
+                ipalog("[IPAuto] CATCH blob len=%u (uid field unknown): %s", len, hex);
+            }
             if (status == 1 && uid) {
                 if (!gPending) gPending = objc_retain(SEND(SEND(C("NSMutableArray"), S("alloc")), S("init")));
                 SEND(gPending, S("addObject:"), SEND(C("NSNumber"), S("numberWithUnsignedLongLong:"), uid));
@@ -611,9 +649,26 @@ static void ensure_ui(void) {
 
 // ---- swizzle ---------------------------------------------------------------------
 typedef id (*DataTaskImp)(id, SEL, id, id);
-static DataTaskImp orig_dt;
 typedef id (*DataTaskImp2)(id, SEL, id);
+// Per-class original IMPs. NSURLSession is a class cluster; the concrete
+// __NSCFURLSession* subclasses can carry their own IMPs that the abstract
+// parent trampolines to (or asserts without). We save each class's own IMP
+// and dispatch to it in the hook, so swizzling a subclass doesn't lose
+// its implementation when hook_dt forwards.
+static Class *gDtCls; static DataTaskImp *gDtOrig; static int gDtN, gDtCap;
+static Class *gDt2Cls; static DataTaskImp2 *gDt2Orig; static int gDt2N, gDt2Cap;
+static DataTaskImp orig_dt;     // base-class fallback
 static DataTaskImp2 orig_dt2;
+static DataTaskImp pick_dt(Class c) {
+    for (Class p = c; p; p = class_getSuperclass(p))
+        for (int i = 0; i < gDtN; i++) if (gDtCls[i] == p) return gDtOrig[i];
+    return orig_dt;
+}
+static DataTaskImp2 pick_dt2(Class c) {
+    for (Class p = c; p; p = class_getSuperclass(p))
+        for (int i = 0; i < gDt2N; i++) if (gDt2Cls[i] == p) return gDt2Orig[i];
+    return orig_dt2;
+}
 static NSMutableArray *gHosts;         // distinct hosts logged once
 
 static void log_host(id request) {
@@ -632,7 +687,7 @@ typedef void (^handler_t)(NSData *, NSURLResponse *, NSError *);
 
 static id hook_dt2(id self, SEL _cmd, id request) {
     log_host(request);
-    return orig_dt2(self, _cmd, request);
+    return pick_dt2(object_getClass(self))(self, _cmd, request);
 }
 
 static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
@@ -644,6 +699,7 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
     BOOL ours = SEND(request, S("valueForHTTPHeaderField:"), nsstr("X-IPAuto")) != nil;
     id body = SEND(request, S("HTTPBody"));
 
+    DataTaskImp forward = pick_dt(object_getClass(self));
     if (!ours && u && SEND(u, S("containsString:"), nsstr("/plfe/rpc2")) &&
         body && (uintptr_t)SEND(body, S("length")) > 50 && completionHandler) {
         NSData *captured = body;
@@ -655,9 +711,9 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
             objc_autoreleasePoolPop(q);
             if (orig) orig(d, r, e);
         };
-        result = orig_dt(self, _cmd, request, _Block_copy(wrapped));
+        result = forward(self, _cmd, request, _Block_copy(wrapped));
     } else {
-        result = orig_dt(self, _cmd, request, completionHandler);
+        result = forward(self, _cmd, request, completionHandler);
     }
     objc_autoreleasePoolPop(p);
     return result;
@@ -731,7 +787,13 @@ static void swizzle_delegate(id delegate) {
     if (!delegate) return;
     Class dc = object_getClass(delegate);
     for (int i = 0; i < gNSwz; i++) if (gSwz[i] == dc) return;
-    if (gNSwz >= 8) { ipalog("[IPAuto] delegate table full, %s skipped", class_getName(dc)); return; }
+    if (gNSwz >= gSwzCap) {
+        int nc = gSwzCap ? gSwzCap * 2 : 8;
+        gSwz = (Class *)realloc(gSwz, nc * sizeof *gSwz);
+        gSwzData = (IMP *)realloc(gSwzData, nc * sizeof *gSwzData);
+        gSwzDone = (IMP *)realloc(gSwzDone, nc * sizeof *gSwzDone);
+        gSwzCap = nc;
+    }
     Method md = class_getInstanceMethod(dc, S("URLSession:dataTask:didReceiveData:"));
     Method me = class_getInstanceMethod(dc, S("URLSession:task:didCompleteWithError:"));
     int i = gNSwz;
@@ -764,17 +826,67 @@ __attribute__((constructor)) static void ipauto_init(void) {
     gTaskBuf = objc_retain(SEND(SEND(C("NSMutableDictionary"), S("alloc")), S("init")));
     gOwnSession = SEND(C("NSURLSession"), S("sharedSession"));
 
+    // NSURLSession is a class cluster — Foundation's concrete classes
+    // (__NSCFURLSession, __NSCFURLSessionLocal, etc) can override the
+    // task selectors, so swizzling the abstract parent alone is a no-op
+    // for them. Walk the loaded class list and install on every subclass
+    // that implements the selectors.
     SEL s = S("dataTaskWithRequest:completionHandler:");
-    Method m = class_getInstanceMethod(C("NSURLSession"), s);
-    orig_dt = (DataTaskImp)method_getImplementation(m);
-    method_setImplementation(m, (IMP)hook_dt);
-    ipalog("[IPAuto] hooked %s", sel_getName(s));
-
     SEL s2 = S("dataTaskWithRequest:");
-    Method m2 = class_getInstanceMethod(C("NSURLSession"), s2);
-    orig_dt2 = (DataTaskImp2)method_getImplementation(m2);
-    method_setImplementation(m2, (IMP)hook_dt2);
-    ipalog("[IPAuto] hooked %s", sel_getName(s2));
+    Class root = C("NSURLSession");
+    Method m = class_getInstanceMethod(root, s);
+    orig_dt = m ? (DataTaskImp)method_getImplementation(m) : NULL;
+    if (m) method_setImplementation(m, (IMP)hook_dt);
+    Method m2 = class_getInstanceMethod(root, s2);
+    orig_dt2 = m2 ? (DataTaskImp2)method_getImplementation(m2) : NULL;
+    if (m2) method_setImplementation(m2, (IMP)hook_dt2);
+    ipalog("[IPAuto] hooked base NSURLSession (dt=%d dt2=%d)", !!m, !!m2);
+
+    int n = objc_getClassList(NULL, 0);
+    Class *cls = (Class *)malloc(sizeof(Class) * n);
+    n = objc_getClassList(cls, n);
+    int sub_dt = 0, sub_dt2 = 0;
+    for (int i = 0; i < n; i++) {
+        Class c = cls[i];
+        if (c == root) continue;
+        int is_sub = 0;
+        for (Class p = class_getSuperclass(c); p; p = class_getSuperclass(p))
+            if (p == root) { is_sub = 1; break; }
+        if (!is_sub) continue;
+        // Install on each subclass that has its OWN method (not inherited).
+        // class_getInstanceMethod returns the inherited Method if the class
+        // doesn't override; compare its IMP against the parent's to decide.
+        Method mm = class_getInstanceMethod(c, s);
+        Method parent_m = class_getInstanceMethod(class_getSuperclass(c), s);
+        if (mm && (!parent_m || method_getImplementation(mm) != method_getImplementation(parent_m)) &&
+            method_getImplementation(mm) != (IMP)hook_dt) {
+            if (gDtN >= gDtCap) {
+                int nc = gDtCap ? gDtCap * 2 : 4;
+                gDtCls = (Class *)realloc(gDtCls, nc * sizeof *gDtCls);
+                gDtOrig = (DataTaskImp *)realloc(gDtOrig, nc * sizeof *gDtOrig);
+                gDtCap = nc;
+            }
+            gDtCls[gDtN] = c;
+            gDtOrig[gDtN] = (DataTaskImp)method_setImplementation(mm, (IMP)hook_dt);
+            gDtN++; sub_dt++;
+        }
+        Method mm2 = class_getInstanceMethod(c, s2);
+        Method parent_m2 = class_getInstanceMethod(class_getSuperclass(c), s2);
+        if (mm2 && (!parent_m2 || method_getImplementation(mm2) != method_getImplementation(parent_m2)) &&
+            method_getImplementation(mm2) != (IMP)hook_dt2) {
+            if (gDt2N >= gDt2Cap) {
+                int nc = gDt2Cap ? gDt2Cap * 2 : 4;
+                gDt2Cls = (Class *)realloc(gDt2Cls, nc * sizeof *gDt2Cls);
+                gDt2Orig = (DataTaskImp2 *)realloc(gDt2Orig, nc * sizeof *gDt2Orig);
+                gDt2Cap = nc;
+            }
+            gDt2Cls[gDt2N] = c;
+            gDt2Orig[gDt2N] = (DataTaskImp2)method_setImplementation(mm2, (IMP)hook_dt2);
+            gDt2N++; sub_dt2++;
+        }
+    }
+    free(cls);
+    ipalog("[IPAuto] hooked NSURLSession subclasses (dt=%d dt2=%d)", sub_dt, sub_dt2);
 
     SEL sw = S("sessionWithConfiguration:delegate:delegateQueue:");
     Method mw = class_getInstanceMethod(object_getClass((id)C("NSURLSession")), sw);

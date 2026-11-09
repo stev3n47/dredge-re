@@ -778,10 +778,15 @@ static void cx_sweep_views(UIView *v) {
     }
 }
 
+// Only dismiss on an explicit wall-name match. The old rule "any non-system
+// VC" false-positive'd legit Apple framework VCs (StoreKit, GameKit, PushKit,
+// CoreBluetooth, AVFoundation, SafariServices, WebKit) and third-party plugin
+// VCs with their own class prefixes. The window-level sweep still uses the
+// structural check — foreign WINDOWS are a stronger signal than foreign VCs.
 static void cx_sweep_vcs(UIViewController *vc) {
     for (; vc; vc = vc.presentedViewController) {
         NSString *n = NSStringFromClass(vc.class);
-        if (cx_wall_name(n) || !cx_sys_name(n)) {
+        if (cx_wall_name(n)) {
             if (vc.isViewLoaded) { vc.view.hidden = YES; vc.view.userInteractionEnabled = NO; }
             [vc.presentingViewController dismissViewControllerAnimated:NO completion:nil];
             return;
@@ -790,7 +795,22 @@ static void cx_sweep_vcs(UIViewController *vc) {
     }
 }
 
+// Consecutive clean sweeps — after N in a row the loop sleeps. It wakes on
+// UIApplicationDidBecomeActiveNotification (installed in cx_init) so the
+// wall re-appearing after backgrounding still gets caught.
+static int g_sweep_clean_streak;
+static BOOL g_sweep_sleeping;
+#define SWEEP_SLEEP_AFTER 50   // ~30s of 0.6s ticks with nothing found
+
 static void sweep_auth_wall(void) {
+    // Don't burn CPU while backgrounded — rootVC/window graph can't change.
+    UIApplicationState st = UIApplication.sharedApplication.applicationState;
+    if (st == UIApplicationStateBackground) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ sweep_auth_wall(); });
+        return;
+    }
+    BOOL dirty = NO;
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if (![s isKindOfClass:UIWindowScene.class]) continue;
         for (UIWindow *w in ((UIWindowScene *)s).windows) {
@@ -805,6 +825,7 @@ static void sweep_auth_wall(void) {
                 w.hidden = YES; w.userInteractionEnabled = NO;
                 w.windowScene = nil;
                 cx_sweep_vcs(r.presentedViewController);
+                dirty = YES;
                 continue;
             }
             cx_sweep_vcs(r.presentedViewController);
@@ -815,8 +836,21 @@ static void sweep_auth_wall(void) {
             if (r.isViewLoaded) cx_sweep_views(r.view);
         }
     }
+    if (dirty) g_sweep_clean_streak = 0;
+    else g_sweep_clean_streak++;
+    if (g_sweep_clean_streak >= SWEEP_SLEEP_AFTER) {
+        g_sweep_sleeping = YES;
+        return;  // wake via UIApplicationDidBecomeActiveNotification observer
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ sweep_auth_wall(); });
+}
+
+static void sweep_wake(void) {
+    if (!g_sweep_sleeping) return;
+    g_sweep_sleeping = NO;
+    g_sweep_clean_streak = 0;
+    sweep_auth_wall();
 }
 
 #pragma mark - bootstrap
@@ -852,6 +886,6 @@ static void cx_init(void) {
         [NSNotificationCenter.defaultCenter
             addObserverForName:UIApplicationDidBecomeActiveNotification
             object:nil queue:nil
-            usingBlock:^(NSNotification *n){ make_handle(); }];
+            usingBlock:^(NSNotification *n){ make_handle(); sweep_wake(); }];
     });
 }

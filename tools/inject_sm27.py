@@ -75,6 +75,20 @@ GATE_PATCHES = [
 def patch_uf(data: bytes) -> bytes:
     b = bytearray(data)
     for off in GATE_PATCHES:
+        orig = bytes(b[off:off+8])
+        if orig == RET1:
+            continue  # already patched; idempotent
+        # Accept any 8-byte prologue so a future SM27 build moving these
+        # functions by a few bytes is caught at diff time, not after a
+        # silent miscompile. Stock prologue is a typical sub sp / stp
+        # pair — flag anything with a BRK or RET in the first word.
+        first = struct.unpack('<I', orig[:4])[0]
+        if first == 0xD65F03C0 or (first & 0xFFE0001F) == 0xD4200000:
+            raise AssertionError(
+                f"VA 0x{off:x} does not look like a function prologue "
+                f"(first word 0x{first:08x}) — stock IPA version changed? "
+                "Re-dump offsets before shipping."
+            )
         b[off:off+8] = RET1
     return bytes(b)
 

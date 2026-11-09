@@ -116,8 +116,22 @@ def main():
     keep_iosgods = mode == 'keep'
     stub_igg = mode == 'igg'
     stub_carx = mode == 'carx'
-    stub_dyb = open('next-game/StubDylib', 'rb').read() if (stub_igg or stub_carx) else (
-        None if keep_iosgods or len(sys.argv) <= 4 else open(sys.argv[4], 'rb').read())
+    # next-game/StubDylib is a CI artifact (built by .github/workflows/
+    # build-cxmenu.yml, step 'build StubDylib') — the repo ships only the
+    # .c source. Give a clear hint if the compiled binary isn't present.
+    def _load_stub(path):
+        try:
+            return open(path, 'rb').read()
+        except FileNotFoundError:
+            sys.exit(
+                f"error: stub dylib not found at {path!r}\n"
+                "  igg/carx/path modes need a built arm64 stub. Either:\n"
+                "    - Download the StubDylib artifact from the build-cxmenu CI run, or\n"
+                "    - Cross-build locally (see .github/workflows/build-cxmenu.yml), or\n"
+                "    - Pass an explicit path as the 4th arg instead of 'igg'/'carx'."
+            )
+    stub_dyb = _load_stub(os.path.join(os.path.dirname(__file__) or '.', '..', 'next-game', 'StubDylib')) if (stub_igg or stub_carx) else (
+        None if keep_iosgods or len(sys.argv) <= 4 else _load_stub(sys.argv[4]))
 
     if stub_dyb is None and not keep_iosgods and not stub_igg:
         # iOSGods payload removal: excise the loads, drop the files.

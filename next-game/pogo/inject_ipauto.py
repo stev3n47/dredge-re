@@ -168,7 +168,7 @@ def main():
 
     for zi in zin.infolist():
         n = zi.filename
-        if n.endswith('embedded.mobileprovision'):
+        if n.endswith('/embedded.mobileprovision'):
             continue
         if n in (exe_path, info_path):
             continue

@@ -71,16 +71,28 @@ def main():
                 dirs_seen.add(d)
                 zout.writestr(dir_zinfo(d), b'')
 
-    drop = {'Payload/Discord.app/embedded.mobileprovision'}
+    # Drop every embedded.mobileprovision — the stale sideloaded profile is
+    # bound to the original bundle id and will confuse the re-signer.
+    # Previously only Discord's path was listed, which broke dupe for any
+    # other app.
+    def is_embedded_prov(n):
+        parts = n.split('/')
+        return len(parts) >= 2 and parts[-1] == 'embedded.mobileprovision' and \
+               (parts[-2].endswith('.app') or parts[-2].endswith('.appex'))
     for zi in zin.infolist():
         n = zi.filename
-        if n in drop:
+        if is_embedded_prov(n):
+            continue
+        if n.endswith('/'):
+            # Dir entry — write it with directory attrs and skip the generic
+            # file writer below (which would encode it as an empty regular
+            # file with 0o100644 and bloat the zip central directory).
+            emit_dirs(n)  # parents
+            if n not in dirs_seen:
+                dirs_seen.add(n)
+                zout.writestr(dir_zinfo(n), b'')
             continue
         emit_dirs(n)
-        if n.endswith('/'):
-            if n in dirs_seen:
-                continue
-            dirs_seen.add(n)
         data = plistlib.dumps(plists[n], fmt=plistlib.FMT_BINARY) if n in plists else zin.read(n)
         exec_bit = 0o100755 if data[:4] in (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xfe\xed\xfa\xcf') else 0o100644
         zi2 = norm(zi, exec_bit)
