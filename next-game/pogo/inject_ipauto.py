@@ -109,7 +109,9 @@ def main():
     # invalidates its CMS blob, and strict re-signers (Signulous) pre-verify
     # and refuse invalidly-signed binaries. Unsigned re-signs cleanly.
     exe = strip_codesig(exe)
-    dyb = open(dylib, 'rb').read()
+    # Same for the injected framework: a truncated-but-unfixed __LINKEDIT
+    # leaves a segment extending past EOF, which can corrupt re-signing.
+    dyb = strip_codesig(open(dylib, 'rb').read())
 
     fw_info = plistlib.dumps({
         'CFBundleExecutable': 'IPAuto',
