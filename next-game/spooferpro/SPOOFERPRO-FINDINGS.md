@@ -271,6 +271,101 @@ python tools/inject_spooferpro_plus.py  patched.ipa  SPPlus  final.ipa     # add
 # flash final.ipa with TrollStore / Signulous / AltStore
 ```
 
+### Why IPAuto never worked right — audited 2026-11-09
+
+Pulled iPoGo 4.6.1's `Frameworks/Sentry.framework/Sentry` (16.8 MB, iPoGo's
+actual payload) and cross-referenced against SpooferPro's own
+`libSpooferPro.dylib`. **Both mods invoke il2cpp directly — neither splices
+rpc2.** This is the architectural reason our IPAuto-derived rpc2 approach
+is unreliable.
+
+Evidence from iPoGo Sentry (strings on the dylib):
+
+```
+il2cpp_init                       il2cpp_class_get_name
+il2cpp_domain_get                 il2cpp_class_get_namespace
+il2cpp_domain_get_assemblies      il2cpp_class_get_method_from_name
+il2cpp_assembly_get_image         il2cpp_class_get_field_from_name
+il2cpp_image_get_class            il2cpp_field_static_get_value
+il2cpp_image_get_class_count      il2cpp_runtime_invoke
+il2cpp_runtime_class_init         il2cpp_object_new
+il2cpp_thread_attach              il2cpp_object_get_class
+il2cpp_thread_current             il2cpp_string_new
+il2cpp_thread_detach              il2cpp_string_chars
+il2cpp_type_get_name              il2cpp_string_length
+il2cpp_type_get_object            il2cpp_array_new
+il2cpp_class_from_type            il2cpp_gchandle_new
+il2cpp_class_get_type             il2cpp_method_get_param
+```
+
+SpooferPro has a full **ObjC bridge** that exposes il2cpp invoke by name:
+
+```
+InvokeBoolFunction:withObject:args:
+InvokeIntFunction:withObject:args:
+InvokeLatLngFunction:withObject:args:
+InvokeRetFunction:withObject:args:
+InvokeRetFunctionWithImageName:nameSpace:className:functionName:args:
+InvokeRetFunctionWithImageNameStatic:nameSpace:className:functionName:args:
+InvokeRetFunctionWithMethodInfo:methodInfo:args:
+InvokeUInt64Function:withObject:args:
+```
+
+And method constants for every action it automates:
+
+```
+MethodReleasePokemon        MethodUseItemCapture
+MethodFortSearch            MethodUseItemEncounter   (berry feed)
+MethodUseItemFlee           MethodUseItemBattleBoost
+MethodUseItemBulkHeal       MethodUseItemEggIncubator
+MethodUseItemLuckyFriendApplicator  MethodUseItemMoveReroll
+MethodUseItemPotion         MethodUseItemRareCandy
+MethodUseItemRevive         (…)
+```
+
+**Neither mod's payload contains a protobuf parser** or any splicing logic.
+They call `IPokemonBag.ReleasePokemon(PokemonProto)` on the game's own C#
+instance; the game assembles and signs the rpc2 envelope itself, which
+sails past Niantic's anti-cheat signature checks (platform_requests[5]
+HasAbrLookup + packed timing signatures).
+
+### What this means for us
+
+Our SpooferProPlus port of IPAuto's rpc2 splicer is **architecturally the
+wrong tool for the job**. Even after the safety hardening in the previous
+commit (parse-looks-broken fail-safe, dry_run, bag_clean_max), a live
+batched RELEASE_POKEMON=112 from our own `NSURLSession` has a very
+different envelope shape from one the game emits, and Niantic is likely
+to reject or shadow-ban on that signal. That matches the "IPAuto never
+worked correctly" report.
+
+### What UnityFramework's export table says
+
+UnityFramework ships with a **24-byte empty export trie** — it exports
+nothing. iPoGo and SpooferPro resolve every `il2cpp_*` call via **hardcoded
+file offsets** into UnityFramework, pinned per PokémonGO version
+(POGO-FINDINGS already recorded this: "resolved via per-build hardcoded
+offsets (hence version pin 'v0.435.1')"). iPoGo is pinned to PoGo 0.435.1,
+SpooferPro to 0.743. The two IPAs cannot share an offset table.
+
+Building an il2cpp bridge for SpooferProPlus (PoGo 0.743) requires:
+
+1. A full il2cpp dump of this UnityFramework (191 MB) with
+   Il2CppInspectorRedux — classic Il2CppDumper 6.7.46 caps at metadata v31,
+   this build is metadata v39.
+2. From the dump, extract offsets of ~14 `il2cpp_*` runtime entry points
+   inside UnityFramework.
+3. In the dylib: dlopen UnityFramework, resolve each entry point by
+   image-base + offset, cache in a per-version table.
+4. Implement `invoke_il2cpp(image, namespace, class_name, method_name, args[])`
+   — walk assemblies/classes/methods via the entry points, cache the
+   `MethodInfo *` by name, call `il2cpp_runtime_invoke`.
+5. For release-on-catch specifically: resolve `IPokemonBag` via the
+   `ProjectContext._instance.Container` Zenject chain (POGO-FINDINGS has
+   the field offsets from the iPoGo dump but they're pinned to 0.435.1).
+
+That's one or two sessions of work on its own.
+
 ### Safety discipline (critical — IPAuto's heritage of "never worked right")
 
 Every automation feature in this dylib reads PokemonProto fields whose
@@ -368,11 +463,39 @@ Three concentric safety rails, from outside in:
 
 ### Features to add next
 
+Two tracks now. Pick one; the first is tiny, the second is a project.
+
+**Low-stakes rpc2 observers (won't post anything):**
+
 | Feature | Approach | Complexity |
 |---|---|---|
-| Auto-spin pokestops | rpc2 splice FORT_SEARCH=101 — needs the nearest fort_id from GET_MAP_OBJECTS=106 and current player GPS | medium |
-| Berry feeding | USE_ITEM_ENCOUNTER with berry item id — Nanab for throw-help, Pinap for double candy | low |
-| Nearby-shiny alert | GET_MAP_OBJECTS=106 / nearby scan + `UNUserNotificationCenter` local notification | medium |
+| CATCH-response logger | Log full CatchPokemonOutProto blob hex on every status=SUCCESS so uid field (ASSUMED 3) can be verified | low |
+| Nearby-shiny alert | GET_MAP_OBJECTS=106 scan + `UNUserNotificationCenter` local notification | medium |
 | Journal of everything caught | SQLite in Documents, UI tab | medium-high |
 | Teleport to coordinates (with cooldown) | Swizzle `CLLocationManager startUpdatingLocation` to feed our own coords | medium |
-| Bulk evolve | EVOLVE_POKEMON method spam from inventory | low |
+
+**il2cpp bridge (the architecturally-correct automation path):**
+
+Mirrors iPoGo's and SpooferPro's design. Rough plan:
+
+1. Write a Python tool (`tools/dump_il2cpp_offsets.py`) that reads the
+   SpooferPro UnityFramework, locates the `il2cpp_*` entry points by
+   signature matching (the function prologues are stable because they're
+   libil2cpp runtime glue), and emits a C header with offsets for
+   PoGo v0.743.
+2. In the dylib: `dlopen` UnityFramework, resolve each entry point by
+   base + offset, cache in a per-version table.
+3. Implement `invoke_il2cpp(image, namespace, class_name, method_name,
+   args[])` — iterate `il2cpp_domain_get_assemblies`,
+   `il2cpp_assembly_get_image`, `il2cpp_image_get_class`,
+   `il2cpp_class_get_method_from_name`, then `il2cpp_runtime_invoke`.
+4. For `release_on_catch`: resolve `IPokemonBag` via
+   `ProjectContext._instance.Container` Zenject chain (POGO-FINDINGS has
+   the chain for PoGo 0.435.1 — needs re-dumping for 0.743).
+5. Switch `release_pokemon()` to call
+   `IPokemonBag.ReleasePokemon(PokemonProto)` with uid set.
+
+Once the bridge exists, bag-clean, auto-catch, berry-feeding, auto-spin
+and bulk-evolve all become 5-line functions that just resolve+invoke the
+matching method (`MethodReleasePokemon`, `MethodUseItemEncounter`,
+`MethodFortSearch`, etc — same names SpooferPro uses).

@@ -1,37 +1,58 @@
-// SpooferProPlus — add-our-own-on-top-of-theirs rpc2 automation for the
+// SpooferProPlus — add-our-own-on-top-of-theirs automation for the
 // SpooferPro 0.435.1 (Pokémon GO 0.743) IPA.
 //
-// Why this dylib: SpooferPro's tier logic is behind obfuscated Swift witness
-// tables (see next-game/spooferpro/SPOOFERPRO-FINDINGS.md) — statically we
-// can patch the gate functions (0x7d9ae0, 0x7d9bec, 0x7d9edc, 0x7da154,
-// 0x7da430) but the menu rows read the user's tier via a dispatch path we
-// can't reach without on-device dynamic analysis. Instead of fighting
-// their obfuscation, we inject our own automation surface alongside, the
-// same way IPAuto does for the iPoGo IPA.
+// ARCHITECTURAL CAVEAT — read before trusting any release/catch feature:
 //
+// iPoGo and SpooferPro BOTH invoke il2cpp runtime directly (strings
+// auditing — see SPOOFERPRO-FINDINGS.md "Why IPAuto never worked right").
+// Neither of them splices rpc2 from their own NSURLSession. The reason is
+// Niantic's anti-cheat: the game's own rpc2 envelopes carry a signed
+// platform_request[5] (HasAbrLookup) with packed timing metadata; any
+// envelope with a different shape (e.g. ours, shipping a RELEASE_POKEMON
+// method from a fresh session) is a strong anti-cheat signal.
+//
+// This dylib is still a rpc2-based implementation because the il2cpp path
+// requires per-PoGo-version UnityFramework offset tables (UnityFramework
+// exports a 24-byte empty trie, so symbols are not available at runtime —
+// every il2cpp_* must be resolved by file offset into the mapped image).
+// Dumping offsets for v0.743 (metadata v39) needs Il2CppInspectorRedux —
+// a multi-session project.
+//
+// So: our release_on_catch / bag_full_clean / auto_catch are LIKELY to
+// be rejected or shadow-banned by Niantic. Treat them as experimental.
+// The safe features (encounter_log and the on-screen UI) work fine.
+// For reliable automation, use the iPoGo IPA directly (which has the
+// il2cpp bridge for PoGo v0.435.1) and run SpooferProPlus alongside only
+// for its logging and UI — see SPOOFERPRO-FINDINGS.md.
+//
+// --------------
 // This file is a feature-parity fork of next-game/pogo/IPAuto.m with:
 //   - renamed entry point   (ipauto_init    -> spplus_init)
 //   - renamed log/config    (ipauto.log/json -> sppro_plus.log/json)
 //   - renamed UI button      ("IP"           -> "SP+")
 //   - renamed sheet title    ("IPAuto"       -> "SpooferProPlus")
 //   - renamed hook-recursion header (X-IPAuto -> X-SpooferProPlus)
-// Everything else — NSURLSession swizzle, protobuf parser, bag-clean, auto-
-// release-on-catch, keep rules, log rotation — is the same. See IPAuto.m
-// commentary for the design.
 //
-// Features currently provided:
-//   - release_on_catch           (CATCH_POKEMON=103 -> splice RELEASE_POKEMON=112)
-//   - bag_full_clean + manual    (HOLO_INVENTORY=4 -> batch RELEASE_POKEMON=112)
-//   - keep rules: shiny, 100IV, favorite, buddy, lucky, legendary, IV%, species
-//   - floating "SP+" button -> alert sheet with toggles + Clean Bag Now
+// Added to the IPAuto base:
+//   - dry_run default true, with on-screen DRY-RUN/LIVE indicator
+//   - bag_clean_max safety abort (release >N% of bag -> refuse)
+//   - parse_looks_broken() fail-safe in should_keep (PokemonProto
+//     fields are ASSUMED; a broken parse is kept, not released)
+//   - should_keep: drop_species evaluates BEFORE IV% (IPAuto's order
+//     let a 40/45 Rattata in drop_species slip through as "kept")
+//   - IV% rounded-to-nearest (matches in-game display 89% for 40/45,
+//     not IPAuto's truncated 88%)
+//   - requests_field hardcoded to 4 (Niantic convention since v0.117)
+//     with config override; removed the fragile >=50 auto-detector
+//   - auto_catch (ENCOUNTER=102/DISK=145 -> splice CATCH_POKEMON=103
+//     with configured ball + excellent + curveball, respects dry_run)
+//   - encounter blocker scaffold (block_non_shiny / _hundo / _shundo;
+//     needs a flee_method_id captured by watching the log during one
+//     manual Run-away)
 //
-// Features to add next (choose via the SPOOFERPRO roadmap):
-//   - block-non-shiny / block-non-hundo (ENCOUNTER=102 response filter)
-//   - auto-berry-feeding (USE_ITEM_ENCOUNTER)
-//   - nearby-shiny alert (GET_MAP_OBJECTS=106 scan)
-//
-// Same safety defaults as IPAuto: release_on_catch=false until the user has
-// verified PokemonProto field numbers for their game version via the log.
+// Safety: release_on_catch, bag_full_clean, auto_catch all default off
+// AND the top-level dry_run defaults on. Even flipping those on will
+// not post anything unless dry_run is also flipped off.
 
 #include <stdint.h>
 #include <string.h>
@@ -395,6 +416,17 @@ static void release_pokemon(uint64_t pid) {
         ipalog("[SP+] DRY-RUN release uid=%llu (dry_run=1; set to 0 to really release)",
                pid);
         return;
+    }
+    // First live release this session: log the architectural warning so the
+    // user knows what they're getting. One line per session, not per call.
+    static int warned_live;
+    if (!warned_live) {
+        warned_live = 1;
+        ipalog("[SP+] WARNING: rpc2-based release is EXPERIMENTAL. iPoGo and "
+               "SpooferPro both use il2cpp invoke (see SPOOFERPRO-FINDINGS.md); "
+               "our rpc2 envelope shape may be detected by Niantic anti-cheat. "
+               "If releases silently fail or your account gets shadow-banned, "
+               "flip dry_run back on and use iPoGo for automation.");
     }
     wbuf msg = {0};
     wb_f64(&msg, 2, pid);  // pokemon_ids (repeated fixed64, field 2)
@@ -883,8 +915,8 @@ static void present_sheet(void) {
     // against a real inventory before flipping to live.
     add_toggle(alert, vc, "dry_run", "DRY-RUN (log, don't release)");
     add_num(alert, vc, "bag_clean_max", "Bag-clean max % of bag (safety)", 5, 10, 100);
-    add_toggle(alert, vc, "release_on_catch", "Release on Catch");
-    add_toggle(alert, vc, "bag_full_clean", "Bag-Full Auto Clean");
+    add_toggle(alert, vc, "release_on_catch", "Release on Catch  [EXPERIMENTAL rpc2]");
+    add_toggle(alert, vc, "bag_full_clean", "Bag-Full Auto Clean  [EXPERIMENTAL rpc2]");
     add_num(alert, vc, "iv_pct_min", "IV min", 5, 0, 100);
     add_num(alert, vc, "bag_threshold", "bag at", 100, 0, 4000);
     add_toggle(alert, vc, "keep_shiny", "Keep Shiny");
@@ -894,7 +926,7 @@ static void present_sheet(void) {
     add_toggle(alert, vc, "keep_lucky", "Keep Lucky");
     add_toggle(alert, vc, "keep_legendary", "Keep Legendary");
     add_toggle(alert, vc, "encounter_log", "Log Encounters");
-    add_toggle(alert, vc, "auto_catch", "Auto-Catch (excellent + curveball)");
+    add_toggle(alert, vc, "auto_catch", "Auto-Catch (excellent + curveball)  [EXPERIMENTAL rpc2]");
     add_num(alert, vc, "auto_catch_ball", "Ball (1=Poké 2=Gt 3=Ult 4=Mstr)", 1, 1, 4);
     add_num(alert, vc, "auto_catch_delay_ms", "Auto-Catch delay (ms)", 200, 0, 10000);
     add_toggle(alert, vc, "block_non_shiny", "Block Non-Shiny (needs flee_method_id)");
