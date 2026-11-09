@@ -3,11 +3,17 @@
 // Self-declared ObjC surface: builds for arm64-apple-ios without an iOS SDK.
 //
 // Flow (mirrors iPoGo's own design):
-//   1. Swizzle -[NSURLSession dataTaskWithRequest:completionHandler:]
+//   1. Swizzle -[NSURLSession dataTaskWithRequest:completionHandler:] AND
+//      +[NSURLSession sessionWithConfiguration:delegate:delegateQueue:] —
+//      UnityWebRequest uses delegate-based sessions, so request bodies come
+//      from task.originalRequest and response bodies are accumulated via the
+//      delegate's didReceiveData/didCompleteWithError (swizzled per class).
 //   2. Sniff POSTs to /plfe/rpc2 -> keep last RequestEnvelope as template
 //   3. Match returns[i] to requests[i] method ids (CATCH=103, HOLO_INVENTORY=4)
 //   4. Catch success -> hold uid; next inventory delta -> parse PokemonProto,
 //      apply keep-rules, splice METHOD_RELEASE_POKEMON into cloned envelope.
+//      bag_full_clean additionally batch-releases non-keepers when the
+//      inventory count reaches bag_threshold.
 // Uncertain field numbers are logged once so a test run can correct them.
 
 #include <stdint.h>
@@ -24,8 +30,8 @@ typedef int BOOL;
 #define NO  ((BOOL)0)
 #define nil ((id)0)
 typedef struct objc_object NSString, NSData, NSNumber, NSArray, NSMutableArray,
-    NSDictionary, NSURL, NSMutableURLRequest, NSURLSession, NSURLResponse,
-    NSError, NSFileManager, NSFileHandle;
+    NSMutableData, NSMutableDictionary, NSDictionary, NSURL, NSMutableURLRequest,
+    NSURLSession, NSURLSessionTask, NSURLResponse, NSError, NSFileManager, NSFileHandle;
 
 extern id objc_msgSend();
 extern void *objc_autoreleasePoolPush(void);
@@ -33,11 +39,15 @@ extern void objc_autoreleasePoolPop(void *);
 extern id objc_retain(id);
 extern void objc_release(id);
 extern Class objc_getClass(const char *);
+extern Class object_getClass(id);
+extern const char *class_getName(Class);
 extern SEL sel_registerName(const char *);
 extern const char *sel_getName(SEL);
 extern Method class_getInstanceMethod(Class, SEL);
 extern IMP method_getImplementation(Method);
 extern IMP method_setImplementation(Method, IMP);
+extern int objc_sync_enter(id);
+extern int objc_sync_exit(id);
 extern void *_Block_copy(const void *);
 
 #define S(s) sel_registerName(s)
@@ -118,6 +128,19 @@ static NSArray *gKeepSpecies, *gDropSpecies;
 static int gRequestsField = 4;       // auto-detected; classic default
 static int gLoggedEnv = 0;
 static unsigned long gSeq;
+
+// delegate-capture state (UnityWebRequest path)
+static NSMutableDictionary *gTaskBuf;  // NSURLSessionTask -> NSMutableData
+static id gSyncObj;
+static Class gSwz[8];                  // delegate classes already swizzled
+static IMP gSwzData[8], gSwzDone[8];
+static int gNSwz;
+
+// inventory walk modes
+static int gMode;                      // 0=none 1=count 2=clean 3=pending
+static int gMonCount;
+static wbuf gBatch;                    // field-2 fixed64 uids for batch release
+static int gBatchN;
 
 #define M_HOLO_INV   4
 #define M_ENCOUNTER 102
@@ -272,6 +295,15 @@ static void walk_mons(const uint8_t *d, uint32_t n, int depth);
 
 static void handle_mon(const mon_t *m) {
     if (!m->uid || m->species < 0 || m->atk > 15 || m->def > 15 || m->sta > 15) return;
+    if (gMode == 1) { gMonCount++; return; }
+    if (gMode == 2) {
+        if (!should_keep(m)) {
+            wb_f64(&gBatch, 2, m->uid); gBatchN++;
+            ipalog("[IPAuto] bagclean mark uid=%llu sp=%d iv=%d/%d/%d",
+                   m->uid, m->species, m->atk, m->def, m->sta);
+        }
+        return;
+    }
     ipalog("[IPAuto] mon uid=%llu sp=%d iv=%d/%d/%d sh=%d fv=%d bd=%d lk=%d egg=%d",
            m->uid, m->species, m->atk, m->def, m->sta, m->shiny, m->fav, m->buddy, m->lucky, m->egg);
     if (gPending && (uintptr_t)SEND(gPending, S("count"))) {
@@ -296,7 +328,14 @@ static void walk_mons(const uint8_t *d, uint32_t n, int depth) {
 }
 
 // ---- response dispatch -----------------------------------------------------------
-static void handle_response(NSData *reqBody, NSData *respBody) {
+static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
+    @synchronized (gSyncObj) {
+    // refresh envelope template (session/auth values ride the game's own)
+    if (gTemplate) objc_release(gTemplate);
+    gTemplate = objc_retain(reqBody);
+    if (gRPCURL) objc_release(gRPCURL);
+    gRPCURL = objc_retain(url);
+
     // collect request method ids in order (each request blob = {type varint, msg bytes})
     // detect requests field on first envelope: element whose inner type >= 50
     // (platform request types stay small), else field with most elements
@@ -355,8 +394,30 @@ static void handle_response(NSData *reqBody, NSData *respBody) {
                 SEND(gPending, S("addObject:"), SEND(C("NSNumber"), S("numberWithUnsignedLongLong:"), uid));
             }
         } else if (m == M_HOLO_INV) {
-            walk_mons(val, len, 0);
+            if (cfg_i("bag_full_clean")) {
+                gMode = 1; gMonCount = 0;
+                walk_mons(val, len, 0);
+                int thresh = cfg_i("bag_threshold");
+                if (gMonCount >= (thresh > 0 ? thresh : 1)) {
+                    ipalog("[IPAuto] bag full: %d mons >= %d — cleaning", gMonCount, thresh);
+                    gMode = 2; walk_mons(val, len, 0);
+                }
+                gMode = 0;
+            }
+            gMode = 3; walk_mons(val, len, 0); gMode = 0;
         }
+    }
+    // one batched METHOD_RELEASE_POKEMON for bag cleanup (repeated pokemon_ids)
+    if (gBatchN) {
+        NSData *req = build_request(M_RELEASE, gBatch.p, gBatch.len);
+        if (gTemplate) {
+            NSData *env = env_with_request(gTemplate, gRequestsField,
+                (const uint8_t *)SEND(req, S("bytes")), (size_t)(uintptr_t)SEND(req, S("length")));
+            ipalog("[IPAuto] bagclean releasing %d mons seq=%lu", gBatchN, ++gSeq);
+            post_env(env);
+        }
+        free(gBatch.p); gBatch.p = NULL; gBatch.cap = gBatch.len = 0; gBatchN = 0;
+    }
     }
 }
 
@@ -378,13 +439,12 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
 
     if (!ours && u && SEND(u, S("containsString:"), nsstr("/plfe/rpc2")) &&
         body && (uintptr_t)SEND(body, S("length")) > 50 && completionHandler) {
-        gTemplate = objc_retain(body); if (gRPCURL) objc_release(gRPCURL);
-        gRPCURL = objc_retain(u);
         NSData *captured = body;
+        NSString *capturedURL = u;
         handler_t orig = (handler_t)completionHandler;
         handler_t wrapped = ^(NSData *d, NSURLResponse *r, NSError *e) {
             void *q = objc_autoreleasePoolPush();
-            if (d) handle_response(captured, d);
+            if (d) handle_response(captured, d, capturedURL);
             objc_autoreleasePoolPop(q);
             if (orig) orig(d, r, e);
         };
@@ -396,14 +456,101 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
     return result;
 }
 
+// ---- delegate capture (UnityWebRequest path) ---------------------------------------
+// UnityWebRequest sessions carry a delegate; response bodies only arrive via
+// URLSession:dataTask:didReceiveData: / task:didCompleteWithError:. We swizzle
+// those two methods on each delegate class seen (per-class orig IMPs).
+typedef void (*DelImp)(id, SEL, id, id, id);
+
+static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
+    void *p = objc_autoreleasePoolPush();
+    @synchronized ((id)gTaskBuf) {
+        id buf = SEND(gTaskBuf, S("objectForKey:"), task);
+        if (!buf) {
+            buf = SEND(SEND(C("NSMutableData"), S("alloc")), S("init"));
+            SEND(gTaskBuf, S("setObject:forKey:"), buf, task);
+            SEND(buf, S("release"));
+        }
+        SEND(buf, S("appendData:"), data);
+    }
+    for (int i = 0; i < gNSwz; i++)
+        if (gSwz[i] == object_getClass(self))
+            ((DelImp)gSwzData[i])(self, _cmd, session, task, data);
+    objc_autoreleasePoolPop(p);
+}
+
+static void hook_done(id self, SEL _cmd, id session, id task, id err) {
+    void *p = objc_autoreleasePoolPush();
+    id buf = nil;
+    @synchronized ((id)gTaskBuf) {
+        buf = SEND(gTaskBuf, S("objectForKey:"), task);
+        if (buf) { objc_retain(buf); SEND(gTaskBuf, S("removeObjectForKey:"), task); }
+    }
+    if (buf) {
+        id req = SEND(task, S("originalRequest"));
+        NSString *u = SEND(SEND(req, S("URL")), S("absoluteString"));
+        id body = SEND(req, S("HTTPBody"));
+        if (!err && u && SEND(u, S("containsString:"), nsstr("/plfe/rpc2"))) {
+            if (body && (uintptr_t)SEND(body, S("length")) > 50)
+                handle_response(body, buf, u);
+            else if ((uintptr_t)SEND(buf, S("length")) > 20)
+                ipalog("[IPAuto] rpc2 task body nil — HTTPBodyStream? resp %ldB",
+                       (long)(uintptr_t)SEND(buf, S("length")));
+        }
+        objc_release(buf);
+    }
+    for (int i = 0; i < gNSwz; i++)
+        if (gSwz[i] == object_getClass(self))
+            ((DelImp)gSwzDone[i])(self, _cmd, session, task, err);
+    objc_autoreleasePoolPop(p);
+}
+
+static void swizzle_delegate(id delegate) {
+    if (!delegate) return;
+    Class dc = object_getClass(delegate);
+    for (int i = 0; i < gNSwz; i++) if (gSwz[i] == dc) return;
+    if (gNSwz >= 8) { ipalog("[IPAuto] delegate table full, %s skipped", class_getName(dc)); return; }
+    Method md = class_getInstanceMethod(dc, S("URLSession:dataTask:didReceiveData:"));
+    Method me = class_getInstanceMethod(dc, S("URLSession:task:didCompleteWithError:"));
+    int i = gNSwz;
+    gSwz[i] = dc;
+    gSwzData[i] = md ? method_setImplementation(md, (IMP)hook_recvdata) : NULL;
+    gSwzDone[i] = me ? method_setImplementation(me, (IMP)hook_done) : NULL;
+    gNSwz++;
+    ipalog("[IPAuto] delegate %s swizzled (data=%d done=%d)", class_getName(dc), !!md, !!me);
+}
+
+// +[NSURLSession sessionWithConfiguration:delegate:delegateQueue:]
+typedef id (*SessImp)(id, SEL, id, id, id);
+static SessImp orig_swc;
+static id hook_swc(id self, SEL _cmd, id config, id delegate, id queue) {
+    id session = orig_swc(self, _cmd, config, delegate, queue);
+    void *p = objc_autoreleasePoolPush();
+    swizzle_delegate(delegate);
+    objc_autoreleasePoolPop(p);
+    return session;
+}
+
 __attribute__((constructor)) static void ipauto_init(void) {
     void *p = objc_autoreleasePoolPush();
     load_config();
+    gSyncObj = objc_retain(SEND(SEND(C("NSMutableArray"), S("alloc")), S("init")));
+    gTaskBuf = objc_retain(SEND(SEND(C("NSMutableDictionary"), S("alloc")), S("init")));
     gOwnSession = SEND(C("NSURLSession"), S("sharedSession"));
+
     SEL s = S("dataTaskWithRequest:completionHandler:");
     Method m = class_getInstanceMethod(C("NSURLSession"), s);
     orig_dt = (DataTaskImp)method_getImplementation(m);
     method_setImplementation(m, (IMP)hook_dt);
     ipalog("[IPAuto] hooked %s", sel_getName(s));
+
+    SEL sw = S("sessionWithConfiguration:delegate:delegateQueue:");
+    Method mw = class_getInstanceMethod(object_getClass((id)C("NSURLSession")), sw);
+    if (mw) {
+        orig_swc = (SessImp)method_setImplementation(mw, (IMP)hook_swc);
+        ipalog("[IPAuto] hooked +%s", sel_getName(sw));
+    } else {
+        ipalog("[IPAuto] +sessionWithConfiguration:delegate:delegateQueue: NOT FOUND");
+    }
     objc_autoreleasePoolPop(p);
 }
