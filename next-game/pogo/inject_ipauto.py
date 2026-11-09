@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""Inject LC_LOAD_DYLIB for IPAuto.framework into PokmonGO and repackage the IPA.
+"""Inject LC_LOAD_DYLIB for libIPAuto.dylib and repackage the IPA.
 
 Usage:
   python inject_ipauto.py <ipogo.ipa> <IPAuto-binary> <out.ipa>
 
-- Adds LC_LOAD_DYLIB '@executable_path/Frameworks/IPAuto.framework/IPAuto'
-  to the PokmonGO stub executable (same injection point iPoGo uses for Sentry).
-- Assembles Payload/PokmonGO.app/Frameworks/IPAuto.framework/ (binary +
-  Info.plist) — proper framework bundle so re-signers that recurse .framework
-  dirs detect and sign it.
+Layout mirrors SpooferPro's distribution, which survives sideload re-signers:
+- LC_LOAD_DYLIB '@rpath/libIPAuto.dylib' is added to FBAEMKit.framework (a
+  stock binary already in the app and hard-loaded by UnityFramework), NOT to
+  the main executable — the stub keeps its original valid signature.
+- The tweak ships as a bare dylib at Frameworks/libIPAuto.dylib (no .framework
+  bundle, no plist) — re-signers handle foreign .dylib files correctly but
+  mis-seal foreign .framework bundles.
+- No code signatures are stripped: the re-signer replaces CMS blobs wholesale.
 - Enables UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace so
-  Documents/ipauto.json (keep-rules) and ipauto.log (runtime schema log)
-  are browsable in Files.app / Finder.
-- No static game-binary patches: IPAuto is pure NSURLSession-hook — nothing
-  in UnityFramework is touched.
+  Documents/ipauto.json and ipauto.log are browsable in Files.app / Finder.
 """
 import sys, struct, zipfile, plistlib
 
 LC_LOAD_DYLIB     = 0xC
+LC_ID_DYLIB       = 0xD
 LC_CODE_SIGNATURE = 0x1D
 MH_MAGIC_64       = 0xFEEDFACF
 
@@ -62,72 +63,35 @@ def inject_dylib_cmd(exe: bytes, dylib_path: str) -> bytes:
     struct.pack_into('<I', b, 20, sizeofcmds + cmdsize)
     return bytes(b)
 
-def strip_codesig(exe: bytes) -> bytes:
-    b = bytearray(exe)
-    ncmds, sizeofcmds = struct.unpack('<II', b[16:24])
+def set_install_name(dylib: bytes, new_name: str) -> bytes:
+    """Rewrite LC_ID_DYLIB in place; the new name must fit the existing slot."""
+    b = bytearray(dylib)
+    ncmds = struct.unpack('<I', b[16:20])[0]
     off = 32
-    cs_off = cs_sz = None
-    data_off = None
-    linkedit = []
     for i in range(ncmds):
-        cmd, sz = struct.unpack('<II', b[off:off+8])
-        if cmd == LC_CODE_SIGNATURE:
-            cs_off, cs_sz = off, sz
-            data_off = struct.unpack('<I', b[off+8:off+12])[0]
-        if cmd == 0x19:
-            linkedit.append(off)
-        off += sz
-    if cs_off is None:
-        return exe
-    end = 32 + sizeofcmds
-    b[cs_off:end-cs_sz] = b[cs_off+cs_sz:end]
-    # pad the leftover hole — deleting it would shift all file content down
-    # while every dataoff/fileoff pointer still references old positions
-    b[end-cs_sz:end] = b'\0' * cs_sz
-    struct.pack_into('<I', b, 16, ncmds - 1)
-    struct.pack_into('<I', b, 20, sizeofcmds - cs_sz)
-    # truncate at the superblob offset (it's the tail); shrink __LINKEDIT filesize to match
-    if data_off and data_off < len(b):
-        for off in linkedit:
-            name = b[off+8:off+24].split(b'\0')[0]
-            if name == b'__LINKEDIT':
-                fileoff, filesize = struct.unpack('<QQ', b[off+40:off+56])
-                if fileoff + filesize > data_off:
-                    struct.pack_into('<Q', b, off+48, data_off - fileoff)
-        del b[data_off:]
-    return bytes(b)
+        cmd, cmdsize = struct.unpack('<II', b[off:off+8])
+        if cmd == LC_ID_DYLIB:
+            name_off = struct.unpack('<I', b[off+8:off+12])[0]
+            cap = cmdsize - name_off
+            enc = new_name.encode()
+            assert len(enc) + 1 <= cap, f'install name too long for slot ({cap})'
+            b[off+name_off:off+cmdsize] = enc + b'\0' * (cap - len(enc))
+            return bytes(b)
+        off += cmdsize
+    raise AssertionError('no LC_ID_DYLIB')
 
 def main():
     ipa, dylib, out = sys.argv[1], sys.argv[2], sys.argv[3]
-    exe_path  = 'Payload/PokmonGO.app/PokmonGO'
-    fw_path   = 'Payload/PokmonGO.app/Frameworks/IPAuto.framework/IPAuto'
-    fw_plist  = 'Payload/PokmonGO.app/Frameworks/IPAuto.framework/Info.plist'
+    fb_path   = 'Payload/PokmonGO.app/Frameworks/FBAEMKit.framework/FBAEMKit'
+    dyb_path  = 'Payload/PokmonGO.app/Frameworks/libIPAuto.dylib'
     info_path = 'Payload/PokmonGO.app/Info.plist'
 
     zin = zipfile.ZipFile(ipa)
-    exe = inject_dylib_cmd(zin.read(exe_path),
-                           '@executable_path/Frameworks/IPAuto.framework/IPAuto')
-    # Strip the stub's now-stale LC_CODE_SIGNATURE: editing any signed binary
-    # invalidates its CMS blob, and strict re-signers (Signulous) pre-verify
-    # and refuse invalidly-signed binaries. Unsigned re-signs cleanly.
-    exe = strip_codesig(exe)
-    # Keep the framework's CI signature intact: re-signers enumerate nested
-    # binaries by their existing CMS blob. A stripped dylib gets skipped, stays
-    # unsigned, and iOS kills the app when it loads — before any constructor
-    # runs (no crash report).
-    dyb = open(dylib, 'rb').read()
-
-    fw_info = plistlib.dumps({
-        'CFBundleExecutable': 'IPAuto',
-        'CFBundleIdentifier': 'com.ipauto',
-        'CFBundleName': 'IPAuto',
-        'CFBundlePackageType': 'FMWK',
-        'CFBundleVersion': '1',
-        'CFBundleShortVersionString': '1.0',
-        'CFBundleInfoDictionaryVersion': '6.0',
-        'MinimumOSVersion': '13.0',
-        'CFBundleSupportedPlatforms': ['iPhoneOS'],
-    }, fmt=plistlib.FMT_BINARY)
+    # Inject into FBAEMKit (SpooferPro's injection point). Its signature is
+    # left stale — the re-signer replaces the CMS blob; stripping proved
+    # unnecessary and risky.
+    fb = inject_dylib_cmd(zin.read(fb_path), '@rpath/libIPAuto.dylib')
+    dyb = set_install_name(open(dylib, 'rb').read(), '@rpath/libIPAuto.dylib')
 
     ip = plistlib.loads(zin.read(info_path))
     ip.pop('UISupportedDevices', None)
@@ -170,16 +134,16 @@ def main():
         n = zi.filename
         if n.endswith('embedded.mobileprovision'):
             continue
-        if n in (exe_path, info_path):
+        if n in (fb_path, info_path):
             continue
         if n.endswith('/'):
             # keep dir entries as directories — emit() would stamp them as files
             zout.writestr(dir_zinfo(n), b'')
             continue
         emit(zi, zin.read(n))
-    emit(macho_zinfo(exe_path), exe)
-    emit(macho_zinfo(fw_path), dyb)
-    emit(norm(zipfile.ZipInfo(fw_plist), 0o100644), fw_info)
+    emit(macho_zinfo(fb_path), fb)
+    # bare dylib at 0644 — matches libSpooferPro.dylib's attrs
+    zout.writestr(norm(zipfile.ZipInfo(dyb_path), 0o100644), dyb)
     zout.writestr(norm(zipfile.ZipInfo(info_path), 0o100644), info_bytes)
     zout.close(); zin.close()
     print('wrote', out)

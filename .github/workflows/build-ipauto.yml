@@ -20,7 +20,7 @@ jobs:
             -miphoneos-version-min=13.0 \
             -fno-objc-arc -fblocks -O2 -fno-objc-exceptions \
             -Wl,-undefined,dynamic_lookup -lSystem \
-            -install_name '@executable_path/Frameworks/IPAuto.framework/IPAuto' \
+            -install_name '@rpath/libIPAuto.dylib' \
             -o IPAuto next-game/pogo/IPAuto.m
           # Sign with a real (self-signed) cert, NOT ad-hoc: sideload re-signers
           # enumerate binaries to re-sign by their CMS signature; a 1KB ad-hoc
