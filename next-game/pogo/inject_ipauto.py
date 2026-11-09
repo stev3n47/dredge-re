@@ -81,7 +81,9 @@ def strip_codesig(exe: bytes) -> bytes:
         return exe
     end = 32 + sizeofcmds
     b[cs_off:end-cs_sz] = b[cs_off+cs_sz:end]
-    del b[end-cs_sz:end]
+    # pad the leftover hole — deleting it would shift all file content down
+    # while every dataoff/fileoff pointer still references old positions
+    b[end-cs_sz:end] = b'\0' * cs_sz
     struct.pack_into('<I', b, 16, ncmds - 1)
     struct.pack_into('<I', b, 20, sizeofcmds - cs_sz)
     # truncate at the superblob offset (it's the tail); shrink __LINKEDIT filesize to match
