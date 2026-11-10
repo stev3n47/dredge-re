@@ -147,18 +147,420 @@ account's real subscription status. Client patches unlock the UI but
 server-proxied features may remain gated. The v2 release notes already
 call this out.
 
-## Still to do
+## On-device status: v4 launches but Pro/Elite rows stay grayed
 
-1. Flash the proposed v4 IPA and confirm it (a) launches and (b) ungrays
-   the menu rows that v1 leaves grayed. If any rows stay grayed, they
-   read LEVEL via a different path and need their own patch.
-2. Pin down the actual "central compare" address — needs a stock (pre-mod)
-   libSpooferPro.dylib to diff against, OR enough on-device testing of v4
-   to find any remaining gated menu row.
-3. Verify the paywall-string `__cfstring` wrapper VA and its xrefs; its
-   caller function is the actual rate-limiter and may need its own patch
-   if "unlimited access" is not implied by the tier=255 result.
-4. Add a receipt-validation bypass for any server-proxied SpooferPro
-   features. Likely lives in the same dylib's auth/JWT flow — look for
-   `NSURLRequest` setters, SwiftProtobuf receipts, or App Store API
-   calls (`SKPaymentTransactionObserver`).
+v4 as built (fifth gate stock, LEVEL epilogue override at `0xbdbc8` →
+`0xff`) launches cleanly, but Pro/Elite menu rows remain disabled.
+
+### What static analysis showed (2026-11-09)
+
+The "LEVEL getter" label from the release notes appears to be wrong:
+
+- `0xbcf70` has only 2 direct BL callers.
+- Caller 1 at `0xbbb3c` is inside the function at `0xbb7a4`, which
+  `__objc_const @ 0x181d2a8` identifies as **`.cxx_destruct`** — a C++
+  destructor, not an entitlement check.
+- Caller 2 at `0xbddb4` is inside `0xbdce8`, which only one BL caller
+  (`0x7da5f0`) invokes, and uses the return in `csel x20, x0, x20, lt`
+  — a `min(x0, x20)` bounds computation, not a gate check.
+
+So `0xbcf70` isn't what grayed menu rows read. v4's epilogue-override
+there is harmless but also useless for the grayed-row problem.
+
+The four tier wrappers and the fifth gate are called via BL with the
+pattern `cbz w0, <fail>` or `cmp w0, #1; b.ne <fail>` — they are real
+gate functions, and all return 1 (Pro) as expected. Features that call
+them directly DO get through. Pro/Elite rows that stay grayed are
+therefore reading tier state via a *different* code path.
+
+Likely paths, all behind indirect dispatch:
+
+- Swift witness-table dispatch on the obfuscated tier class
+  `m7b0kltierv88d9uurjwk` (ObjC class @ `0x1a006b8`, class_ro_t @
+  `0x193fc30`). Its ObjC side has **zero methods, ivars, properties**
+  (`baseMethods = 0`, `ivars = 0`, `baseProperties = 0`, `instSize = 8`,
+  `flags = 0x80`): the whole class is Swift-internal. None of its state
+  is reachable through ObjC runtime walks.
+- A stored tier value in `__bss` or `__thread_bss` written at runtime.
+  The TLS slot at `0x1bac75c` that we saw the "getter" touch is one
+  candidate; the others are heap ivars on the tier class, unknowable
+  from a static image.
+- Server-driven: a receipt-check response that sets the tier at startup.
+
+`0x7cff64` ("central compare" candidate) has 131 BL callers, but a
+mechanical pass of the 3 insns after each BL shows **129 of them ignore
+the return** (no cmp/cbz/mov consumes `w0`/`x0`). It's a side-effect /
+telemetry helper, not a gate. The two that DO use the return
+(`0x50e36c`, `0x9689e4`) are exposed in the injector as
+`--pregate-override` for an experiment.
+
+### Next moves to try
+
+| Move | Flag | Risk |
+|---|---|---|
+| Try the pre-gate return override anyway (2 of 131 callers use it) | `--pregate-override` | low — only one `ldr x0,[x8]` becomes `mov x0,#1` |
+| Vary the LEVEL epilogue value (maybe tier is an enum, not a magnitude) | `--level-value 1`, `--level-value 2`, `--level-value 3` | low |
+| On-device dynamic diagnosis — recommended | — | needs device |
+
+### For dynamic diagnosis (recommended path)
+
+The static graph can't tell us which function reads the tier at UI
+render time. The quickest way to find it on-device:
+
+- Install the v4 build and open the menu with Pro/Elite rows visible.
+- Attach `debugserver`/LLDB to the running `PokmonGO` process (TrollStore
+  jailed users: Frida with CoreTrust bypass, or use an unsigned
+  `debugserver` via `ldid` on a jailbroken device).
+- `image list libSpooferPro` to find the slide; break on `0x7cff64`,
+  `0xbcf70`, each of the 4 tier wrappers, and `0x7da430`. Tap a grayed
+  row — see which (if any) are hit at the moment of render vs. tap.
+- If none are hit at render time, break on common UI setters —
+  `-[UITableViewCell setAlpha:]`, `-[UIView setUserInteractionEnabled:]`,
+  `-[UIControl setEnabled:]` — filter to the row's cell and walk the
+  backtrace back into `libSpooferPro`.
+- The function at the top of that backtrace is the real tier getter.
+  Overwrite its epilogue (or mid-function value load) the same way we
+  fixed `0xbdbc8`.
+
+### Also worth investigating
+
+1. Receipt-validation bypass for server-proxied SpooferPro features.
+   Likely lives in the same dylib's auth/JWT flow — look for
+   `NSURLSession` + `SwiftProtobuf` + `Downstream_SubscriptionResponse`
+   handlers. The class `Downstream_SubscriptionResponse` is in the ObjC
+   class list and its methods are enumerable.
+2. The paywall string's 5 xref sites (`0x2fe1d0`, `0x3cccac`, `0x4ade84`,
+   `0x6a9634`, `0x986e08`) all sit in functions with **0 BL callers** —
+   they're reached only through indirect dispatch, same as the tier
+   readers. Any patch to their enclosing functions would be
+   diagnostic-only.
+
+## SpooferProPlus — add-our-own-on-top approach
+
+Static patching can't reach the obfuscated Swift tier dispatch; dynamic
+analysis is the only way to pin down the tier read path. So instead of
+continuing to fight the mod's own UI, we inject our own feature dylib
+alongside — the same strategy IPAuto uses for iPoGo.
+
+### Files
+
+- `next-game/spooferpro/SpooferProPlus.m` — feature-parity fork of
+  `next-game/pogo/IPAuto.m`, renamed to avoid any symbol collision.
+  Includes: NSURLSession class-cluster swizzle (with per-class original
+  IMPs), protobuf rpc2 parser, release-on-catch, bag-cleaner, keep rules
+  (shiny/100IV/favorite/buddy/lucky/legendary/IV%/species), log rotation
+  at 1 MB, floating "SP+" button with alert-sheet toggles.
+- `tools/inject_spooferpro_plus.py` — ships the dylib as
+  `Payload/PokmonGO.app/Frameworks/SPPlus.framework/SPPlus`, adds
+  `LC_LOAD_DYLIB` on the stub, strips the stub's now-stale
+  `LC_CODE_SIGNATURE`, enables `UIFileSharingEnabled` so
+  `Documents/sppro_plus.{json,log}` are visible in Files.app. Verifies
+  the input really is a SpooferPro IPA (looks for
+  `Frameworks/libSpooferPro.dylib`).
+- `.github/workflows/build-spooferpro-plus.yml` — builds SPPlus on
+  `macos-latest` with a self-signed cert (NOT ad-hoc — Signulous-style
+  re-signers enumerate nested binaries by their CMS blob) and a
+  re-sign + verify pass that mirrors the IPAuto workflow.
+
+### Usage
+
+```sh
+# From the shipped SpooferPro-v1 IPA, which is the known-working build:
+python tools/inject_spooferpro.py       SpooferPro-v1.ipa  patched.ipa     # optional: fifth-gate + LEVEL-safe
+python tools/inject_spooferpro_plus.py  patched.ipa  SPPlus  final.ipa     # adds SP+ feature dylib
+# flash final.ipa with TrollStore / Signulous / AltStore
+```
+
+### Why IPAuto never worked right — audited 2026-11-09
+
+Pulled iPoGo 4.6.1's `Frameworks/Sentry.framework/Sentry` (16.8 MB, iPoGo's
+actual payload) and cross-referenced against SpooferPro's own
+`libSpooferPro.dylib`. **Both mods invoke il2cpp directly — neither splices
+rpc2.** This is the architectural reason our IPAuto-derived rpc2 approach
+is unreliable.
+
+Evidence from iPoGo Sentry (strings on the dylib):
+
+```
+il2cpp_init                       il2cpp_class_get_name
+il2cpp_domain_get                 il2cpp_class_get_namespace
+il2cpp_domain_get_assemblies      il2cpp_class_get_method_from_name
+il2cpp_assembly_get_image         il2cpp_class_get_field_from_name
+il2cpp_image_get_class            il2cpp_field_static_get_value
+il2cpp_image_get_class_count      il2cpp_runtime_invoke
+il2cpp_runtime_class_init         il2cpp_object_new
+il2cpp_thread_attach              il2cpp_object_get_class
+il2cpp_thread_current             il2cpp_string_new
+il2cpp_thread_detach              il2cpp_string_chars
+il2cpp_type_get_name              il2cpp_string_length
+il2cpp_type_get_object            il2cpp_array_new
+il2cpp_class_from_type            il2cpp_gchandle_new
+il2cpp_class_get_type             il2cpp_method_get_param
+```
+
+SpooferPro has a full **ObjC bridge** that exposes il2cpp invoke by name:
+
+```
+InvokeBoolFunction:withObject:args:
+InvokeIntFunction:withObject:args:
+InvokeLatLngFunction:withObject:args:
+InvokeRetFunction:withObject:args:
+InvokeRetFunctionWithImageName:nameSpace:className:functionName:args:
+InvokeRetFunctionWithImageNameStatic:nameSpace:className:functionName:args:
+InvokeRetFunctionWithMethodInfo:methodInfo:args:
+InvokeUInt64Function:withObject:args:
+```
+
+And method constants for every action it automates:
+
+```
+MethodReleasePokemon        MethodUseItemCapture
+MethodFortSearch            MethodUseItemEncounter   (berry feed)
+MethodUseItemFlee           MethodUseItemBattleBoost
+MethodUseItemBulkHeal       MethodUseItemEggIncubator
+MethodUseItemLuckyFriendApplicator  MethodUseItemMoveReroll
+MethodUseItemPotion         MethodUseItemRareCandy
+MethodUseItemRevive         (…)
+```
+
+**Neither mod's payload contains a protobuf parser** or any splicing logic.
+They call `IPokemonBag.ReleasePokemon(PokemonProto)` on the game's own C#
+instance; the game assembles and signs the rpc2 envelope itself, which
+sails past Niantic's anti-cheat signature checks (platform_requests[5]
+HasAbrLookup + packed timing signatures).
+
+### What this means for us
+
+Our SpooferProPlus port of IPAuto's rpc2 splicer is **architecturally the
+wrong tool for the job**. Even after the safety hardening in the previous
+commit (parse-looks-broken fail-safe, dry_run, bag_clean_max), a live
+batched RELEASE_POKEMON=112 from our own `NSURLSession` has a very
+different envelope shape from one the game emits, and Niantic is likely
+to reject or shadow-ban on that signal. That matches the "IPAuto never
+worked correctly" report.
+
+### What UnityFramework's export table says
+
+UnityFramework ships with a **24-byte empty export trie** — it exports
+nothing. iPoGo and SpooferPro resolve every `il2cpp_*` call via **hardcoded
+file offsets** into UnityFramework, pinned per PokémonGO version
+(POGO-FINDINGS already recorded this: "resolved via per-build hardcoded
+offsets (hence version pin 'v0.435.1')"). iPoGo is pinned to PoGo 0.435.1,
+SpooferPro to 0.743. The two IPAs cannot share an offset table.
+
+Building an il2cpp bridge for SpooferProPlus (PoGo 0.743) requires:
+
+1. A full il2cpp dump of this UnityFramework (191 MB) with
+   Il2CppInspectorRedux — classic Il2CppDumper 6.7.46 caps at metadata v31,
+   this build is metadata v39.
+2. From the dump, extract offsets of ~14 `il2cpp_*` runtime entry points
+   inside UnityFramework.
+3. In the dylib: dlopen UnityFramework, resolve each entry point by
+   image-base + offset, cache in a per-version table.
+4. Implement `invoke_il2cpp(image, namespace, class_name, method_name, args[])`
+   — walk assemblies/classes/methods via the entry points, cache the
+   `MethodInfo *` by name, call `il2cpp_runtime_invoke`.
+5. For release-on-catch specifically: resolve `IPokemonBag` via the
+   `ProjectContext._instance.Container` Zenject chain (POGO-FINDINGS has
+   the field offsets from the iPoGo dump but they're pinned to 0.435.1).
+
+That's one or two sessions of work on its own.
+
+### Safety discipline (critical — IPAuto's heritage of "never worked right")
+
+Every automation feature in this dylib reads PokemonProto fields whose
+numbers are **inferred, not read from a .proto for this build**. If any
+of them is wrong (e.g. `shiny` lives in a different nested field on
+v0.743 than it did on v0.241), the parse returns all zeros and
+`should_keep` would say "release" for genuine keepers. The cost of a
+silent wrong answer is a wiped bag.
+
+Three concentric safety rails, from outside in:
+
+1. **`dry_run: true` by default.** Every release — single or batched —
+   is logged with full context and *nothing is posted to Niantic*.
+   The on-screen sheet shows `DRY-RUN` in large text and the toggle
+   is the first row. You must deliberately flip it to go live.
+2. **`bag_clean_max: 50` (% of bag) per-batch safety abort.** If the
+   keep-rule evaluator decides to release more than 50% of the bag in
+   one HOLO_INVENTORY response, the batch is aborted with a loud log.
+   Set `bag_clean_max` higher (up to 100) only after on-device
+   verification.
+3. **`parse_looks_broken()` fail-safe in `should_keep()`.** When a mon
+   has `species <= 0 || species > 1500`, OR every scalar we extract
+   is at its memset-zero default (atk=def=sta=0 AND no flags set AND
+   egg=0), the mon is assumed to be a parse miss and kept
+   unconditionally. This catches the common case where ASSUMED proto
+   field numbers are off by one or two.
+
+### Features working today (ported from IPAuto with safety hardening)
+
+- `release_on_catch` — on CATCH_POKEMON=103 response status=SUCCESS,
+  splice RELEASE_POKEMON=112 for the captured uid, with keep-rules
+  evaluated against the mon's data from the next HOLO_INVENTORY delta.
+  Default **off**. Each release goes through `should_keep` which has
+  the parse-looks-broken fail-safe, and then through `release_pokemon`
+  which respects `dry_run`. On the catch response itself, if uid is
+  unset but status=SUCCESS, the raw blob is logged as hex so the user
+  can eyeball the correct field.
+- `bag_full_clean` — on HOLO_INVENTORY=4 with mon count >= threshold,
+  batch-release non-keepers in ONE spliced request. Safety abort fires
+  if the batch exceeds `bag_clean_max` percent of the bag. Default
+  **off**.
+- Manual "Clean Bag Now" action in the sheet (gCleanOnce) — same
+  safety rails as the automatic path.
+- **Keep-rule evaluator (`should_keep`)**, ordered:
+    1. `parse_looks_broken()` → keep (unconditional fail-safe).
+    2. egg → keep (never releases eggs).
+    3. `keep_species` match → keep.
+    4. `drop_species` match → release. (Was broken in IPAuto: IV%
+       check short-circuited, and a mon in `drop_species` with IV ≥
+       `iv_pct_min` was NEVER dropped. Fixed by reordering.)
+    5. favorite/buddy/lucky/shiny/hundo/legendary flags → keep (each
+       gated by its `keep_*` toggle).
+    6. IV% ≥ `iv_pct_min` → keep. (Formula now uses rounded-to-nearest:
+       `(sum*100 + 22) / 45` so 40/45 reads as 89% matching the
+       in-game display, not the truncated 88% of the IPAuto port.)
+    7. Fallthrough → release.
+- Rotated log at `Documents/sppro_plus.log(.1)` capped at 1 MB.
+- `encounter_log` — on ENCOUNTER=102 / DISK_ENCOUNTER=145, log the
+  wild Pokémon's species, IV, shiny flag.
+- **`requests_field`** config override: Niantic's RequestEnvelope has
+  used field 4 for `repeated Request requests` since v0.117+. The
+  old auto-detector picked wrong when the first observed envelope
+  only carried low-id methods. Now hardcoded to 4 with a config
+  override — the first envelope's top-level field layout is logged
+  once so a mismatch is obvious.
+- `auto_catch` (new) — on ENCOUNTER=102 (or DISK_ENCOUNTER=145), splice
+  CATCH_POKEMON=103 with a configurable pokeball (field 2: 1=Poké /
+  2=Great / 3=Ultra / 4=Master), reticle=1.95 (excellent), spin=1.0
+  (curveball), hit_pokemon=true. encounter_id (fixed64 field 1) and
+  spawn_point_id (string field 4) are scanned from the response via a
+  conservative field walk (`parse_encounter_ids`): fixed64 at depth
+  ≤2 and a 12..64-char hex string. Delay is `auto_catch_delay_ms` ms
+  (default 1200) via `dispatch_after` to avoid instant-throw
+  fingerprinting. Composes with `release_on_catch` — a successful
+  auto-catch feeds the uid into the next HOLO_INVENTORY keep-rule
+  evaluator, so you can auto-catch + auto-release-if-not-keeper in one
+  flow.
+
+### Features scaffolded, awaiting on-device config
+
+- `block_non_shiny` / `block_non_hundo` / `block_non_shundo` — toggles
+  live in the sheet AND the ENCOUNTER=102 handler already parses the
+  wild Pokemon and evaluates the criteria. **Blocking requires a valid
+  `flee_method_id` in `sppro_plus.json`** — the method id for
+  "RUN_FROM_ENCOUNTER" varies by Pokémon GO version and isn't in our
+  known-ids table for v0.743. Steps to enable:
+    1. Install the app with the encounter blocker toggles OFF but
+       `encounter_log=true`.
+    2. In Pokémon GO, attempt to flee a wild encounter manually with the
+       standard Run button.
+    3. Open `Documents/sppro_plus.log` from Files.app. The first rpc2
+       round-trip after the flee will log the method id used.
+    4. Set `"flee_method_id": <id>` in `sppro_plus.json` and flip the
+       block toggles on.
+
+### Features to add next
+
+Two tracks now. Pick one; the first is tiny, the second is a project.
+
+**Low-stakes rpc2 observers (won't post anything):**
+
+| Feature | Approach | Complexity |
+|---|---|---|
+| CATCH-response logger | Log full CatchPokemonOutProto blob hex on every status=SUCCESS so uid field (ASSUMED 3) can be verified | low |
+| Nearby-shiny alert | GET_MAP_OBJECTS=106 scan + `UNUserNotificationCenter` local notification | medium |
+| Journal of everything caught | SQLite in Documents, UI tab | medium-high |
+| Teleport to coordinates (with cooldown) | Swizzle `CLLocationManager startUpdatingLocation` to feed our own coords | medium |
+
+**il2cpp bridge — phases 1–3 landed, phase 4 is the Zenject chain**
+
+Mirrors iPoGo's and SpooferPro's design. Progress:
+
+- **Phase 1 ✅** `tools/dump_il2cpp_offsets.py` parses UnityFramework's
+  `LC_SYMTAB` directly (llvm-nm hangs on 191 MB) and emits a C header.
+  29 of the il2cpp_* glue entry points were found for PoGo 0.743; they
+  cluster in a tight 0x20b92c..0x20c854 VMA range (libil2cpp runtime).
+  Header: `next-game/spooferpro/il2cpp_offsets_pogo0743.h`.
+
+  UnityFramework exports a 24-byte empty trie, so `dlsym` can't find
+  these symbols — but they're still present in the classic symbol
+  table. The dumper walks `nlist_64` entries once at build time.
+
+- **Phase 2 ✅** `next-game/spooferpro/il2cpp_bridge.{h,c}` dlopens
+  UnityFramework, locates its mach_header via `_dyld_image_name`,
+  reads the ASLR slide via `_dyld_get_image_vmaddr_slide`, and
+  materialises typed function pointers for every il2cpp_* glue we
+  need. One-shot init on a 2-second dispatch_after from
+  `spplus_init` so UnityFramework has time to boot.
+
+  Exposes `spp_il2cpp_find_class` (walks every assembly's class list,
+  caches hits) and `spp_il2cpp_find_method` (calls
+  `il2cpp_class_get_method_from_name` with implicit
+  `il2cpp_runtime_class_init`). Both have result caches so the
+  linear-scan cost is paid once per name.
+
+- **Phase 3 ✅ (scaffold)** `spp_il2cpp_probe_release_pokemon()` walks
+  likely namespaces for Pokémon GO's bag class — currently
+  `Niantic.Holoholo.Inventory.Pokemon.PokemonBagImpl` plus fallbacks
+  for `PokemonBag` / `IPokemonBag` — and logs whether
+  `ReleasePokemon(1)` resolves. Runs at init so the user can verify
+  class/method naming on their build in `sppro_plus.log` before
+  trusting the path.
+
+  `release_mode` config now dispatches between `rpc2` (default,
+  current fragile path), `il2cpp` (try il2cpp, fall back to rpc2 on
+  failure), and `il2cpp_only` (never fall back). The sheet header
+  also shows `il2cpp READY` / `off` based on
+  `spp_il2cpp_ready()`.
+
+- **Phase 4 ✅ (needs on-device verification).** Full invocation path
+  landed. The resolver walks four strategies, logging each step so
+  class-name mismatches on a new build surface in `sppro_plus.log`
+  instead of silently failing:
+
+    A. `PokemonBagImpl.Instance / _instance / s_Instance` static field
+    B. `PokemonBagImpl.get_Instance()` static property
+    C. Zenject: `ProjectContext._instance` →
+       `get_Container()` → `Resolve(typeof(IPokemonBag))` — no
+       field-offset knowledge needed; we use the property getter and
+       the non-generic `Resolve(Type)` overload.
+    D. `GameManager.Instance` → `get_PokemonBag()` /`get_Bag()` /
+       `get_IPokemonBag()`
+
+  If every strategy misses, the resolver dumps the first 32 methods +
+  fields of `PokemonBagImpl` to the log (via a new
+  `spp_il2cpp_dump_class_members` diagnostic) so the user can tell us
+  the right accessor name without more guesswork.
+
+  The actual release call:
+  1. Resolve `PokemonProto` class via `spp_il2cpp_find_class`.
+  2. `il2cpp_object_new(pokemonProtoClass)`.
+  3. Set the `PokemonId` field via `set_PokemonId(ulong)` property
+     setter (safer than field-offset writes; falls back to dumping
+     class members on miss).
+  4. `il2cpp_runtime_invoke(releaseMethod, bagInstance, {proto})`.
+
+  Also added: `il2cpp_method_get_name`, `_param_count`,
+  `class_get_methods`, `class_get_fields`, `field_get_name`,
+  `field_static_get_value`, `type_get_object` — all 40 entry points
+  in the generated offset header now.
+
+  The release path is wired through `release_mode="il2cpp"` in
+  `sppro_plus.json`. Default stays `"rpc2"` so a broken resolver
+  can't hurt an existing user; opt-in once the log confirms the
+  probe resolves a `(class, method, instance)` triple.
+
+Next: once on-device logs show which strategy wins and whether
+`set_PokemonId` exists under that exact name, tighten the resolver
+(cache the first-successful path) and wire the rest of the
+automation (bag-clean, auto-catch, berry-feed, auto-spin) onto the
+same bridge. Each becomes ~10 lines (same as iPoGo's
+MethodReleasePokemon / MethodFortSearch / MethodUseItemEncounter /
+MethodUseItemFlee bindings).
+
+Once Phase 4 lands, bag-clean, auto-catch, berry-feeding, auto-spin
+and bulk-evolve all become 5-line functions that just resolve+invoke
+the matching method (`MethodReleasePokemon`, `MethodUseItemEncounter`,
+`MethodFortSearch`, etc — same names SpooferPro uses).
