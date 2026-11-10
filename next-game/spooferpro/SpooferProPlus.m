@@ -112,6 +112,7 @@ extern long _dyld_get_image_vmaddr_slide(unsigned);
 extern int open(const char *, int, ...);
 extern long write(int, const void *, unsigned long);
 extern int close(int);
+extern int usleep(unsigned);
 
 typedef struct { double x, y; } CGPoint;
 typedef struct { double x, y, w, h; } CGRect;
@@ -1397,17 +1398,22 @@ static void n2_log_from_signal(const char *msg, int len) {
     if (fd >= 0) { write(fd, msg, len); close(fd); }
 }
 
+static int n2_restore(void) {
+    uintptr_t page = (uintptr_t)gN2Api & ~0x3fffULL;
+    if (mprotect((void *)page, 0x4000, 1|2|4) != 0) return 0;
+    *(volatile uint32_t *)gN2Api = gN2Orig;
+    mprotect((void *)page, 0x4000, 1|4);
+    sys_icache_invalidate(gN2Api, 4);
+    gN2Restores++;
+    return 1;
+}
+
 static void n2_trap(int sig, void *info, void *vctx) {
     uint64_t pc = ((n2_uctx64 *)vctx)->mcontext->ss.pc;
     if (gN2Api && pc == (uint64_t)(uintptr_t)gN2Api &&
         N2_BRK(*(volatile uint32_t *)gN2Api) && gN2Restores < 128) {
-        uintptr_t page = (uintptr_t)gN2Api & ~0x3fffULL;
-        if (mprotect((void *)page, 0x4000, 1|2|4) == 0) {
-            *(volatile uint32_t *)gN2Api = gN2Orig;
-            mprotect((void *)page, 0x4000, 1|4);
-            sys_icache_invalidate(gN2Api, 4);
-            gN2Restores++;
-            static const char m[] = "[SP+] _GetN2Api brk restored\n";
+        if (n2_restore()) {
+            static const char m[] = "[SP+] _GetN2Api brk restored (trap)\n";
             n2_log_from_signal(m, sizeof m - 1);
             return;   // resume -> re-executes the restored prologue
         }
@@ -1425,8 +1431,12 @@ static void n2_trap(int sig, void *info, void *vctx) {
     }
 }
 
+static volatile int gN2Arming;
 static void n2_guard_install(void) {
     if (gN2Api) return;
+    // Single-install gate: a second sigaction would store n2_trap in
+    // gN2Prev and the "chain to previous" path would recurse forever.
+    if (!__sync_bool_compare_and_swap(&gN2Arming, 0, 1)) return;
     void *sym = dlsym((void *)-2 /*RTLD_DEFAULT*/, "_GetN2Api");
     if (!sym) {
         int n = _dyld_image_count();
@@ -1438,7 +1448,7 @@ static void n2_guard_install(void) {
             }
         }
     }
-    if (!sym) return;
+    if (!sym) { gN2Arming = 0; return; }   // retry allowed — NLP not mapped yet
     gN2Api = sym;
     uint32_t live = *(volatile uint32_t *)gN2Api;
     if (!N2_BRK(live)) gN2Orig = live;   // prefer the live prologue over the hardcode
@@ -1447,6 +1457,33 @@ static void n2_guard_install(void) {
     sa.flags = N2_SA_SIGINFO | N2_SA_NODEFER;
     sigaction(N2_SIGTRAP, &sa, &gN2Prev);
     ipalog("[SP+] N2 guard armed on _GetN2Api=%p insn=%08x", gN2Api, live);
+    if (N2_BRK(live) && n2_restore()) {
+        static const char m[] = "[SP+] _GetN2Api brk restored (arm)\n";
+        n2_log_from_signal(m, sizeof m - 1);
+    }
+}
+
+// Permanent background watch. v17 proved the SIGTRAP handler alone is
+// insufficient: the game's Sentry crash reporter owns EXC_BREAKPOINT at
+// Mach level — the POSIX handler never fires, and Sentry's handler then
+// deadlocks on its own lock (scene-create watchdog). The only reliable
+// defense is to keep the entry clean so no trap is ever raised. The
+// poll also retries n2_guard_install because NianticLabsPlugin is lazily
+// loaded seconds after our constructor — dlsym fails early.
+static void n2_guard_watch(void) {
+    for (;;) {
+        if (!gN2Api) {
+            n2_guard_install();
+            if (!gN2Api) { usleep(100000); continue; }   // NLP not mapped yet
+        }
+        uint32_t w = *(volatile uint32_t *)gN2Api;
+        if (N2_BRK(w) && gN2Restores < 128 && n2_restore()) {
+            static const char m[] = "[SP+] _GetN2Api brk restored (watch)\n";
+            n2_log_from_signal(m, sizeof m - 1);
+            continue;               // re-check immediately in case it repatches
+        }
+        usleep(1000);               // 1ms: keeps the brk window under Unity's call latency
+    }
 }
 
 __attribute__((constructor)) static void spplus_init(void) {
@@ -1460,6 +1497,11 @@ __attribute__((constructor)) static void spplus_init(void) {
     gOwnSession = SEND(C("NSURLSession"), S("sharedSession"));
     ipalog("[SP+] init: objs ok");
     n2_guard_install();
+    // The watch must run on a real background thread — the main-runloop
+    // timers don't fire while Unity owns the launch, which is exactly
+    // when the brk lands.
+    id n2q = SENDN(SEND(C("NSOperationQueue"), S("alloc")), S("init"));
+    SEND(n2q, S("addOperationWithBlock:"), (id)^{ n2_guard_watch(); });
 
     // NSURLSession is a class cluster — Foundation's concrete classes
     // (__NSCFURLSession, __NSCFURLSessionLocal, etc) can override the
