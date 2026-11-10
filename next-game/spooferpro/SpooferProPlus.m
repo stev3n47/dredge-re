@@ -60,6 +60,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "il2cpp_bridge.h"
+#include "il2cpp_offsets_pogo0743.h"
 
 // ---- minimal ObjC runtime surface (SDK headers are partially symlink-broken) --
 typedef void *IMP;
