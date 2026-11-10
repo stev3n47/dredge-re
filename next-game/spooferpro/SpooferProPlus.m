@@ -105,7 +105,41 @@ typedef struct { double x, y, w, h; } CGRect;
 
 #define S(s) sel_registerName(s)
 #define C(s) objc_getClass(s)
-#define SEND(o, ...) ((id (*)(id, SEL, ...))objc_msgSend)((id)(o), __VA_ARGS__)
+
+// --- SEND macro — arm64 Darwin ABI fix --------------------------------------
+// IPAuto's original SEND cast objc_msgSend to a VARIADIC signature:
+//   ((id (*)(id, SEL, ...))objc_msgSend)((id)o, ...)
+// On Darwin arm64, variadic calls put arguments on the stack. objc_msgSend's
+// implementation only reads x0..x7 — so args went to the stack and were
+// never seen by the resolved IMP. The crash showed up as a NULL/garbage
+// deref inside the first `+[NSString stringWithUTF8String:]` call during
+// spplus_init (confirmed by the ips log dated 2026-11-09 21:18:35).
+//
+// Fix: non-variadic casts, one signature per arity. A dispatch macro picks
+// the right arity by counting commas in __VA_ARGS__; every call site stays
+// unchanged.
+#define _SP_SEND0(o, s)             \
+    ((id (*)(id, SEL))objc_msgSend)((id)(o), (SEL)(s))
+#define _SP_SEND1(o, s, a1)         \
+    ((id (*)(id, SEL, uintptr_t))objc_msgSend)((id)(o), (SEL)(s), (uintptr_t)(uintptr_t)(a1))
+#define _SP_SEND2(o, s, a1, a2)     \
+    ((id (*)(id, SEL, uintptr_t, uintptr_t))objc_msgSend)((id)(o), (SEL)(s), (uintptr_t)(a1), (uintptr_t)(a2))
+#define _SP_SEND3(o, s, a1, a2, a3) \
+    ((id (*)(id, SEL, uintptr_t, uintptr_t, uintptr_t))objc_msgSend)((id)(o), (SEL)(s), (uintptr_t)(a1), (uintptr_t)(a2), (uintptr_t)(a3))
+#define _SP_SEND4(o, s, a1, a2, a3, a4) \
+    ((id (*)(id, SEL, uintptr_t, uintptr_t, uintptr_t, uintptr_t))objc_msgSend)((id)(o), (SEL)(s), (uintptr_t)(a1), (uintptr_t)(a2), (uintptr_t)(a3), (uintptr_t)(a4))
+// Count args AFTER (o, s), dispatch to the right arity. Works for 0..4 extras.
+#define _SP_SEND_NARG_(_1,_2,_3,_4,_5,N,...) N
+#define _SP_SEND_COUNT(...) _SP_SEND_NARG_(_, ##__VA_ARGS__, 4, 3, 2, 1, 0)
+#define _SP_SEND_CAT_(a,b) a##b
+#define _SP_SEND_CAT(a,b) _SP_SEND_CAT_(a,b)
+#define _SP_SEND_PICK(N) _SP_SEND_CAT(_SP_SEND, N)
+// When __VA_ARGS__ has only the selector (no extras), _SP_SEND_COUNT returns 0
+// and we call _SP_SEND0 with (o, s). Otherwise it matches the arity exactly.
+#define SEND(o, s, ...)                                                       \
+    _SP_SEND_PICK(_SP_SEND_COUNT(__VA_ARGS__))(o, s, ##__VA_ARGS__)
+// --- end arm64 ABI fix ----------------------------------------------------
+
 typedef void (^RespCB)(NSData *, NSURLResponse *, NSError *);
 
 static NSString *nsstr(const char *c) {
