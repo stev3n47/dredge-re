@@ -261,6 +261,13 @@ static id gSyncObj;
 static Class *gSwz;
 static IMP *gSwzData, *gSwzDone;
 static int gNSwz, gSwzCap;
+// Nearest registered swizzle entry up the superclass chain — an inherited
+// hook can fire for subclasses that aren't in gSwz directly.
+static IMP find_swz(Class c, IMP *tab) {
+    for (Class p = c; p; p = class_getSuperclass(p))
+        for (int i = 0; i < gNSwz; i++) if (gSwz[i] == p) return tab[i];
+    return NULL;
+}
 
 // inventory walk modes
 static int gMode;                      // 0=none 1=count 2=clean 3=pending
@@ -1205,9 +1212,8 @@ static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
         }
         SEND(buf, S("appendData:"), data);
     }
-    for (int i = 0; i < gNSwz; i++)
-        if (gSwz[i] == object_getClass(self) && gSwzData[i])
-            ((DelImp)gSwzData[i])(self, _cmd, session, task, data);
+    IMP f = find_swz(object_getClass(self), gSwzData);
+    if (f) ((DelImp)f)(self, _cmd, session, task, data);
     objc_autoreleasePoolPop(p);
 }
 
@@ -1241,9 +1247,8 @@ static void hook_done(id self, SEL _cmd, id session, id task, id err) {
         }
         objc_release(buf);
     }
-    for (int i = 0; i < gNSwz; i++)
-        if (gSwz[i] == object_getClass(self) && gSwzDone[i])
-            ((DelImp)gSwzDone[i])(self, _cmd, session, task, err);
+    IMP f = find_swz(object_getClass(self), gSwzDone);
+    if (f) ((DelImp)f)(self, _cmd, session, task, err);
     objc_autoreleasePoolPop(p);
 }
 
@@ -1258,14 +1263,37 @@ static void swizzle_delegate(id delegate) {
         gSwzDone = (IMP *)realloc(gSwzDone, nc * sizeof *gSwzDone);
         gSwzCap = nc;
     }
-    Method md = class_getInstanceMethod(dc, S("URLSession:dataTask:didReceiveData:"));
-    Method me = class_getInstanceMethod(dc, S("URLSession:task:didCompleteWithError:"));
+    SEL sd = S("URLSession:dataTask:didReceiveData:");
+    SEL se = S("URLSession:task:didCompleteWithError:");
+    Method md = class_getInstanceMethod(dc, sd);
+    Method me = class_getInstanceMethod(dc, se);
     int i = gNSwz;
     gSwz[i] = dc;
-    gSwzData[i] = md ? method_setImplementation(md, (IMP)hook_recvdata) : NULL;
-    gSwzDone[i] = me ? method_setImplementation(me, (IMP)hook_done) : NULL;
+    // Only method_setImplementation on methods the class OWNS. If the method
+    // is inherited, setImplementation replaces the PARENT's IMP — every
+    // sibling subclass then routes through our hook, fails the exact-class
+    // check, and its original IMP is never called (delegate starved -> the
+    // FBSDK crash). For inherited methods, class_addMethod installs the hook
+    // on this class only and forwards to the inherited IMP.
+    gSwzData[i] = gSwzDone[i] = NULL;
+    if (md) {
+        Method pm = class_getInstanceMethod(class_getSuperclass(dc), sd);
+        IMP mimp = method_getImplementation(md);
+        if (!pm || method_getImplementation(pm) != mimp)
+            gSwzData[i] = method_setImplementation(md, (IMP)hook_recvdata);
+        else if (class_addMethod(dc, sd, (IMP)hook_recvdata, "v@:@@@"))
+            gSwzData[i] = mimp;
+    }
+    if (me) {
+        Method pm = class_getInstanceMethod(class_getSuperclass(dc), se);
+        IMP mimp = method_getImplementation(me);
+        if (!pm || method_getImplementation(pm) != mimp)
+            gSwzDone[i] = method_setImplementation(me, (IMP)hook_done);
+        else if (class_addMethod(dc, se, (IMP)hook_done, "v@:@@@"))
+            gSwzDone[i] = mimp;
+    }
     gNSwz++;
-    ipalog("[SP+] delegate %s swizzled (data=%d done=%d)", class_getName(dc), !!md, !!me);
+    ipalog("[SP+] delegate %s swizzled (data=%d done=%d)", class_getName(dc), !!gSwzData[i], !!gSwzDone[i]);
 }
 
 // +[NSURLSession sessionWithConfiguration:delegate:delegateQueue:]
