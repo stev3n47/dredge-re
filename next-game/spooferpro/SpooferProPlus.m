@@ -73,7 +73,7 @@ typedef struct objc_object NSString, NSData, NSNumber, NSArray, NSMutableArray,
     NSMutableData, NSMutableDictionary, NSDictionary, NSURL, NSMutableURLRequest,
     NSURLSession, NSURLSessionTask, NSURLResponse, NSError, NSFileManager, NSFileHandle,
     UIApplication, UIWindow, UIView, UIButton, UIColor, UIAlertController, UIAlertAction,
-    UIPanGestureRecognizer;
+    UIPanGestureRecognizer, NSTimer;
 
 extern id objc_msgSend();
 extern void *objc_autoreleasePoolPush(void);
@@ -93,10 +93,10 @@ extern int objc_sync_exit(id);
 extern Class objc_allocateClassPair(Class, const char *, size_t);
 extern void objc_registerClassPair(Class);
 extern BOOL class_addMethod(Class, SEL, IMP, const char *);
-extern id dispatch_get_main_queue(void);
-extern void dispatch_async(id, id);
-extern long long dispatch_time(long long, long long);
-extern void dispatch_after(long long, id, id);
+// No dispatch_* here: dispatch_get_main_queue binds flat-namespace under
+// -undefined dynamic_lookup and resolved to 0 on-device (PC=0 inside dyld's
+// initializer loop — the silent launch crash). All main-thread deferral uses
+// ObjC: NSOperationQueue.mainQueue / NSTimer+NSRunLoop.mainRunLoop.
 extern void *_Block_copy(const void *);
 extern int objc_getClassList(Class *, int);
 extern Class class_getSuperclass(Class);
@@ -151,6 +151,22 @@ typedef void (^RespCB)(NSData *, NSURLResponse *, NSError *);
 
 static NSString *nsstr(const char *c) {
     return (NSString *)SEND(C("NSString"), S("stringWithUTF8String:"), c);
+}
+
+// ---- main-queue helpers ----------------------------------------------------
+// ObjC-only equivalents of dispatch_async/_after on the main queue. The
+// unscheduled-timer + mainRunLoop.addTimer form works from ANY thread —
+// unlike scheduledTimerWithTimeInterval: which binds to the caller's run
+// loop (NSURLSession delegate callbacks don't run on one).
+typedef id (*TimerFactoryImp)(id, SEL, double, int, id);
+static void run_on_main(id blk) {
+    SENDN(SEND(C("NSOperationQueue"), S("mainQueue")), S("addOperationWithBlock:"), blk);
+}
+static void run_on_main_later(double secs, id blk) {
+    id t = ((TimerFactoryImp)objc_msgSend)(C("NSTimer"),
+        S("timerWithTimeInterval:repeats:block:"), secs, 0, blk);
+    SENDN(SEND(C("NSRunLoop"), S("mainRunLoop")), S("addTimer:forMode:"),
+          t, nsstr("kCFRunLoopDefaultMode"));
 }
 
 // ---- logging -------------------------------------------------------------------
@@ -636,8 +652,7 @@ static void auto_catch_delayed(uint64_t eid, const char *spawn_id) {
     if (delay_ms == 0) {
         fire();
     } else {
-        dispatch_after(dispatch_time(0, (long long)delay_ms * 1000000LL),
-                       dispatch_get_main_queue(), _Block_copy(fire));
+        run_on_main_later(delay_ms / 1000.0, (id)^(NSTimer *t){ fire(); });
     }
 }
 
@@ -1039,7 +1054,7 @@ static void tgt_pan(id self, SEL _c, id gr) {
 static void ensure_ui(void) {
     if (gUIInit) return;
     gUIInit = 1;
-    dispatch_async(dispatch_get_main_queue(), ^{
+    run_on_main((id)^{
         void *p = objc_autoreleasePoolPush();
         Class tc = objc_allocateClassPair(C("NSObject"), "SPPlusTgt", 0);
         if (tc) {
@@ -1074,9 +1089,7 @@ static void ensure_ui(void) {
             static int retries;
             if (++retries < 10) {
                 gUIInit = 0;
-                dispatch_after(dispatch_time(0, 3000000000LL), dispatch_get_main_queue(), ^{
-                    ensure_ui();
-                });
+                run_on_main_later(3.0, (id)^(NSTimer *t){ ensure_ui(); });
             }
             ipalog("[SP+] no window for UI yet (retry %d)", retries);
         }
@@ -1357,12 +1370,12 @@ __attribute__((constructor)) static void spplus_init(void) {
     }
     // Initialize the il2cpp bridge once UnityFramework is loaded. The
     // constructor runs before UF is mapped (we're a sibling framework
-    // dyld also loads), so defer to a short dispatch_after to let the
+    // dyld also loads), so defer to a short timer to let the
     // app finish boot — UF comes up during -[NSBundle loadAndReturnError:]
     // from the main exe. 2s is enough on modern devices; the bridge itself
     // is idempotent and we also retry from the first rpc2 hit if init
     // failed the first time.
-    dispatch_after(dispatch_time(0, 2000000000LL), dispatch_get_main_queue(), ^{
+    run_on_main_later(2.0, (id)^(NSTimer *t){
         char err[128] = {0};
         int rc = spp_il2cpp_init(err, sizeof err);
         if (rc == 0) {
@@ -1377,9 +1390,7 @@ __attribute__((constructor)) static void spplus_init(void) {
     });
 
     // button appears unconditionally — don't wait for first rpc2 hit
-    dispatch_after(dispatch_time(0, 4000000000LL), dispatch_get_main_queue(), ^{
-        ensure_ui();
-    });
+    run_on_main_later(4.0, (id)^(NSTimer *t){ ensure_ui(); });
     ipalog("[SP+] init: done");
     objc_autoreleasePoolPop(p);
 }
