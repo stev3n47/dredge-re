@@ -1369,7 +1369,11 @@ static id hook_swc(id self, SEL _cmd, id config, id delegate, id queue) {
 // call re-executes through the real prologue. Worst case is the N2 API runs
 // unhooked; the alternative is the process dies at splash every time.
 static void *gN2Api;
-static uint32_t gN2Orig = 0xa9be4ff4;
+// First 8 words of _GetN2Api captured live at arm time (poison lands
+// later, so they're pristine then). A slot holding a brk at capture
+// time stays unrestorable — the handler falls back to pc+=4 skip.
+#define N2_WORDS 8
+static uint32_t gN2Orig[N2_WORDS];
 static volatile int gN2Restores;
 static char gLogPathC[1024];
 // Minimal layouts (arm64 Darwin) — uc_mcontext is a pointer into the kernel's
@@ -1400,32 +1404,59 @@ static void n2_log_from_signal(const char *msg, int len) {
     int fd = open(gLogPathC, 0x0001 /*WRONLY*/ | 0x0008 /*APPEND*/ | 0x0200 /*CREAT*/, 0644);
     if (fd >= 0) { write(fd, msg, len); close(fd); }
 }
+// Signal-safe trap reporter: "[SP+] N2 trap pc=0x... insn=0x... (<tag>)\n"
+// — no formatting lib, just nibble writes into a stack buffer.
+static void n2_log_trap(uint64_t pc, uint32_t insn, const char *tag, int taglen) {
+    char b[80]; int i = 0;
+    const char *p = "[SP+] N2 trap pc=0x";
+    while (*p) b[i++] = *p++;
+    for (int s = 60; s >= 0; s -= 4) b[i++] = "0123456789abcdef"[(pc >> s) & 15];
+    p = " insn=0x"; while (*p) b[i++] = *p++;
+    for (int s = 28; s >= 0; s -= 4) b[i++] = "0123456789abcdef"[(insn >> s) & 15];
+    b[i++] = ' ';
+    while (taglen-- > 0 && *tag) b[i++] = *tag++;
+    b[i++] = '\n';
+    n2_log_from_signal(b, i);
+}
 
-static int n2_restore(void) {
-    uintptr_t page = (uintptr_t)gN2Api & ~0x3fffULL;
+static int n2_restore_at(void *addr, uint32_t orig) {
+    uintptr_t page = (uintptr_t)addr & ~0x3fffULL;
     if (mprotect((void *)page, 0x4000, 1|2|4) != 0) return 0;
-    *(volatile uint32_t *)gN2Api = gN2Orig;
+    *(volatile uint32_t *)addr = orig;
     mprotect((void *)page, 0x4000, 1|4);
-    sys_icache_invalidate(gN2Api, 4);
+    sys_icache_invalidate(addr, 4);
     gN2Restores++;
     return 1;
 }
 
 static volatile int gN2Depth;
 static void n2_trap(int sig, void *info, void *vctx) {
-    uint64_t pc = ((n2_uctx64 *)vctx)->mcontext->ss.pc;
-    // A trap at _GetN2Api+0 is ALWAYS ours — never chain it. The v19
-    // crash was signal ping-pong: the watch repaired the byte before the
-    // handler ran, the insn check read clean, we chained to Sentry, and
-    // Sentry re-raised back to whoever was on top — infinite recursion
-    // until the thread's stack guard page faulted.
-    if (gN2Api && pc == (uint64_t)(uintptr_t)gN2Api) {
-        if (N2_BRK(*(volatile uint32_t *)gN2Api) && gN2Restores < 128 && n2_restore()) {
-            static const char m[] = "[SP+] _GetN2Api brk restored (trap)\n";
-            n2_log_from_signal(m, sizeof m - 1);
+    n2_uctx64 *u = (n2_uctx64 *)vctx;
+    uint64_t pc = u->mcontext->ss.pc;
+    uint32_t insn = pc ? *(volatile uint32_t *)(uintptr_t)pc : 0;
+
+    // v21: our handler ran but chained to Sentry (which hung -> watchdog)
+    // because pc != _GetN2Api+0 — the brk lands at a different offset.
+    // Rule now: a brk-encoded trap is ours wherever it is. In _GetN2Api's
+    // captured window we restore the original word; anywhere else we
+    // skip the insn (pc+=4) — brk is never legitimate control flow in
+    // shipped code, so skipping defeats poisons, checkpoints and asserts
+    // alike. Chaining to Sentry only happens for genuinely foreign traps.
+    uint64_t base = (uint64_t)(uintptr_t)gN2Api;
+    if (N2_BRK(insn)) {
+        if (gN2Api && pc >= base && pc < base + N2_WORDS * 4) {
+            int idx = (int)((pc - base) / 4);
+            if (!N2_BRK(gN2Orig[idx]) && gN2Restores < 512 &&
+                n2_restore_at((void *)(uintptr_t)pc, gN2Orig[idx])) {
+                n2_log_trap(pc, insn, "restored", 8);
+            } else {
+                u->mcontext->ss.pc = pc + 4;
+                n2_log_trap(pc, insn, "skipped", 7);
+            }
+        } else {
+            u->mcontext->ss.pc = pc + 4;
+            n2_log_trap(pc, insn, "foreign-brk-skipped", 19);
         }
-        // Clean entry already (watch beat us) -> just resume: execution
-        // re-runs the real prologue.
         return;
     }
     int depth = __sync_fetch_and_add(&gN2Depth, 1);
@@ -1490,12 +1521,21 @@ static void n2_guard_install(void) {
     }
     if (!sym) { gN2Arming = 0; return; }   // retry allowed — NLP not mapped yet
     gN2Api = sym;
-    uint32_t live = *(volatile uint32_t *)gN2Api;
-    if (!N2_BRK(live)) gN2Orig = live;   // prefer the live prologue over the hardcode
+    // Capture the first N2_WORDS words. The poison lands later, so the
+    // live words are pristine; any word already a brk stays unrestorable
+    // (handler falls back to skip for that offset).
+    for (int i = 0; i < N2_WORDS; i++)
+        gN2Orig[i] = ((volatile uint32_t *)gN2Api)[i];
+    uint32_t live = gN2Orig[0];
     n2_steal_sigtrap();
     n2_kill_task_brk_port();
     ipalog("[SP+] N2 guard armed on _GetN2Api=%p insn=%08x", gN2Api, live);
-    if (N2_BRK(live) && n2_restore()) {
+    // If the entry is already poisoned at arm time, put back the known
+    // on-disk word. Words >0 captured as brk stay marked unrestorable —
+    // the handler skips them (we can't know their originals).
+    if (N2_BRK(gN2Orig[0]) &&
+        n2_restore_at(gN2Api, 0xa9be4ff4)) {
+        gN2Orig[0] = 0xa9be4ff4;
         static const char m[] = "[SP+] _GetN2Api brk restored (arm)\n";
         n2_log_from_signal(m, sizeof m - 1);
     }
@@ -1519,22 +1559,27 @@ static void n2_guard_watch(void) {
             n2_guard_install();
             if (!gN2Api) { usleep(100000); continue; }   // NLP not mapped yet
         }
-        uint32_t w = *(volatile uint32_t *)gN2Api;
-        if (N2_BRK(w) && gN2Restores < 128) {
-            if (n2_restore()) {
+        // Scan the whole captured window — v21 showed the brk landing at
+        // an offset other than +0 (our handler chained because pc != +0).
+        uint32_t w0 = 0;
+        int repatched = 0;
+        for (int i = 0; i < N2_WORDS; i++) {
+            uint32_t w = ((volatile uint32_t *)gN2Api)[i];
+            if (i == 0) w0 = w;
+            if (!N2_BRK(w) || N2_BRK(gN2Orig[i]) || gN2Restores >= 512) continue;
+            if (n2_restore_at((char *)gN2Api + i * 4, gN2Orig[i])) {
                 static const char m[] = "[SP+] _GetN2Api brk restored (watch)\n";
                 n2_log_from_signal(m, sizeof m - 1);
-                continue;           // re-check immediately in case it repatches
+                repatched = 1;
             }
-            if ((it & 0x3ff) == 0)
-                ipalog("[SP+] N2 watch: entry=%08x restore FAILED", w);
         }
+        if (repatched) continue;      // re-check immediately in case it repatches
         if ((++it & 0x3f) == 0) {   // ~64ms
             n2_steal_sigtrap();
             n2_kill_task_brk_port();
         }
         if ((it & 0x7ff) == 0)      // ~2s heartbeat
-            ipalog("[SP+] N2 watch alive: entry=%08x restores=%d", w, gN2Restores);
+            ipalog("[SP+] N2 watch alive: entry=%08x restores=%d", w0, gN2Restores);
         usleep(1000);               // 1ms: keeps the brk window under Unity's call latency
     }
 }

@@ -1,0 +1,27 @@
+[SP+] init: cfg ok
+[SP+] init: objs ok
+[SP+] hooked base NSURLSession (dt=1 dt2=1 en=1)
+[SP+] N2 watch started
+[SP+] hooked NSURLSession subclasses (dt=0 dt2=0)
+[SP+] hooked +sessionWithConfiguration:delegate:delegateQueue:
+[SP+] init: done
+[SP+] N2 guard armed on _GetN2Api=0x10d22f9e4 insn=a9be4ff4
+[SP+] session w/o delegate
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] delegate AFHTTPSessionManager swizzled (data=1 done=1)
+[SP+] session w/ delegate SocketIO.SocketEngine
+[SP+] delegate SocketIO.SocketEngine swizzled (data=0 done=0)
+[SP+] session w/ delegate AFURLSessionManager
+[SP+] delegate AFURLSessionManager swizzled (data=1 done=1)
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] req host: static.spooferpro.com
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate FBSDKGraphRequestConnection
+[SP+] delegate FBSDKGraphRequestConnection swizzled (data=0 done=0)
+[SP+] req host: ep2.facebook.com
+[SP+] session w/o delegate
+[SP+] session w/o delegate
+[SP+] delegate didComplete hit on AFHTTPSessionManager
