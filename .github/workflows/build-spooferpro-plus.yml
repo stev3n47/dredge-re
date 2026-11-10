@@ -5,6 +5,8 @@ on:
   push:
     paths:
       - 'next-game/spooferpro/SpooferProPlus.m'
+      - 'next-game/spooferpro/il2cpp_*.h'
+      - 'next-game/spooferpro/il2cpp_*.c'
       - '.github/workflows/build-spooferpro-plus.yml'
 
 jobs:
