@@ -115,6 +115,7 @@ extern int close(int);
 extern int usleep(unsigned);
 extern unsigned mach_task_self_;
 extern int task_set_exception_ports(unsigned, unsigned, unsigned, int, int);
+extern int pthread_create(void *, void *, void *(*)(void *), void *);
 
 typedef struct { double x, y; } CGPoint;
 typedef struct { double x, y, w, h; } CGRect;
@@ -1410,27 +1411,45 @@ static int n2_restore(void) {
     return 1;
 }
 
+static volatile int gN2Depth;
 static void n2_trap(int sig, void *info, void *vctx) {
     uint64_t pc = ((n2_uctx64 *)vctx)->mcontext->ss.pc;
-    if (gN2Api && pc == (uint64_t)(uintptr_t)gN2Api &&
-        N2_BRK(*(volatile uint32_t *)gN2Api) && gN2Restores < 128) {
-        if (n2_restore()) {
+    // A trap at _GetN2Api+0 is ALWAYS ours — never chain it. The v19
+    // crash was signal ping-pong: the watch repaired the byte before the
+    // handler ran, the insn check read clean, we chained to Sentry, and
+    // Sentry re-raised back to whoever was on top — infinite recursion
+    // until the thread's stack guard page faulted.
+    if (gN2Api && pc == (uint64_t)(uintptr_t)gN2Api) {
+        if (N2_BRK(*(volatile uint32_t *)gN2Api) && gN2Restores < 128 && n2_restore()) {
             static const char m[] = "[SP+] _GetN2Api brk restored (trap)\n";
             n2_log_from_signal(m, sizeof m - 1);
-            return;   // resume -> re-executes the restored prologue
         }
+        // Clean entry already (watch beat us) -> just resume: execution
+        // re-runs the real prologue.
+        return;
+    }
+    int depth = __sync_fetch_and_add(&gN2Depth, 1);
+    if (depth >= 8) {
+        // Re-entrant storm (handler ping-pong): die via default instead
+        // of stack-overflowing.
+        n2_sa d = {0}; d.u.h = N2_SIG_DFL;
+        sigaction(sig, &d, 0);
+        __sync_fetch_and_sub(&gN2Depth, 1);
+        return;
     }
     // Not ours (or unmendable): chain to the previous handler.
     if (gN2Prev.u.sa && (gN2Prev.flags & N2_SA_SIGINFO))
         gN2Prev.u.sa(sig, info, vctx);
     else if (gN2Prev.u.h && gN2Prev.u.h != N2_SIG_DFL && gN2Prev.u.h != N2_SIG_IGN)
         gN2Prev.u.h(sig);
-    else if (gN2Prev.u.h == N2_SIG_IGN)
+    else if (gN2Prev.u.h == N2_SIG_IGN) {
+        __sync_fetch_and_sub(&gN2Depth, 1);
         return;
-    else {
+    } else {
         n2_sa d = {0}; d.u.h = N2_SIG_DFL;
         sigaction(sig, &d, 0);   // return -> re-trap under default = original kill
     }
+    __sync_fetch_and_sub(&gN2Depth, 1);
 }
 
 static volatile int gN2Arming;
@@ -1493,6 +1512,7 @@ static void n2_guard_install(void) {
 //      registers once at init; after our next steal we stay on top
 // The heartbeat line proves the watch is alive and shows the entry word.
 static void n2_guard_watch(void) {
+    ipalog("[SP+] N2 watch started");
     int it = 0;
     for (;;) {
         if (!gN2Api) {
@@ -1532,9 +1552,11 @@ __attribute__((constructor)) static void spplus_init(void) {
     n2_guard_install();
     // The watch must run on a real background thread — the main-runloop
     // timers don't fire while Unity owns the launch, which is exactly
-    // when the brk lands. detachNewThreadWithBlock: doesn't depend on a
-    // runloop either.
-    SEND(C("NSThread"), S("detachNewThreadWithBlock:"), (id)^{ n2_guard_watch(); });
+    // when the brk lands. pthread_create: no ObjC/block dependency at all.
+    {
+        void *n2t = 0;
+        pthread_create(&n2t, 0, (void *(*)(void *))n2_guard_watch, 0);
+    }
 
     // NSURLSession is a class cluster — Foundation's concrete classes
     // (__NSCFURLSession, __NSCFURLSessionLocal, etc) can override the
