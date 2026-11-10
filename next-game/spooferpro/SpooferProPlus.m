@@ -1276,6 +1276,7 @@ static void hook_done(id self, SEL _cmd, id session, id task, id err) {
 static void swizzle_delegate(id delegate) {
     if (!delegate || cfg_i("disable_delegate_hooks") || SPP_BISECT_NONET) return;
     Class dc = object_getClass(delegate);
+    int got_data = 0, got_done = 0;
     @synchronized ((id)gSyncObj) {
     for (int i = 0; i < gNSwz; i++) if (gSwz[i] == dc) return;
     if (gNSwz >= gSwzCap) {
@@ -1314,7 +1315,7 @@ static void swizzle_delegate(id delegate) {
         else if (class_addMethod(dc, se, (IMP)hook_done, "v@:@@@"))
             gSwzDone[i] = mimp;
     }
-    int got_data = !!gSwzData[i], got_done = !!gSwzDone[i];
+    got_data = !!gSwzData[i]; got_done = !!gSwzDone[i];
     gNSwz++;
     // File I/O must happen outside gSyncObj — a slow write here stalls
     // every delegate callback queuing in find_swz.
