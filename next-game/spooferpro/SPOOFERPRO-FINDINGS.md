@@ -235,6 +235,52 @@ render time. The quickest way to find it on-device:
    readers. Any patch to their enclosing functions would be
    diagnostic-only.
 
+## libSpooferPro anti-tamper (crashes the app when SPPlus is injected)
+
+**Symptom:** game crashes on launch when a build with
+`SPPlus.framework/SPPlus` injected via LC_LOAD_DYLIB is installed.
+libSpooferPro.dylib still launches on its own; only the combo crashes.
+
+**Evidence:** libSpooferPro imports from dyld:
+
+```
+_dyld_register_func_for_add_image
+_dyld_register_func_for_remove_image
+_dyld_get_image_header / _get_image_name / _image_count
+_sysctl / _sysctlbyname
+```
+
+and ships the literal string `/Library/MobileSubstrate/DynamicLibraries/SpooferPro.dylib`
+— it knows what it is and watches for foreign dylibs. The add-image
+callback runs on every `LC_LOAD_DYLIB` resolution, so when SPPlus
+loads it fires with SPPlus's path and almost certainly aborts.
+
+Found via stub trace (PoGo 0.743 build):
+
+- Stub for `__dyld_register_func_for_add_image` at `0xea54f4`.
+- Five BL callers (= five callback registrations):
+  `0x606bc4, 0x606c84, 0x00c50e50, 0x00c510ac, 0x00c54e3c`.
+- Three of them pass identifiable callback entry points via `adrp+add`:
+  `0x6055ac, 0x00c51478, 0x00c55028`. The other two compute the
+  callback pointer indirectly (`mov x0, x21` from earlier register
+  setup; `bl` helper).
+
+**Fix in `tools/inject_spooferpro.py`** (defaults on when SPPlus is
+also being injected): defense-in-depth —
+
+- NOP each of the 5 registration BLs so no callback is ever handed
+  to dyld.
+- Also force the 3 identifiable callback entry points to `ret` so
+  if we missed an indirect registration, the callback is a no-op.
+
+Toggle via `--strip-antitamper` / `--no-strip-antitamper`. When
+present the SpooferPro-v4-spplus IPA produced from v1 has SHA-256
+`b5f49d6dd386d7f6ffa988cf0396ec748202b4ad746a10b516ea9f4d58f5ade6`.
+
+If the launch crash persists after this patch, the sync image enum
+at init (7 BL callers of `_dyld_image_count`, 7 of
+`_dyld_get_image_header`) is the next thing to disarm.
+
 ## SpooferProPlus — add-our-own-on-top approach
 
 Static patching can't reach the obfuscated Swift tier dispatch; dynamic
