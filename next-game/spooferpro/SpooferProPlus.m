@@ -1216,14 +1216,25 @@ static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
         logged_recv = 1;
         ipalog("[SP+] delegate didReceiveData hit on %s", class_getName(object_getClass(self)));
     }
-    @synchronized ((id)gTaskBuf) {
-        id buf = SEND(gTaskBuf, S("objectForKey:"), task);
-        if (!buf) {
-            buf = SEND(SEND(C("NSMutableData"), S("alloc")), S("init"));
-            SEND(gTaskBuf, S("setObject:forKey:"), buf, task);
-            SEND(buf, S("release"));
+    // Only buffer bodies we actually inspect. v15 buffered EVERY task's
+    // response — including the launch-time asset-cdn download (hundreds of
+    // MB, thousands of chunks), each chunk serialized through gTaskBuf —
+    // which stalled the delegate queues into the scene-create watchdog.
+    // A per-chunk URL check is ~5 msgSends and keeps the hot path
+    // lock-free for all other traffic.
+    id req = SEND(task, S("originalRequest"));
+    NSString *u = SEND(SEND(req, S("URL")), S("absoluteString"));
+    if (u && (SEND(u, S("containsString:"), nsstr("/plfe/rpc2")) ||
+              SEND(u, S("containsString:"), nsstr("nianticlabs.com")))) {
+        @synchronized ((id)gTaskBuf) {
+            id buf = SEND(gTaskBuf, S("objectForKey:"), task);
+            if (!buf) {
+                buf = SEND(SEND(C("NSMutableData"), S("alloc")), S("init"));
+                SEND(gTaskBuf, S("setObject:forKey:"), buf, task);
+                SEND(buf, S("release"));
+            }
+            SEND(buf, S("appendData:"), data);
         }
-        SEND(buf, S("appendData:"), data);
     }
     IMP f = find_swz(object_getClass(self), gSwzData);
     if (f) ((DelImp)f)(self, _cmd, session, task, data);
@@ -1303,9 +1314,12 @@ static void swizzle_delegate(id delegate) {
         else if (class_addMethod(dc, se, (IMP)hook_done, "v@:@@@"))
             gSwzDone[i] = mimp;
     }
+    int got_data = !!gSwzData[i], got_done = !!gSwzDone[i];
     gNSwz++;
-    ipalog("[SP+] delegate %s swizzled (data=%d done=%d)", class_getName(dc), !!gSwzData[i], !!gSwzDone[i]);
+    // File I/O must happen outside gSyncObj — a slow write here stalls
+    // every delegate callback queuing in find_swz.
     }
+    ipalog("[SP+] delegate %s swizzled (data=%d done=%d)", class_getName(dc), got_data, got_done);
 }
 
 // +[NSURLSession sessionWithConfiguration:delegate:delegateQueue:]
@@ -1415,17 +1429,24 @@ __attribute__((constructor)) static void spplus_init(void) {
     // is idempotent and we also retry from the first rpc2 hit if init
     // failed the first time.
     run_on_main_later(2.0, (id)^(NSTimer *t){
-        char err[128] = {0};
-        int rc = spp_il2cpp_init(err, sizeof err);
-        if (rc == 0) {
-            ipalog("[SP+] il2cpp bridge READY (tag=%s)", SPP_IL2CPP_VERSION_TAG);
-            spp_il2cpp_log_classes_once();
-            // Probe IPokemonBag.ReleasePokemon so the user can confirm
-            // their build's class names in the log before going live.
-            spp_il2cpp_probe_release_pokemon();
-        } else {
-            ipalog("[SP+] il2cpp bridge init failed rc=%d: %s", rc, err);
-        }
+        // Run the bridge init on a background queue, not the main runloop:
+        // the catalog scans ~15k classes (seconds of CPU) and during launch
+        // the main thread is inside Unity's scene-create — blocking it there
+        // blows the 18s scene-create watchdog budget.
+        id q = SEND(SEND(C("NSOperationQueue"), S("alloc")), S("init"));
+        SEND(q, S("addOperationWithBlock:"), (id)^{
+            char err[128] = {0};
+            int rc = spp_il2cpp_init(err, sizeof err);
+            if (rc == 0) {
+                ipalog("[SP+] il2cpp bridge READY (tag=%s)", SPP_IL2CPP_VERSION_TAG);
+                spp_il2cpp_log_classes_once();
+                // Probe IPokemonBag.ReleasePokemon so the user can confirm
+                // their build's class names in the log before going live.
+                spp_il2cpp_probe_release_pokemon();
+            } else {
+                ipalog("[SP+] il2cpp bridge init failed rc=%d: %s", rc, err);
+            }
+        });
     });
 
     // button appears unconditionally — don't wait for first rpc2 hit
