@@ -309,20 +309,53 @@ void spp_il2cpp_dump_class_members(Il2CppClass *klass, int limit) {
 // D. GameManager.Instance.PokemonBag — some Niantic builds expose this.
 static Il2CppObject *g_cached_bag;
 
-static Il2CppClass *find_bag_class(const char **out_ns, const char **out_cls) {
-    for (int i = 0; k_bag_namespaces[i]; i++) {
-        for (int j = 0; k_bag_classes[j]; j++) {
-            Il2CppClass *k = spp_il2cpp_find_class(
-                "Assembly-CSharp.dll",
-                k_bag_namespaces[i][0] ? k_bag_namespaces[i] : NULL,
-                k_bag_classes[j]);
-            if (k) {
-                if (out_ns)  *out_ns  = k_bag_namespaces[i];
-                if (out_cls) *out_cls = k_bag_classes[j];
-                return k;
+// Dump every class whose name contains `substr` across all images — our
+// class-name guesses keep missing because Niantic renames both assemblies
+// (holo-game.dll, not Assembly-CSharp.dll) and classes between builds.
+static void dump_matching_classes(const char *substr) {
+    if (!g_ready || !substr) return;
+    Il2CppDomain *dom = spp_il2cpp_domain_get();
+    size_t n_asm = 0;
+    const Il2CppAssembly **asms = spp_il2cpp_domain_get_assemblies(dom, &n_asm);
+    int shown = 0;
+    for (size_t ai = 0; ai < n_asm && shown < 40; ai++) {
+        const Il2CppImage *img = spp_il2cpp_assembly_get_image(asms[ai]);
+        if (!img) continue;
+        const char *in = spp_il2cpp_image_get_name(img);
+        size_t nc = spp_il2cpp_image_get_class_count(img);
+        for (size_t ci = 0; ci < nc && shown < 40; ci++) {
+            Il2CppClass *k = spp_il2cpp_image_get_class(img, ci);
+            if (!k) continue;
+            const char *kcn = spp_il2cpp_class_get_name(k);
+            if (kcn && strstr(kcn, substr)) {
+                ipalog("[SP+]   match %s :: %s.%s",
+                       in ?: "?", spp_il2cpp_class_get_namespace(k) ?: "", kcn);
+                shown++;
             }
         }
     }
+    ipalog("[SP+]   (%d classes match '%s')", shown, substr);
+}
+
+static Il2CppClass *find_bag_class(const char **out_ns, const char **out_cls) {
+    static const char *k_images[] = { "holo-game.dll", NULL, "Assembly-CSharp.dll" };
+    for (int im = 0; im < 3; im++) {
+        for (int i = 0; k_bag_namespaces[i]; i++) {
+            for (int j = 0; k_bag_classes[j]; j++) {
+                Il2CppClass *k = spp_il2cpp_find_class(
+                    k_images[im],
+                    k_bag_namespaces[i][0] ? k_bag_namespaces[i] : NULL,
+                    k_bag_classes[j]);
+                if (k) {
+                    if (out_ns)  *out_ns  = k_bag_namespaces[i];
+                    if (out_cls) *out_cls = k_bag_classes[j];
+                    return k;
+                }
+            }
+        }
+    }
+    ipalog("[SP+] bag-resolve: no exact name — dumping *Bag* classes:");
+    dump_matching_classes("Bag");
     return NULL;
 }
 
@@ -420,7 +453,8 @@ Il2CppObject *spp_il2cpp_get_pokemon_bag(void) {
     }
 
     // Strategy D — GameManager.Instance.PokemonBag
-    Il2CppClass *gm = spp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "GameManager");
+    Il2CppClass *gm = spp_il2cpp_find_class("holo-game.dll", NULL, "GameManager");
+    if (!gm) gm = spp_il2cpp_find_class(NULL, NULL, "GameManager");
     if (gm) {
         Il2CppObject *g = spp_il2cpp_static_field_object(gm, "Instance");
         if (!g) {
