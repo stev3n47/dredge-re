@@ -45,14 +45,9 @@ jobs:
           codesign -dv SPPlus 2>&1 | head -5
       - name: Re-sign + verify like a sideload re-signer
         run: |
-          openssl req -x509 -newkey rsa:2048 -keyout k2.pem -out c2.pem \
-            -days 1 -nodes -subj "/CN=ResignTest/" \
-            -addext "keyUsage=critical,digitalSignature" \
-            -addext "extendedKeyUsage=critical,codeSigning" \
-            -addext "basicConstraints=critical,CA:FALSE"
-          openssl pkcs12 -export -legacy -out id2.p12 -inkey k2.pem -in c2.pem -passout pass:temp
-          security import id2.p12 -k t.keychain -P temp -T /usr/bin/codesign
-          codesign --force --sign "ResignTest" SPPlus
+          # Simulate Signulous: force-replace the CMS, then verify — a second
+          # keychain identity hangs headless codesign (same fix as build-ipauto).
+          codesign --force --sign "SPPlus" SPPlus
           codesign -vvv --deep SPPlus
           otool -l SPPlus | grep -A4 LC_CODE_SIGNATURE
       - name: Upload artifact
