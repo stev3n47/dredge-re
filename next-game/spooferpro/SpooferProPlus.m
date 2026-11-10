@@ -113,6 +113,8 @@ extern int open(const char *, int, ...);
 extern long write(int, const void *, unsigned long);
 extern int close(int);
 extern int usleep(unsigned);
+extern unsigned mach_task_self_;
+extern int task_set_exception_ports(unsigned, unsigned, unsigned, int, int);
 
 typedef struct { double x, y; } CGPoint;
 typedef struct { double x, y, w, h; } CGRect;
@@ -1432,6 +1434,25 @@ static void n2_trap(int sig, void *info, void *vctx) {
 }
 
 static volatile int gN2Arming;
+#define N2_EXC_BREAKPOINT_MASK 0x20
+static void n2_kill_task_brk_port(void) {
+    // Remove whoever owns the task-level EXC_BREAKPOINT port (Sentry).
+    // With no task port, the kernel degrades the trap to POSIX SIGTRAP on
+    // the faulting thread — where our sigaction can actually see it.
+    task_set_exception_ports(mach_task_self_, N2_EXC_BREAKPOINT_MASK, 0, 0, 0);
+}
+
+static void n2_steal_sigtrap(void) {
+    n2_sa sa = {0}, prev;
+    sa.u.sa = n2_trap;
+    sa.flags = N2_SA_SIGINFO | N2_SA_NODEFER;
+    sigaction(N2_SIGTRAP, &sa, &prev);
+    // Only remember the previous handler when it isn't us — re-stealing
+    // would otherwise store n2_trap in gN2Prev and the chain path would
+    // recurse forever.
+    if (prev.u.sa != n2_trap) gN2Prev = prev;
+}
+
 static void n2_guard_install(void) {
     if (gN2Api) return;
     // Single-install gate: a second sigaction would store n2_trap in
@@ -1452,10 +1473,8 @@ static void n2_guard_install(void) {
     gN2Api = sym;
     uint32_t live = *(volatile uint32_t *)gN2Api;
     if (!N2_BRK(live)) gN2Orig = live;   // prefer the live prologue over the hardcode
-    n2_sa sa = {0};
-    sa.u.sa = n2_trap;
-    sa.flags = N2_SA_SIGINFO | N2_SA_NODEFER;
-    sigaction(N2_SIGTRAP, &sa, &gN2Prev);
+    n2_steal_sigtrap();
+    n2_kill_task_brk_port();
     ipalog("[SP+] N2 guard armed on _GetN2Api=%p insn=%08x", gN2Api, live);
     if (N2_BRK(live) && n2_restore()) {
         static const char m[] = "[SP+] _GetN2Api brk restored (arm)\n";
@@ -1463,25 +1482,39 @@ static void n2_guard_install(void) {
     }
 }
 
-// Permanent background watch. v17 proved the SIGTRAP handler alone is
-// insufficient: the game's Sentry crash reporter owns EXC_BREAKPOINT at
-// Mach level — the POSIX handler never fires, and Sentry's handler then
-// deadlocks on its own lock (scene-create watchdog). The only reliable
-// defense is to keep the entry clean so no trap is ever raised. The
-// poll also retries n2_guard_install because NianticLabsPlugin is lazily
-// loaded seconds after our constructor — dlsym fails early.
+// Permanent background watch. The .ips shows the kill chain precisely:
+// the brk trap reaches a POSIX signal handler OWNED BY Sentry (last-
+// installed wins), whose handler deadlocks on its own mutex until the
+// scene-create watchdog fires. Defense, three layers:
+//   1. keep the entry clean (1ms poll + restore) so no trap is raised
+//   2. null the task-level EXC_BREAKPOINT port so traps always degrade
+//      to POSIX delivery on the faulting thread
+//   3. re-assert our SIGTRAP sigaction on top every ~64ms — Sentry
+//      registers once at init; after our next steal we stay on top
+// The heartbeat line proves the watch is alive and shows the entry word.
 static void n2_guard_watch(void) {
+    int it = 0;
     for (;;) {
         if (!gN2Api) {
             n2_guard_install();
             if (!gN2Api) { usleep(100000); continue; }   // NLP not mapped yet
         }
         uint32_t w = *(volatile uint32_t *)gN2Api;
-        if (N2_BRK(w) && gN2Restores < 128 && n2_restore()) {
-            static const char m[] = "[SP+] _GetN2Api brk restored (watch)\n";
-            n2_log_from_signal(m, sizeof m - 1);
-            continue;               // re-check immediately in case it repatches
+        if (N2_BRK(w) && gN2Restores < 128) {
+            if (n2_restore()) {
+                static const char m[] = "[SP+] _GetN2Api brk restored (watch)\n";
+                n2_log_from_signal(m, sizeof m - 1);
+                continue;           // re-check immediately in case it repatches
+            }
+            if ((it & 0x3ff) == 0)
+                ipalog("[SP+] N2 watch: entry=%08x restore FAILED", w);
         }
+        if ((++it & 0x3f) == 0) {   // ~64ms
+            n2_steal_sigtrap();
+            n2_kill_task_brk_port();
+        }
+        if ((it & 0x7ff) == 0)      // ~2s heartbeat
+            ipalog("[SP+] N2 watch alive: entry=%08x restores=%d", w, gN2Restores);
         usleep(1000);               // 1ms: keeps the brk window under Unity's call latency
     }
 }
@@ -1499,9 +1532,9 @@ __attribute__((constructor)) static void spplus_init(void) {
     n2_guard_install();
     // The watch must run on a real background thread — the main-runloop
     // timers don't fire while Unity owns the launch, which is exactly
-    // when the brk lands.
-    id n2q = SENDN(SEND(C("NSOperationQueue"), S("alloc")), S("init"));
-    SEND(n2q, S("addOperationWithBlock:"), (id)^{ n2_guard_watch(); });
+    // when the brk lands. detachNewThreadWithBlock: doesn't depend on a
+    // runloop either.
+    SEND(C("NSThread"), S("detachNewThreadWithBlock:"), (id)^{ n2_guard_watch(); });
 
     // NSURLSession is a class cluster — Foundation's concrete classes
     // (__NSCFURLSession, __NSCFURLSessionLocal, etc) can override the
