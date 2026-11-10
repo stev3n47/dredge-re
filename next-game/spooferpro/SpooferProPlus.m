@@ -1021,108 +1021,152 @@ static id front_vc(void) {
     return vc;
 }
 
-static void present_sheet(void);
+// ---------------------------------------------------------------
+// Menu — multi-pane, thumb-friendly, scannable at a glance.
+//
+// Design:
+//   Main pane = status dashboard + primary CTA (Clean Bag Now) +
+//               4 category links + Done.
+//   Each submenu drills one level and ends with Back → main.
+//   Config mutations dismiss + re-present the SAME pane so state
+//   stays visible (no stacked modals).
+//
+// UIAlertController constraints we work within:
+//   - Action titles are plain NSString (no attributed text, no subtitle).
+//     We prefix toggles with a checkmark/space to signal state, and put
+//     values inside the action title for cyclers.
+//   - Message body is proportional font — no monospace columns; we
+//     use stacked lines with keyword prefixes instead.
+//   - Styles: 0 default (blue), 1 cancel (bold), 2 destructive (red).
+// ---------------------------------------------------------------
+static void present_main(void);
+static void present_keep(void);
+static void present_auto(void);
+static void present_encounter(void);
+static void present_safety(void);
 
 typedef void (^ActH)(id);
+typedef void (*PanelFn)(void);
+
 static void add_act(id alert, id vc, const char *title, int style, ActH h) {
     SEND(alert, S("addAction:"),
          SENDN(C("UIAlertAction"), S("actionWithTitle:style:handler:"), nsstr(title), style, h));
 }
 
-static void add_toggle(id alert, id vc, const char *key, const char *label) {
-    char t[160];
-    snprintf(t, sizeof t, "%s:  %s", label, cfg_i(key) ? "ON" : "off");
+// Re-present `fn` on the same vc after dismissing the current sheet, used
+// by every setting row so the user sees the new state immediately and the
+// pane doesn't disappear on them.
+static void reopen_as(id vc, PanelFn fn) {
+    SEND(vc, S("dismissViewControllerAnimated:completion:"), NO,
+         ^{ if (fn) fn(); });
+}
+
+// Toggle row: checkmark prefix when on, aligned space when off.
+// The leading "✓ " / "  " keeps labels column-aligned by eye in the
+// proportional-font iOS action list.
+static void add_check(id alert, id vc, const char *key, const char *label, PanelFn reopen) {
+    char t[200];
+    snprintf(t, sizeof t, "%s  %s", cfg_i(key) ? "\xe2\x9c\x93" : " ", label); // "✓" U+2713
     add_act(alert, vc, t, 0, ^(id a) {
         cfg_set(key, !cfg_i(key));
-        SEND(vc, S("dismissViewControllerAnimated:completion:"), NO,
-             ^{ present_sheet(); });
+        reopen_as(vc, reopen);
     });
 }
 
-static void add_num(id alert, id vc, const char *key, const char *label, int step, int lo, int hi) {
-    char t[160];
+// Numeric cycler: tap advances to the next preset, wrapping around.
+// `fmt` is formatted with (label, current, hint) via printf; caller picks
+// units/hint text. This is one row per setting instead of a −/+ pair —
+// fewer rows, easier thumb hits. Example:
+//   add_cycle(alert, vc, "iv_pct_min", "Min IV %",
+//             (int[]){0,50,70,80,85,90,93,95,100}, 9, reopen);
+// Row title ends up: "Min IV %:  90  (tap: 93)"
+static void add_cycle(id alert, id vc, const char *key, const char *label,
+                      const int *presets, int n, PanelFn reopen) {
     int cur = cfg_i(key);
-    snprintf(t, sizeof t, "-  %s  (%d)", label, cur);
+    int ci = 0, found = 0;
+    for (int i = 0; i < n; i++) if (presets[i] == cur) { ci = i; found = 1; break; }
+    if (!found) {
+        // User (or defaults) left a value not on our preset list — pick the
+        // nearest preset so cycling doesn't feel random.
+        int best = 0, bestd = -1;
+        for (int i = 0; i < n; i++) {
+            int d = cur > presets[i] ? cur - presets[i] : presets[i] - cur;
+            if (bestd < 0 || d < bestd) { bestd = d; best = i; }
+        }
+        ci = best;
+    }
+    int next = presets[(ci + 1) % n];
+    char t[200];
+    snprintf(t, sizeof t, "    %s:  %d    (tap: %d)", label, cur, next);
     add_act(alert, vc, t, 0, ^(id a) {
-        int v = cur - step; cfg_set(key, v < lo ? lo : v);
-        SEND(vc, S("dismissViewControllerAnimated:completion:"), NO, ^{ present_sheet(); });
-    });
-    snprintf(t, sizeof t, "+  %s  (%d)", label, cur);
-    add_act(alert, vc, t, 0, ^(id a) {
-        int v = cur + step; cfg_set(key, v > hi ? hi : v);
-        SEND(vc, S("dismissViewControllerAnimated:completion:"), NO, ^{ present_sheet(); });
+        cfg_set(key, next);
+        reopen_as(vc, reopen);
     });
 }
 
-static void present_sheet(void) {
+// Named cycler — like add_cycle but shows a human-readable label per value
+// instead of the raw int. Used for the ball type (1=Poké, 2=Great, …) where
+// the integer alone is not scannable.
+static void add_named_cycle(id alert, id vc, const char *key, const char *label,
+                            const int *vals, const char *const *names, int n,
+                            PanelFn reopen) {
+    int cur = cfg_i(key);
+    int ci = 0;
+    for (int i = 0; i < n; i++) if (vals[i] == cur) { ci = i; break; }
+    int next_i = (ci + 1) % n;
+    char t[200];
+    snprintf(t, sizeof t, "    %s:  %s    (tap: %s)",
+             label, names[ci], names[next_i]);
+    add_act(alert, vc, t, 0, ^(id a) {
+        cfg_set(key, vals[next_i]);
+        reopen_as(vc, reopen);
+    });
+}
+
+// Build a compact "keeps:" status chip for the dashboard. Shortened to the
+// first few names so the whole line fits on one row on an iPhone-mini width.
+static void keep_summary(char *out, size_t cap) {
+    const char *names[6]; int n = 0;
+    if (cfg_i("keep_shiny"))     names[n++] = "shiny";
+    if (cfg_i("keep_hundo"))     names[n++] = "100%";
+    if (cfg_i("keep_favorite"))  names[n++] = "fav";
+    if (cfg_i("keep_buddy"))     names[n++] = "buddy";
+    if (cfg_i("keep_lucky"))     names[n++] = "lucky";
+    if (cfg_i("keep_legendary")) names[n++] = "legendary";
+    if (n == 0) { snprintf(out, cap, "none"); return; }
+    int o = 0;
+    for (int i = 0; i < n && o < (int)cap - 4; i++) {
+        o += snprintf(out + o, cap - o, "%s%s", i ? ", " : "", names[i]);
+    }
+}
+
+// Main pane.
+static void present_main(void) {
     void *p = objc_autoreleasePoolPush();
     id vc = front_vc();
     if (!vc) { ipalog("[SP+] no root vc — sheet skipped"); objc_autoreleasePoolPop(p); return; }
-    char msg[256];
+
+    // Dashboard: three short stacked lines, each a self-contained status.
+    // Safety state is the FIRST thing a user reads.
+    char keeps[96] = {0}; keep_summary(keeps, sizeof keeps);
+    char msg[512];
+    const char *dry   = cfg_i("dry_run") ? "DRY RUN — releases only logged" : "LIVE — releases will post";
+    const char *brid  = spp_il2cpp_ready() ? "il2cpp ready" : "rpc2 only";
     snprintf(msg, sizeof msg,
-             "%s   |   il2cpp %s   |   IV min %d%%   |   bag at %d%s",
-             cfg_i("dry_run") ? "DRY-RUN" : "LIVE",
-             spp_il2cpp_ready() ? "READY" : "off",
-             cfg_i("iv_pct_min"), cfg_i("bag_threshold"),
-             gCleanOnce ? "   |   clean armed" : "");
-    id alert = SEND(C("UIAlertController"), S("alertControllerWithTitle:message:preferredStyle:"),
+             "%s\nKeeps: %s\nBag clean at %d  ·  min IV %d%%  ·  %s%s",
+             dry, keeps, cfg_i("bag_threshold"), cfg_i("iv_pct_min"), brid,
+             gCleanOnce ? "  ·  clean armed" : "");
+
+    id alert = SEND(C("UIAlertController"),
+                    S("alertControllerWithTitle:message:preferredStyle:"),
                     nsstr("SpooferProPlus"), nsstr(msg), 1);
-    // Dry-run FIRST so users can't miss it. With dry_run on, every release
-    // call is logged but nothing is posted — use to validate keep rules
-    // against a real inventory before flipping to live.
-    add_toggle(alert, vc, "dry_run", "DRY-RUN (log, don't release)");
-    add_num(alert, vc, "bag_clean_max", "Bag-clean max % of bag (safety)", 5, 10, 100);
-    add_toggle(alert, vc, "release_on_catch", "Release on Catch  [EXPERIMENTAL rpc2]");
-    add_toggle(alert, vc, "bag_full_clean", "Bag-Full Auto Clean  [EXPERIMENTAL rpc2]");
-    add_num(alert, vc, "iv_pct_min", "IV min", 5, 0, 100);
-    add_num(alert, vc, "bag_threshold", "bag at", 100, 0, 4000);
-    add_toggle(alert, vc, "keep_shiny", "Keep Shiny");
-    add_toggle(alert, vc, "keep_hundo", "Keep 100% IV");
-    add_toggle(alert, vc, "keep_favorite", "Keep Favorite");
-    add_toggle(alert, vc, "keep_buddy", "Keep Buddy");
-    add_toggle(alert, vc, "keep_lucky", "Keep Lucky");
-    add_toggle(alert, vc, "keep_legendary", "Keep Legendary");
-    add_toggle(alert, vc, "encounter_log", "Log Encounters");
-    add_toggle(alert, vc, "auto_catch", "Auto-Catch (excellent + curveball)  [EXPERIMENTAL rpc2]");
-    add_num(alert, vc, "auto_catch_ball", "Ball (1=Poké 2=Gt 3=Ult 4=Mstr)", 1, 1, 4);
-    add_num(alert, vc, "auto_catch_delay_ms", "Auto-Catch delay (ms)", 200, 0, 10000);
-    add_toggle(alert, vc, "block_non_shiny", "Block Non-Shiny (needs flee_method_id)");
-    add_toggle(alert, vc, "block_non_hundo", "Block Non-Hundo (needs flee_method_id)");
-    add_toggle(alert, vc, "block_non_shundo", "Block Non-Shundo (needs flee_method_id)");
-    // Clean Bag Now — our own rpc2 path.
-    //
-    // History: an earlier build routed this through SpooferPro's own ObjC
-    // cleaner (+[gu5nyo3pkexjug7to2 sharedCleaner]
-    //   / -PerformPokemonCleanupManually). The call returned successfully but
-    // the bag never changed — on-device test 2026-11-10 showed three dispatches
-    // over 4 minutes with zero bag mutation. Audit of libSpooferPro v4-strip
-    // (debug/bin/libSpooferPro-v4strip.dylib.zip) found the method is gated by
-    // a license-tied VM state check that reads encrypted flags from
-    // hooksengine_ek::g_hooker_lib+0x930/0x934/0x940, XOR-decodes them against
-    // hard-coded constants, and dispatches to the real cleaner only if they
-    // match the Pro-tier magic. Our UI bypass gets past the button-enable gate
-    // but not past that internal VM check. See SPOOFERPRO-FINDINGS.md section
-    // "License-tied VM dispatcher" for the full disassembly and Option-A
-    // runtime-patch requirements.
-    //
-    // This path instead:
-    //   1. Sets gCleanOnce = 1 so the next HOLO_INV response triggers our
-    //      own bag scan in mode=2 (walk_mons → should_keep → batched
-    //      M_RELEASE envelope).
-    //   2. Splices a GET_HOLOHOLO_INVENTORY (method 4) rpc2 request on our
-    //      own session so the user doesn't wait for the game's natural poll.
-    //      The response flows back through our completion handler, which
-    //      calls handle_response() just like the game's own rpc2 responses
-    //      do — the bag scan + release is dispatched from there.
-    //   3. Keep-rules (shiny / 100IV / favorite / buddy / lucky / species
-    //      whitelist) are evaluated client-side in should_keep(); the
-    //      bag_clean_max safety cap aborts if more than N% of the bag
-    //      would be released (parse-sanity backstop).
-    //
-    // Niantic sees our rpc2 envelope with METHOD_RELEASE_POKEMON=112 —
-    // same wire path iPoGo and SpooferPro both use, just signed by the
-    // game's own auth from gTemplate.
-    add_act(alert, vc, gCleanOnce ? "Clean armed — syncing inventory…" : "Clean Bag Now", 2, ^(id a) {
+
+    // Primary CTA — destructive style stands out visually. Splices HOLO_INV
+    // so the clean fires now instead of waiting for the game's natural poll.
+    const char *clean_title = gCleanOnce
+        ? "Clean armed — syncing inventory…"
+        : "Clean bag now";
+    add_act(alert, vc, clean_title, 2, ^(id a) {
         gCleanOnce = 1;
         if (!gTemplate) {
             ipalog("[SP+] manual bag clean armed — no envelope template yet "
@@ -1130,9 +1174,6 @@ static void present_sheet(void) {
             SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
             return;
         }
-        // Splice GET_HOLOHOLO_INVENTORY so the clean runs now, not on the next
-        // game-initiated inventory poll. post_env_handle() routes the response
-        // into handle_response() instead of just logging it.
         NSData *req = build_request(M_HOLO_INV, NULL, 0);
         NSData *env = env_with_request(gTemplate, gRequestsField,
             (const uint8_t *)SEND(req, S("bytes")),
@@ -1141,12 +1182,139 @@ static void present_sheet(void) {
         post_env_handle(env);
         SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
     });
+
+    add_act(alert, vc, "Keep rules…",           0, ^(id a) { reopen_as(vc, present_keep); });
+    add_act(alert, vc, "Auto-catch & release…", 0, ^(id a) { reopen_as(vc, present_auto); });
+    add_act(alert, vc, "Encounter filter…",     0, ^(id a) { reopen_as(vc, present_encounter); });
+    add_act(alert, vc, "Safety & diagnostics…", 0, ^(id a) { reopen_as(vc, present_safety); });
     add_act(alert, vc, "Done", 1, nil);
+
     SEND(vc, S("presentViewController:animated:completion:"), alert, YES, nil);
     objc_autoreleasePoolPop(p);
 }
 
-static void tgt_tap(id self, SEL _c, id sender) { present_sheet(); }
+// Keep rules — what the cleaner & release-on-catch will NOT release.
+static void present_keep(void) {
+    void *p = objc_autoreleasePoolPush();
+    id vc = front_vc();
+    if (!vc) { objc_autoreleasePoolPop(p); return; }
+    id alert = SEND(C("UIAlertController"),
+                    S("alertControllerWithTitle:message:preferredStyle:"),
+                    nsstr("Keep rules"),
+                    nsstr("Any match keeps the pokemon. Applies to bag clean AND release-on-catch."),
+                    1);
+
+    add_check(alert, vc, "keep_shiny",     "Shiny",            present_keep);
+    add_check(alert, vc, "keep_hundo",     "100% IV",          present_keep);
+    add_check(alert, vc, "keep_favorite",  "Favorite",         present_keep);
+    add_check(alert, vc, "keep_buddy",     "Current buddy",    present_keep);
+    add_check(alert, vc, "keep_lucky",     "Lucky",            present_keep);
+    add_check(alert, vc, "keep_legendary", "Legendary / mythical", present_keep);
+
+    static const int iv_presets[] = { 0, 50, 70, 80, 85, 90, 93, 95, 100 };
+    add_cycle(alert, vc, "iv_pct_min", "Min IV %",
+              iv_presets, (int)(sizeof iv_presets / sizeof *iv_presets),
+              present_keep);
+
+    add_act(alert, vc, "‹ Back", 1, ^(id a) { reopen_as(vc, present_main); });
+    SEND(vc, S("presentViewController:animated:completion:"), alert, YES, nil);
+    objc_autoreleasePoolPop(p);
+}
+
+// Auto-catch & release — the experimental rpc2 features.
+static void present_auto(void) {
+    void *p = objc_autoreleasePoolPush();
+    id vc = front_vc();
+    if (!vc) { objc_autoreleasePoolPop(p); return; }
+    id alert = SEND(C("UIAlertController"),
+                    S("alertControllerWithTitle:message:preferredStyle:"),
+                    nsstr("Auto-catch & release"),
+                    nsstr("Uses our own rpc2 envelopes. Keep Dry run on until the log shows correct catches and IVs."),
+                    1);
+
+    add_check(alert, vc, "release_on_catch", "Release on catch (after keep rules)", present_auto);
+    add_check(alert, vc, "bag_full_clean",   "Auto-clean bag when full",           present_auto);
+    add_check(alert, vc, "auto_catch",       "Auto-catch encounters",              present_auto);
+
+    static const int ball_vals[] = { 1, 2, 3, 4 };
+    static const char *const ball_names[] = { "Poké Ball", "Great Ball", "Ultra Ball", "Master Ball" };
+    add_named_cycle(alert, vc, "auto_catch_ball", "Ball",
+                    ball_vals, ball_names, 4, present_auto);
+
+    static const int delay_presets[] = { 0, 500, 1000, 1500, 2000, 3000, 5000 };
+    add_cycle(alert, vc, "auto_catch_delay_ms", "Catch delay (ms)",
+              delay_presets, (int)(sizeof delay_presets / sizeof *delay_presets),
+              present_auto);
+
+    add_act(alert, vc, "‹ Back", 1, ^(id a) { reopen_as(vc, present_main); });
+    SEND(vc, S("presentViewController:animated:completion:"), alert, YES, nil);
+    objc_autoreleasePoolPop(p);
+}
+
+// Encounter filter — log or flee encounters that don't match criteria.
+static void present_encounter(void) {
+    void *p = objc_autoreleasePoolPush();
+    id vc = front_vc();
+    if (!vc) { objc_autoreleasePoolPop(p); return; }
+    int flee = cfg_i("flee_method_id");
+    char submsg[200];
+    if (flee > 0) {
+        snprintf(submsg, sizeof submsg,
+                 "Flee method id = %d (from sppro_plus.json). Flee toggles below will act; "
+                 "log stays on regardless.", flee);
+    } else {
+        snprintf(submsg, sizeof submsg,
+                 "No flee_method_id set in sppro_plus.json — flee toggles will only log. "
+                 "Use the log to confirm shiny detection before setting one.");
+    }
+    id alert = SEND(C("UIAlertController"),
+                    S("alertControllerWithTitle:message:preferredStyle:"),
+                    nsstr("Encounter filter"), nsstr(submsg), 1);
+
+    add_check(alert, vc, "encounter_log",    "Log every encounter",   present_encounter);
+    add_check(alert, vc, "block_non_shiny",  "Flee non-shiny",        present_encounter);
+    add_check(alert, vc, "block_non_hundo",  "Flee non-100%",         present_encounter);
+    add_check(alert, vc, "block_non_shundo", "Flee non-shiny-100%",   present_encounter);
+
+    add_act(alert, vc, "‹ Back", 1, ^(id a) { reopen_as(vc, present_main); });
+    SEND(vc, S("presentViewController:animated:completion:"), alert, YES, nil);
+    objc_autoreleasePoolPop(p);
+}
+
+// Safety & diagnostics — dry-run, release cap, bag threshold, read-only state.
+static void present_safety(void) {
+    void *p = objc_autoreleasePoolPush();
+    id vc = front_vc();
+    if (!vc) { objc_autoreleasePoolPop(p); return; }
+    id alert = SEND(C("UIAlertController"),
+                    S("alertControllerWithTitle:message:preferredStyle:"),
+                    nsstr("Safety & diagnostics"),
+                    nsstr("Flip Dry run off only after sppro_plus.log confirms keepers are detected correctly."),
+                    1);
+
+    add_check(alert, vc, "dry_run", "Dry run (log, don't release)", present_safety);
+
+    static const int cap_presets[] = { 10, 25, 50, 75, 100 };
+    add_cycle(alert, vc, "bag_clean_max", "Max release per clean (%)",
+              cap_presets, (int)(sizeof cap_presets / sizeof *cap_presets),
+              present_safety);
+
+    static const int thresh_presets[] = { 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000 };
+    add_cycle(alert, vc, "bag_threshold", "Auto-clean at bag size",
+              thresh_presets, (int)(sizeof thresh_presets / sizeof *thresh_presets),
+              present_safety);
+
+    // Read-only state row — tapping is a no-op (just re-presents).
+    char st[160];
+    snprintf(st, sizeof st, "    Bridge: %s", spp_il2cpp_ready() ? "il2cpp ready" : "rpc2 only (il2cpp off)");
+    add_act(alert, vc, st, 0, ^(id a) { reopen_as(vc, present_safety); });
+
+    add_act(alert, vc, "‹ Back", 1, ^(id a) { reopen_as(vc, present_main); });
+    SEND(vc, S("presentViewController:animated:completion:"), alert, YES, nil);
+    objc_autoreleasePoolPop(p);
+}
+
+static void tgt_tap(id self, SEL _c, id sender) { present_main(); }
 
 static void tgt_pan(id self, SEL _c, id gr) {
     void *p = objc_autoreleasePoolPush();
