@@ -757,14 +757,93 @@ static void walk_mons(const uint8_t *d, uint32_t n, int depth) {
 
 // ---- response dispatch -----------------------------------------------------------
 static void ensure_ui(void);
+
+// Template capture gate: accept this envelope as our splice template only if
+// it looks like a real logged-in RequestEnvelope.
+// - size ≥ 500B: the pre-login handshake / /plfe/rpc2 heartbeat envelopes
+//   observed on pogo-0.743 are <200B; real post-login game envelopes carry
+//   auth state + ≥1 request submessage and run 500B..several KB.
+// - has ≥1 length-delimited field (wire=2) at depth 0: eliminates bodies
+//   that are mostly flat scalars (telemetry, acks).
+// - has ≥1 submessage whose first inner field is a varint 1..1000 (looks
+//   like a method id): this is what our splice NEEDS to replace at
+//   gRequestsField; the existence of one proves the field exists at that
+//   number. Without this, we were saving f0×1 f2×1 pre-login envelopes
+//   that have no `requests[]` at all — Clean Bag Now then spliced method 4
+//   into field 4 and the server returned 100B tombstones.
+// Returns the discovered requests-field number (0 if not found).
+static int template_quality(const uint8_t *d, uint32_t n, int *out_req_field) {
+    if (!d || n < 500) return 0;
+    *out_req_field = 0;
+    pb_t b = { d, d + n };
+    uint32_t num, wire, len; const uint8_t *val; uint64_t v;
+    int nested_count = 0;
+    while (pb_field(&b, &num, &wire, &val, &len, &v)) {
+        if (wire != 2 || len < 3) continue;
+        // Peek at the inner first field: method id would be a varint in 1..1000.
+        pb_t sb = { val, val + len };
+        uint32_t n2, w2, l2; const uint8_t *v2; uint64_t u;
+        if (pb_field(&sb, &n2, &w2, &v2, &l2, &u) && w2 == 0 && u > 0 && u < 1000) {
+            // Found a candidate method-id-carrying submessage. Prefer field 4
+            // (the historical RequestEnvelope.requests slot), else remember.
+            if (num == 4) { *out_req_field = 4; return 10; }
+            if (!*out_req_field) *out_req_field = (int)num;
+            nested_count++;
+        }
+    }
+    return nested_count ? 1 : 0;
+}
+
+static void hex_dump(const char *label, const uint8_t *d, uint32_t n) {
+    char buf[200]; int o = 0;
+    unsigned cap = n < 64 ? n : 64;
+    for (unsigned i = 0; i < cap && o < (int)sizeof(buf) - 4; i++)
+        o += snprintf(buf + o, sizeof buf - o, "%02x", d[i]);
+    buf[o] = 0;
+    ipalog("[SP+] %s (%uB%s): %s", label, n, n > 64 ? ", first 64" : "", buf);
+}
+
 static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
     @synchronized (gSyncObj) {
     ensure_ui();
-    // refresh envelope template (session/auth values ride the game's own)
-    if (gTemplate) objc_release(gTemplate);
-    gTemplate = objc_retain(reqBody);
-    if (gRPCURL) objc_release(gRPCURL);
-    gRPCURL = objc_retain(url);
+    const uint8_t *reqD = (const uint8_t *)SEND(reqBody, S("bytes"));
+    uint32_t reqN = (uint32_t)(uintptr_t)SEND(reqBody, S("length"));
+    uint32_t respN = (uint32_t)(uintptr_t)SEND(respBody, S("length"));
+
+    // refresh envelope template only if THIS one is a real-looking game request.
+    // Keep the existing template if the new one is thinner — we want the best
+    // shape we've seen, not the latest.
+    int new_req_field = 0;
+    int quality = template_quality(reqD, reqN, &new_req_field);
+    uint32_t cur_len = gTemplate ? (uint32_t)(uintptr_t)SEND(gTemplate, S("length")) : 0;
+    if (quality && (!gTemplate || reqN > cur_len)) {
+        if (gTemplate) objc_release(gTemplate);
+        gTemplate = objc_retain(reqBody);
+        if (gRPCURL) objc_release(gRPCURL);
+        gRPCURL = objc_retain(url);
+        if (new_req_field) gRequestsField = new_req_field;
+        ipalog("[SP+] template captured: %uB url=%s requests_field=%d quality=%d",
+               reqN, SEND(url, S("UTF8String")), gRequestsField, quality);
+        hex_dump("template head", reqD, reqN);
+    } else if (!quality) {
+        static int logged_thin;
+        if (!logged_thin && reqN > 0) {
+            logged_thin = 1;
+            ipalog("[SP+] template REJECTED (thin/pre-login): %uB url=%s — "
+                   "waiting for a real game envelope. Open your bag in-game, "
+                   "move around on the map, or catch a pokemon.",
+                   reqN, SEND(url, S("UTF8String")));
+            hex_dump("thin template", reqD, reqN);
+        }
+    }
+
+    // If we still have no template, we can't walk this response either (no
+    // methods[] to correlate against). Bail — but log so the user sees progress.
+    if (!gTemplate) {
+        ipalog("[SP+] handle_response: no template yet, response=%uB url=%s",
+               respN, SEND(url, S("UTF8String")));
+        return;
+    }
 
     // collect request method ids in order (each request blob = {type varint, msg bytes})
     // Niantic's RequestEnvelope has used field 4 for the repeated `requests`
@@ -781,8 +860,8 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
             gRequestsField = override;
         }
         // Dump the top-level field layout for diagnosis.
-        const uint8_t *dd = (const uint8_t *)SEND(reqBody, S("bytes"));
-        pb_t bb = { dd, dd + (size_t)(uintptr_t)SEND(reqBody, S("length")) };
+        const uint8_t *dd = (const uint8_t *)SEND(gTemplate, S("bytes"));
+        pb_t bb = { dd, dd + (size_t)(uintptr_t)SEND(gTemplate, S("length")) };
         uint32_t num, wire, len; const uint8_t *val; uint64_t v;
         char layout[400]; int lo = 0;
         int field_count[64] = {0};
@@ -809,19 +888,24 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
     }
     gSeq++;
     static int logged_methods;
-    if (!logged_methods) {
+    if (!logged_methods && nM > 0) {
+        // Only log once we've actually seen methods. v24's previous emit fired
+        // with nM==0 and read uninitialized stack memory into the %s — hence
+        // the confusing "methods: f0×1 f2×1" lines mirroring the layout log.
         logged_methods = 1;
-        char line[600]; int o = 0;
-        for (int i = 0; i < nM && o < 580; i++) o += snprintf(line + o, sizeof line - o, "%d ", methods[i]);
+        char line[600] = {0}; int o = 0;
+        for (int i = 0; i < nM && o < 580; i++)
+            o += snprintf(line + o, sizeof line - o, "%d ", methods[i]);
         ipalog("[SP+] methods: %s", line);
     }
 
     // returns = field 100 repeated bytes, positionally matching requests
-    int idx = 0;
+    int idx = 0, returns_seen = 0;
     const uint8_t *rd = (const uint8_t *)SEND(respBody, S("bytes"));
     pb_t rb = { rd, rd + (size_t)(uintptr_t)SEND(respBody, S("length")) };
     while (pb_field(&rb, &num, &wire, &val, &len, &v)) {
         if (num != 100 || wire != 2) continue;
+        returns_seen++;
         if (idx >= nM) break;
         uint32_t m = methods[idx++] & 0xffff;
         if (m == M_CATCH && cfg_i("release_on_catch")) {
@@ -943,6 +1027,27 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
                 gMode = 0;
             }
             gMode = 3; walk_mons(val, len, 0); gMode = 0;
+        }
+    }
+    // Zero returns at field 100 → the response is not a RequestEnvelopeReturn
+    // at all. Normally a 400/401 or a thin error envelope. Common causes:
+    //   - spliced a method into a template whose auth/session is stale
+    //   - gRequestsField doesn't match this build's RequestEnvelope schema
+    //   - the URL is not actually /plfe/rpc2 (e.g. captured from a
+    //     version-ping or an auth-telemetry endpoint)
+    // Log the first 32 bytes so the user can see WHAT came back.
+    if (!returns_seen) {
+        static int logged_empty;
+        if (!logged_empty) {
+            logged_empty = 1;
+            ipalog("[SP+] response has NO field-100 returns "
+                   "(methods=%d, respBody=%uB, url=%s) — "
+                   "template or requests_field likely wrong.",
+                   nM, (unsigned)(uintptr_t)SEND(respBody, S("length")),
+                   SEND(url, S("UTF8String")));
+            hex_dump("response head",
+                     (const uint8_t *)SEND(respBody, S("bytes")),
+                     (uint32_t)(uintptr_t)SEND(respBody, S("length")));
         }
     }
     // one batched METHOD_RELEASE_POKEMON for bag cleanup (repeated pokemon_ids)
@@ -1146,16 +1251,24 @@ static void present_main(void) {
     id vc = front_vc();
     if (!vc) { ipalog("[SP+] no root vc — sheet skipped"); objc_autoreleasePoolPop(p); return; }
 
-    // Dashboard: three short stacked lines, each a self-contained status.
+    // Dashboard: four short stacked lines, each a self-contained status.
     // Safety state is the FIRST thing a user reads.
     char keeps[96] = {0}; keep_summary(keeps, sizeof keeps);
     char msg[512];
     const char *dry   = cfg_i("dry_run") ? "DRY RUN — releases only logged" : "LIVE — releases will post";
-    const char *brid  = spp_il2cpp_ready() ? "il2cpp ready" : "rpc2 only";
+    char tmpl[96];
+    if (!gTemplate) {
+        snprintf(tmpl, sizeof tmpl,
+                 "rpc2: not captured yet — move around the map or open the bag in-game");
+    } else {
+        uint32_t bytes = (uint32_t)(uintptr_t)SEND(gTemplate, S("length"));
+        snprintf(tmpl, sizeof tmpl, "rpc2: captured (%uB, requests at field %d)",
+                 bytes, gRequestsField);
+    }
     snprintf(msg, sizeof msg,
-             "%s\nKeeps: %s\nBag clean at %d  ·  min IV %d%%  ·  %s%s",
-             dry, keeps, cfg_i("bag_threshold"), cfg_i("iv_pct_min"), brid,
-             gCleanOnce ? "  ·  clean armed" : "");
+             "%s\nKeeps: %s\nBag clean at %d  ·  min IV %d%%%s\n%s",
+             dry, keeps, cfg_i("bag_threshold"), cfg_i("iv_pct_min"),
+             gCleanOnce ? "  ·  clean armed" : "", tmpl);
 
     id alert = SEND(C("UIAlertController"),
                     S("alertControllerWithTitle:message:preferredStyle:"),

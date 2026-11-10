@@ -816,3 +816,107 @@ Once Phase 4 lands, bag-clean, auto-catch, berry-feeding, auto-spin
 and bulk-evolve all become 5-line functions that just resolve+invoke
 the matching method (`MethodReleasePokemon`, `MethodUseItemEncounter`,
 `MethodFortSearch`, etc — same names SpooferPro uses).
+
+## rpc2 template capture — gotchas and preconditions (v25)
+
+v24 on-device test (`debug/crashes/.../v24-sppro_plus.log`) showed the
+manual bag-clean splice succeeded — three HOLO_INV requests went out,
+three 100-byte responses came back — but nothing happened to the bag.
+Root-cause audit found the captured envelope template was a pre-login
+handshake / heartbeat envelope, NOT a logged-in `RequestEnvelope`.
+
+### Symptom pattern
+
+```
+475  [SP+] rpc2 envelope layout: f0×1 f2×1
+477  [SP+] methods: f0×1 f2×1          ← uninitialized stack memory (v24 bug)
+...
+545  [SP+] manual bag clean: splicing HOLO_INV seq=10
+546  [SP+] spliced response 100B — dispatching to handle_response
+```
+
+Two red flags:
+
+1. **`f0×1 f2×1` layout.** A real `RequestEnvelope` on pogo-0.743 has
+   fields 1 (status/sequence), 3 (lat), 4 (lon), 6 (requests[]),
+   10+ (platform_request/auth). A `f0×1 f2×1` envelope is either
+   something before login or a response to an auth token refresh.
+   Field 0 is invalid proto — our `pb_field` parser surfaces it when
+   the first byte is `0x02` (length-delimited field with field number
+   0, i.e. garbage-shaped data) or when the data is not protobuf.
+
+2. **100-byte response.** A real `HOLO_INVENTORY` response is tens of
+   KB (even for a thin bag — the auth/status/returns envelope alone
+   is a few hundred bytes). 100 bytes is a server-side error tombstone.
+
+### What v25 fixes
+
+- `template_quality()` gate — reject a candidate template unless:
+  - size ≥ 500 bytes
+  - at least one submessage with a 1..1000 varint as its first inner
+    field (looks like a method id)
+  Preserves the biggest known-good template across the session;
+  thinner envelopes don't overwrite.
+
+- Auto-detect the `requests` field number. If the first method-id-
+  carrying submessage lives at field 4 (historical default), use 4.
+  Otherwise use whichever field number holds the first candidate
+  submessage. User can still override via `requests_field` in
+  `sppro_plus.json`.
+
+- `hex_dump()` first 64 bytes of each captured template so a wrong
+  capture is obvious in the log.
+
+- Bug fix: the `[SP+] methods:` line was reading uninitialized stack
+  memory when `nM==0`, producing the confusing mirror of the layout
+  log. Now only emits when methods were actually extracted, and
+  initializes the buffer.
+
+- Response-side diagnostic: if the response has zero field-100
+  returns, log that explicitly with the response size and first
+  32 bytes — much clearer than a silent "dispatching" message.
+
+- Dashboard row: the main pane now shows `rpc2: captured (NNNN B,
+  requests at field 4)` or `rpc2: not captured yet — move around
+  the map or open the bag in-game`. Status at a glance.
+
+### Preconditions for a successful Clean Bag Now
+
+Before tapping:
+
+1. Sign in through the normal PoGo flow.
+2. Reach the map (sees your avatar).
+3. Walk/move for a few seconds, or open the in-game pokemon storage
+   screen, so the game sends a real `GET_HOLOHOLO_INVENTORY=4` or
+   `GET_MAP_OBJECTS=106` request.
+4. Check the SP+ sheet status: it must read `rpc2: captured (...)`.
+5. Only then does Clean Bag Now have a valid envelope to splice.
+
+### Why we can't shortcut this
+
+The template carries the game session auth tokens, encoded
+sequence/time offsets, and the per-session platform_request chain
+Niantic's anti-cheat validates. Without those, any envelope we POST
+is rejected server-side as unauthenticated — even if we solve every
+other schema puzzle.
+
+### Known open questions
+
+- Does `pgorelease.nianticlabs.com/plfe/rpc2` still carry the real
+  rpc2 traffic on pogo-0.743, or has it moved to a newer path? v24
+  log shows only `/plfe/version` task completions on that host — but
+  our hook_dt wrap did fire a template capture, suggesting SOME
+  `/plfe/rpc2` request completed via the completion-handler path
+  (hook_dt), just not visibly in the `niantic task done:` log
+  (which only fires from the delegate-based `hook_done`). Adding a
+  log line inside the hook_dt wrap would resolve this.
+
+- Are other PoGo hosts hosting rpc2-shaped traffic? The v24 log
+  shows these Niantic hosts flowing: `identity-public`, `identity`,
+  `platform-account-assets`, `pgorelease`, `maptiles`,
+  `prodholoholo-public-images`. Of these, only `pgorelease` has
+  been a historical rpc2 host. If PoGo moved to e.g. `platform-game`
+  or a new subdomain, our URL filter `containsString:@"/plfe/rpc2"`
+  misses it entirely. TODO: widen to any `pgorelease.nianticlabs.com`
+  POST ≥500B if the v25 template-quality gate still doesn't catch
+  a good envelope.
