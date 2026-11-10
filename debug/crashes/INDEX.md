@@ -21,6 +21,7 @@ through launch. Base for all v11+ builds: `unlocked-v4strip.ipa`
 | v20 | v4strip | ON | pc-match unconditional, depth cap 8→DFL, pthread_create watch, `N2 watch started` | **furthest yet**: watch alive, `restores=0`, il2cpp READY, catalog ok, found `.PokemonBagImpl` | `SIGKILL` CODESIGNING Invalid Page, pc=`0x12ed34e00` (anonymous page, gap above UnityFramework) | `spp_il2cpp_get_pokemon_bag` → Zenject `DiContainer.Resolve` invoke → deep indirect call into non-executable/unsigned runtime page |
 | v21 | v4strip | ON | launch probe = metadata-only (bag resolve deferred to feature use) | survived launch probe, il2cpp READY — then watchdog | `0x8BADF00D` 19.1s; stack: Unity+0x7196310→sigtramp→**SPPlus+0x5f70 (our n2_trap)**→Sentry→mutex | our handler RAN but chained to Sentry because **pc ≠ gN2Api** — the brk landed at a different offset (probably +4); watch only polled word 0 |
 | v22 | v4strip | ON | handler claims ANY brk insn: in-window→restore captured orig, elsewhere→pc+=4 skip; watch polls 8 words; signal-safe trap pc/insn logging | testing | — | — |
+| v23 | v4strip | ON | + Claude commit 242b4d2: "Clean Bag Now (SpooferPro)" button calls `+[gu5nyo3pkexjug7to2 sharedCleaner]` → `-PerformPokemonCleanupManually` — SpooferPro's own ObjC cleaner, bypasses the Pro gate (which lives only in the UI button at 0xa4a934); zero il2cpp/Zenject exposure | testing | — | — |
 
 ## The `_GetN2Api` poison (summary for remote analysis)
 
