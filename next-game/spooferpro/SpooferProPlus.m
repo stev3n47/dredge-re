@@ -1200,6 +1200,12 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
     return result;
 }
 
+// Compile-time bisect for the FBSDK-adjacent crash — the user can't edit
+// sppro_plus.json on-device, so variant builds bake the disable flags in.
+#ifndef SPP_BISECT_NONET
+#define SPP_BISECT_NONET 1
+#endif
+
 // ---- delegate capture (UnityWebRequest path) ---------------------------------------
 // UnityWebRequest sessions carry a delegate; response bodies only arrive via
 // URLSession:dataTask:didReceiveData: / task:didCompleteWithError:. We swizzle
@@ -1263,7 +1269,7 @@ static void hook_done(id self, SEL _cmd, id session, id task, id err) {
 }
 
 static void swizzle_delegate(id delegate) {
-    if (!delegate || cfg_i("disable_delegate_hooks")) return;
+    if (!delegate || cfg_i("disable_delegate_hooks") || SPP_BISECT_NONET) return;
     Class dc = object_getClass(delegate);
     @synchronized ((id)gSyncObj) {
     for (int i = 0; i < gNSwz; i++) if (gSwz[i] == dc) return;
@@ -1343,7 +1349,7 @@ __attribute__((constructor)) static void spplus_init(void) {
     // task selectors, so swizzling the abstract parent alone is a no-op
     // for them. Walk the loaded class list and install on every subclass
     // that implements the selectors.
-    int en_task = !cfg_i("disable_task_hooks");
+    int en_task = !cfg_i("disable_task_hooks") && !SPP_BISECT_NONET;
     SEL s = S("dataTaskWithRequest:completionHandler:");
     SEL s2 = S("dataTaskWithRequest:");
     Class root = C("NSURLSession");
@@ -1403,7 +1409,7 @@ __attribute__((constructor)) static void spplus_init(void) {
 
     SEL sw = S("sessionWithConfiguration:delegate:delegateQueue:");
     Method mw = class_getInstanceMethod(object_getClass((id)C("NSURLSession")), sw);
-    if (mw && !cfg_i("disable_factory_hook")) {
+    if (mw && !cfg_i("disable_factory_hook") && !SPP_BISECT_NONET) {
         orig_swc = (SessImp)method_setImplementation(mw, (IMP)hook_swc);
         ipalog("[SP+] hooked +%s", sel_getName(sw));
     } else {
