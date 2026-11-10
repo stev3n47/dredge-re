@@ -515,22 +515,50 @@ Mirrors iPoGo's and SpooferPro's design. Progress:
   also shows `il2cpp READY` / `off` based on
   `spp_il2cpp_ready()`.
 
-- **Phase 4 — Zenject instance resolution.** To actually call
-  `IPokemonBag.ReleasePokemon`, we need a live instance pointer. The
-  Zenject chain on PoGo 0.435.1 (per POGO-FINDINGS) is
-  `ProjectContext._instance → Container → Resolve<IPokemonBag>()`,
-  with field offsets at +0x20 (instance) and +0x60 (container). These
-  offsets are per-version and will almost certainly have shifted on
-  0.743; they need to be re-dumped.
+- **Phase 4 ✅ (needs on-device verification).** Full invocation path
+  landed. The resolver walks four strategies, logging each step so
+  class-name mismatches on a new build surface in `sppro_plus.log`
+  instead of silently failing:
 
-  Options for next turn:
-  - Dump the field offsets via Il2CppInspectorRedux (needed anyway
-    for v39 metadata; classic Il2CppDumper 6.7.46 caps at v31).
-  - Or: cache `this` from a frequently-called method on
-    PokemonBagImpl by swizzling its first few bytes to jump through
-    our thunk, record the arg, chain to the original. Cheaper than
-    a full metadata dump but Phase 4-level complexity in its own
-    right.
+    A. `PokemonBagImpl.Instance / _instance / s_Instance` static field
+    B. `PokemonBagImpl.get_Instance()` static property
+    C. Zenject: `ProjectContext._instance` →
+       `get_Container()` → `Resolve(typeof(IPokemonBag))` — no
+       field-offset knowledge needed; we use the property getter and
+       the non-generic `Resolve(Type)` overload.
+    D. `GameManager.Instance` → `get_PokemonBag()` /`get_Bag()` /
+       `get_IPokemonBag()`
+
+  If every strategy misses, the resolver dumps the first 32 methods +
+  fields of `PokemonBagImpl` to the log (via a new
+  `spp_il2cpp_dump_class_members` diagnostic) so the user can tell us
+  the right accessor name without more guesswork.
+
+  The actual release call:
+  1. Resolve `PokemonProto` class via `spp_il2cpp_find_class`.
+  2. `il2cpp_object_new(pokemonProtoClass)`.
+  3. Set the `PokemonId` field via `set_PokemonId(ulong)` property
+     setter (safer than field-offset writes; falls back to dumping
+     class members on miss).
+  4. `il2cpp_runtime_invoke(releaseMethod, bagInstance, {proto})`.
+
+  Also added: `il2cpp_method_get_name`, `_param_count`,
+  `class_get_methods`, `class_get_fields`, `field_get_name`,
+  `field_static_get_value`, `type_get_object` — all 40 entry points
+  in the generated offset header now.
+
+  The release path is wired through `release_mode="il2cpp"` in
+  `sppro_plus.json`. Default stays `"rpc2"` so a broken resolver
+  can't hurt an existing user; opt-in once the log confirms the
+  probe resolves a `(class, method, instance)` triple.
+
+Next: once on-device logs show which strategy wins and whether
+`set_PokemonId` exists under that exact name, tighten the resolver
+(cache the first-successful path) and wire the rest of the
+automation (bag-clean, auto-catch, berry-feed, auto-spin) onto the
+same bridge. Each becomes ~10 lines (same as iPoGo's
+MethodReleasePokemon / MethodFortSearch / MethodUseItemEncounter /
+MethodUseItemFlee bindings).
 
 Once Phase 4 lands, bag-clean, auto-catch, berry-feeding, auto-spin
 and bulk-evolve all become 5-line functions that just resolve+invoke

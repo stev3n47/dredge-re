@@ -64,7 +64,16 @@ extern Il2CppString        *(*spp_il2cpp_string_new)(const char *);
 extern Il2CppArray         *(*spp_il2cpp_array_new)(Il2CppClass *elem, uintptr_t len);
 extern Il2CppClass         *(*spp_il2cpp_class_from_type)(Il2CppType *);
 extern Il2CppType          *(*spp_il2cpp_class_get_type)(Il2CppClass *);
+extern Il2CppObject        *(*spp_il2cpp_type_get_object)(const Il2CppType *);
 extern uint32_t             (*spp_il2cpp_gchandle_new)(Il2CppObject *, int pinned);
+
+// Introspection — Phase 4 additions
+extern const char          *(*spp_il2cpp_method_get_name)(const MethodInfo *);
+extern uint32_t             (*spp_il2cpp_method_get_param_count)(const MethodInfo *);
+extern const MethodInfo    *(*spp_il2cpp_class_get_methods)(Il2CppClass *, void **iter);
+extern void                *(*spp_il2cpp_class_get_fields)(Il2CppClass *, void **iter);
+extern const char          *(*spp_il2cpp_field_get_name)(void *field);
+extern void                 (*spp_il2cpp_field_static_get_value)(void *field, void *out);
 
 // High-level helpers (cached by name so the walk cost is paid once).
 //
@@ -79,15 +88,36 @@ const MethodInfo *spp_il2cpp_find_method(Il2CppClass *klass, const char *name, i
 // Only runs the first time it's called.
 void              spp_il2cpp_log_classes_once(void);
 
-// Diagnostic — look up IPokemonBag / PokemonBagImpl + ReleasePokemon and
-// log what we found. Does NOT invoke anything (no `this` instance yet).
-// Returns 0 if class+method resolved successfully, -N otherwise.
+// Static-field read helper. Returns the field's object value (or NULL on
+// failure). `out` optionally receives the field pointer for subsequent
+// reads/writes.
+Il2CppObject     *spp_il2cpp_static_field_object(Il2CppClass *klass,
+                                                 const char *field_name);
+
+// Typed-arity invokers. Wrap il2cpp_runtime_invoke with the right args[]
+// array. `self` is NULL for static methods. Returns the boxed result or
+// NULL (caller unboxes if needed).
+Il2CppObject     *spp_il2cpp_invoke_0(const MethodInfo *m, void *self);
+Il2CppObject     *spp_il2cpp_invoke_1(const MethodInfo *m, void *self, void *a0);
+Il2CppObject     *spp_il2cpp_invoke_2(const MethodInfo *m, void *self, void *a0, void *a1);
+
+// Diagnostic: dump the first `limit` methods and fields of a class to the
+// log. Use to discover the right member name on a new PoGo build when a
+// resolver step fails.
+void              spp_il2cpp_dump_class_members(Il2CppClass *klass, int limit);
+
+// Try to resolve a live IPokemonBag instance via four strategies (see
+// implementation). Caches the result. Returns NULL if none worked and
+// logs which strategies failed at which step.
+Il2CppObject     *spp_il2cpp_get_pokemon_bag(void);
+
+// Probe step — resolves the class+method+instance and logs everything it
+// finds. Returns 0 if a callable (klass, method, bag_instance) triple
+// landed; non-zero otherwise.
 int               spp_il2cpp_probe_release_pokemon(void);
 
-// EXPERIMENTAL — try to release a pokemon via il2cpp. Currently returns
-// -1 "instance not resolved" until the Zenject chain is implemented;
-// kept so SpooferProPlus can switch to it via release_mode="il2cpp" once
-// the resolution is done, without touching callers.
+// Invoke IPokemonBag.ReleasePokemon via il2cpp. Returns 0 on success,
+// non-zero if any resolution step failed (logged).
 int               spp_il2cpp_release_pokemon(uint64_t uid);
 
 #ifdef __cplusplus

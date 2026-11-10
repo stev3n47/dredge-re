@@ -117,7 +117,9 @@ static NSString *nsstr(const char *c) {
 // long play session (ipalog hit count is dominated by HOLO_INV mon dumps).
 #define IPA_LOG_MAX (1 * 1024 * 1024)
 static NSString *gLogPath, *gLogPath1;
-static void ipalog(const char *fmt, ...) {
+// External linkage so il2cpp_bridge.c (a separate translation unit) can
+// log through the same rotating file.
+void ipalog(const char *fmt, ...) {
     char buf[2048];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
     void *p = objc_autoreleasePoolPush();

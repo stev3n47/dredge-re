@@ -66,6 +66,18 @@ WANTED = [
     'il2cpp_class_get_type',
     'il2cpp_gchandle_new',
     'il2cpp_method_get_param',
+    # Phase 4 additions — introspection + field lookup
+    'il2cpp_method_get_name',
+    'il2cpp_method_get_param_name',
+    'il2cpp_method_get_param_count',
+    'il2cpp_method_get_return_type',
+    'il2cpp_class_get_methods',
+    'il2cpp_class_get_fields',
+    'il2cpp_field_get_name',
+    'il2cpp_field_get_type',
+    'il2cpp_field_get_flags',
+    'il2cpp_class_get_type_token',
+    'il2cpp_class_num_fields',
 ]
 
 MH_MAGIC_64 = 0xFEEDFACF
