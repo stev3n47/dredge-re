@@ -1060,6 +1060,36 @@ static void present_sheet(void) {
         ipalog("[SP+] manual bag clean armed");
         SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
     });
+    // SpooferPro's own bag cleaner — plain ObjC, no il2cpp bridge, no Zenject.
+    // Audited 2026-11-10:
+    //   Class gu5nyo3pkexjug7to2   (classref @0x19ad6a0 in libSpooferPro v4-strip)
+    //   + [gu5nyo3pkexjug7to2 sharedCleaner]            (singleton accessor)
+    //   - [sharedCleaner PerformPokemonCleanupManually]  (does the work)
+    // The singleton is already alive by the time our sheet opens, so there is
+    // no init-time crash exposure. SpooferPro's own tested code then calls
+    // the game's C# IPokemonBag.ReleasePokemon via its own il2cpp path —
+    // same code path as the Pro-gated UI button, just without the gate.
+    add_act(alert, vc, "Clean Bag Now (SpooferPro)", 0, ^(id a) {
+        Class cls = (Class)objc_getClass("gu5nyo3pkexjug7to2");
+        if (!cls) {
+            ipalog("[SP+] SpooferPro cleaner: class gu5nyo3pkexjug7to2 not found "
+                   "(libSpooferPro renamed? audit classref 0x19ad6a0)");
+            SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
+            return;
+        }
+        id cleaner = SEND((id)cls, S("sharedCleaner"));
+        if (!cleaner) {
+            ipalog("[SP+] SpooferPro cleaner: +sharedCleaner returned nil "
+                   "(singleton not initialized yet? try after login)");
+            SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
+            return;
+        }
+        ipalog("[SP+] SpooferPro cleaner: invoking PerformPokemonCleanupManually on %p",
+               cleaner);
+        SEND(cleaner, S("PerformPokemonCleanupManually"));
+        ipalog("[SP+] SpooferPro cleaner: dispatch returned (async cleanup is in flight)");
+        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
+    });
     add_act(alert, vc, "Done", 1, nil);
     SEND(vc, S("presentViewController:animated:completion:"), alert, YES, nil);
     objc_autoreleasePoolPop(p);

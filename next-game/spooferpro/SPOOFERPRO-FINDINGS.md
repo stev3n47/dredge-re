@@ -235,6 +235,73 @@ render time. The quickest way to find it on-device:
    readers. Any patch to their enclosing functions would be
    diagnostic-only.
 
+## Bag cleaner — exposed as plain ObjC (audited 2026-11-10)
+
+After 20+ builds fighting `_GetN2Api` poison / Zenject Resolve crashes /
+anti-tamper for SPPlus to do il2cpp invocations itself, the audit of
+`libSpooferPro.dylib` revealed the bag cleaner is already a plain ObjC
+class — no il2cpp needed on our side, we just call its selectors.
+
+Full method surface:
+
+```
+Class: gu5nyo3pkexjug7to2       (obfuscated name; class_t @ 0x1a012c0,
+                                 classref slot @ 0x19ad6a0)
+Methods @ 0x194c948 (method_list, 9 entries):
+  imp @ 0x7695c8  init
+  imp @ 0x7698b0  PerformPokemonCleanupTask:completion:
+  imp @ 0x76e728  TransferPokemon:
+  imp @ 0x76fa2c  releasePokemon:
+  imp @ 0x770f34  PerformPokemonCleanupManually
+  imp @ 0x77379c  isCleaning
+  imp @ 0x7737a4  setIsCleaning:
+  imp @ 0x7737ac  isManualCleaning
+  imp @ 0x7737b4  setIsManualCleaning:
+```
+
+Class-method accessor: **`+[gu5nyo3pkexjug7to2 sharedCleaner]`** (selref
+@0x199ede0 → selname `sharedCleaner` @0x15e5bda). The singleton is
+created during SpooferPro's own init, so by the time our `SP+` sheet is
+usable it's already live — our call retrieves it, does not create it.
+
+Related selectors clustered in __objc_selrefs @0x199edc0..0x199edf8:
+
+```
+[0x199edc0] = 'pokemonProtoCpp'
+[0x199edc8] = 'fb8cxluyr7o855q:'          (obfuscated — likely a per-mon filter query)
+[0x199edd0] = 'setPokemon:'
+[0x199edd8] = 'showCellActions:'
+[0x199ede0] = 'sharedCleaner'              ← accessor
+[0x199ede8] = 'releasePokemon:'            ← per-pokemon release
+[0x199edf0] = 'favouriteMon:'              ← favorite marker
+[0x199edf8] = 'cwd9iyfz8wl9eqjf:9o217u:'   (obfuscated — likely a bulk filter)
+```
+
+`PerformPokemonCleanupManually` has exactly ONE BL caller across the
+whole binary (at 0xa4a934, inside the Pro-gated UI button handler).
+Calling the selector from outside that call site bypasses the gate —
+no license check is between `sharedCleaner` and the method, only in
+the UI button-enable logic.
+
+Three-line unlock from inside SP+:
+
+```objc
+Class cls = objc_getClass("gu5nyo3pkexjug7to2");
+id cleaner = [cls sharedCleaner];
+[cleaner PerformPokemonCleanupManually];
+```
+
+Zero il2cpp, zero Zenject, zero crash-class exposure. The cleaner's
+implementation at 0x770f34 is 100+ instructions that load from the
+global `*(0x16447C8)` — SpooferPro's own invoke-table pointer. The
+same code path the Pro UI uses, just without the Pro gate.
+
+**Per-pokemon release** uses `-releasePokemon:` the same way (SEND the
+pokemon-id or PokemonProto as the arg; signature TBD at first call).
+This means `release_on_catch` + keep-rules can be wired to SpooferPro's
+cleaner instead of our rpc2 splice — Niantic's anti-cheat sees
+SpooferPro's own envelopes (which it already accepts), not ours.
+
 ## libSpooferPro anti-tamper (crashes the app when SPPlus is injected)
 
 **Symptom:** game crashes on launch when a build with
