@@ -1152,6 +1152,9 @@ static void log_host(id request) {
 extern void *_Block_copy(const void *);
 typedef void (^handler_t)(NSData *, NSURLResponse *, NSError *);
 
+// NO private autorelease pools in hook paths — the hooked IMP's return value
+// (task/session) is +0 autoreleased into the topmost pool. Wrapping the call
+// in our own pool drains it early and we hand the caller a dangling pointer.
 static id hook_dt2(id self, SEL _cmd, id request) {
     log_host(request);
     DataTaskImp2 f = pick_dt2(object_getClass(self));
@@ -1165,7 +1168,6 @@ static id hook_dt2(id self, SEL _cmd, id request) {
 }
 
 static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
-    void *p = objc_autoreleasePoolPush();
     log_host(request);
     id result = nil;
     id url = SEND(request, S("URL"));
@@ -1178,7 +1180,6 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
         static int logged_null;
         if (!logged_null) { logged_null = 1;
             ipalog("[SP+] hook_dt NULL forward cls=%s", class_getName(object_getClass(self))); }
-        objc_autoreleasePoolPop(p);
         return nil;
     }
     if (!ours && u && SEND(u, S("containsString:"), nsstr("/plfe/rpc2")) &&
@@ -1187,16 +1188,13 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
         NSString *capturedURL = u;
         handler_t orig = (handler_t)completionHandler;
         handler_t wrapped = ^(NSData *d, NSURLResponse *r, NSError *e) {
-            void *q = objc_autoreleasePoolPush();
             if (d) handle_response(captured, d, capturedURL);
-            objc_autoreleasePoolPop(q);
             if (orig) orig(d, r, e);
         };
         result = forward(self, _cmd, request, _Block_copy(wrapped));
     } else {
         result = forward(self, _cmd, request, completionHandler);
     }
-    objc_autoreleasePoolPop(p);
     return result;
 }
 
@@ -1213,7 +1211,6 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
 typedef void (*DelImp)(id, SEL, id, id, id);
 
 static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
-    void *p = objc_autoreleasePoolPush();
     static int logged_recv;
     if (!logged_recv) {
         logged_recv = 1;
@@ -1230,11 +1227,9 @@ static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
     }
     IMP f = find_swz(object_getClass(self), gSwzData);
     if (f) ((DelImp)f)(self, _cmd, session, task, data);
-    objc_autoreleasePoolPop(p);
 }
 
 static void hook_done(id self, SEL _cmd, id session, id task, id err) {
-    void *p = objc_autoreleasePoolPush();
     static int logged_done;
     if (!logged_done) {
         logged_done = 1;
@@ -1265,7 +1260,6 @@ static void hook_done(id self, SEL _cmd, id session, id task, id err) {
     }
     IMP f = find_swz(object_getClass(self), gSwzDone);
     if (f) ((DelImp)f)(self, _cmd, session, task, err);
-    objc_autoreleasePoolPop(p);
 }
 
 static void swizzle_delegate(id delegate) {
@@ -1325,13 +1319,11 @@ static id hook_swc(id self, SEL _cmd, id config, id delegate, id queue) {
         return nil;
     }
     id session = orig_swc(self, _cmd, config, delegate, queue);
-    void *p = objc_autoreleasePoolPush();
     if (delegate)
         ipalog("[SP+] session w/ delegate %s", class_getName(object_getClass(delegate)));
     else
         ipalog("[SP+] session w/o delegate");
     swizzle_delegate(delegate);
-    objc_autoreleasePoolPop(p);
     return session;
 }
 
