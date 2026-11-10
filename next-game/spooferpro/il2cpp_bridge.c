@@ -509,14 +509,12 @@ int spp_il2cpp_probe_release_pokemon(void) {
     }
     ipalog("[SP+] il2cpp probe: ReleasePokemon(PokemonProto) resolved");
 
-    // Try to resolve an instance so the user sees the resolution flow.
-    Il2CppObject *bag = spp_il2cpp_get_pokemon_bag();
-    if (!bag) {
-        ipalog("[SP+] il2cpp probe: no live IPokemonBag instance yet "
-               "(may need to be post-login — resolution retries on each call)");
-        return -3;
-    }
-    ipalog("[SP+] il2cpp probe: IPokemonBag instance %p", bag);
+    // Instance resolution is DEFERRED to first feature use. Eager
+    // DiContainer.Resolve() during launch runs managed code inside an
+    // initializing Zenject container — on this build that call chain
+    // reaches a code-signature-invalid page and the kernel kills us.
+    // The bag can't exist pre-login anyway, so nothing is lost.
+    ipalog("[SP+] il2cpp probe: bag instance deferred (resolve on feature use)");
     return 0;
 }
 

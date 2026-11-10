@@ -1,0 +1,86 @@
+[SP+] init: cfg ok
+[SP+] init: objs ok
+[SP+] N2 watch started
+Session (dt=1 dt2=1 en=1)
+[SP+] hooked NSURLSession subclasses (dt=0 dt2=0)
+[SP+] hooked +sessionWithConfiguration:delegate:delegateQueue:
+[SP+] init: done
+[SP+] N2 guard armed on _GetN2Api=0x108f1b9e4 insn=a9be4ff4
+[SP+] session w/o delegate
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] delegate AFHTTPSessionManager swizzled (data=1 done=1)
+[SP+] session w/ delegate SocketIO.SocketEngine
+[SP+] delegate SocketIO.SocketEngine swizzled (data=0 done=0)
+[SP+] session w/ delegate AFURLSessionManager
+[SP+] delegate AFURLSessionManager swizzled (data=1 done=1)
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] req host: static.spooferpro.com
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate FBSDKGraphRequestConnection
+[SP+] delegate FBSDKGraphRequestConnection swizzled (data=0 done=0)
+[SP+] req host: ep2.facebook.com
+[SP+] session w/o delegate
+[SP+] session w/o delegate
+[SP+] delegate didComplete hit on AFHTTPSessionManager
+[SP+] session w/ delegate NIATrustedCertificatesAuthenticator
+[SP+] delegate NIATrustedCertificatesAuthenticator swizzled (data=0 done=0)
+[SP+] session w/ delegate UnityWebRequestDelegate
+[SP+] delegate UnityWebRequestDelegate swizzled (data=1 done=1)
+[SP+] req host: asset-cdn-rel.nianticstatic.com
+[SP+] delegate didReceiveData hit on UnityWebRequestDelegate
+[SP+] N2 watch alive: entry=a9be4ff4 restores=0
+[SP+] N2 watch alive: entry=a9be4ff4 restores=0
+[SP+] N2 watch alive: entry=a9be4ff4 restores=0
+[SP+] session w/ delegate FBSDKGraphRequestConnection
+[SP+] session w/ delegate FBSDKGraphRequestConnection
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] session w/ delegate AppsFlyerHTTPClient
+[SP+] delegate AppsFlyerHTTPClient swizzled (data=0 done=0)
+[SP+] session w/ delegate FBSDKGraphRequestConnection
+[SP+] session w/ delegate AFHTTPSessionManager
+[SP+] il2cpp bridge READY (tag=pogo-0.743)
+[SP+] il2cpp catalog: 223 assemblies
+[SP+]   image holo-game.dll: 15316 classes
+[SP+]   image holo-protos.dll: 7198 classes
+[SP+]   image mscorlib.dll: 1752 classes
+[SP+]   image UnityEngine.UIElementsModule.dll: 1654 classes
+[SP+]   image UnityEngine.CoreModule.dll: 1071 classes
+[SP+]   image Unity.RenderPipelines.Core.Runtime.dll: 770 classes
+[SP+]   image Unity.InputSystem.dll: 640 classes
+[SP+]   image System.Xml.dll: 670 classes
+[SP+]   image System.dll: 974 classes
+[SP+]   image Unity.RenderPipelines.Universal.Runtime.dll: 587 classes
+[SP+]   image holo-game-vnext-battle.dll: 620 classes
+[SP+]   image System.Data.dll: 238 classes
+[SP+]   image Sentry.dll: 456 classes
+[SP+]   image Zenject.dll: 949 classes
+[SP+]   image Unity.TextMeshPro.dll: 193 classes
+[SP+]   image MagicaClothV2.dll: 356 classes
+[SP+]   image System.Core.dll: 680 classes
+[SP+]   image holo-game-core.dll: 252 classes
+[SP+]   image Niantic.Platform.Internal.Protos.dll: 588 classes
+[SP+]   image Newtonsoft.Json.dll: 306 classes
+[SP+]   image zxing.unity.dll: 270 classes
+[SP+]   image Niantic.Protobuf.dll: 285 classes
+[SP+]   image Sentry.System.Text.Json.dll: 311 classes
+[SP+]   image UnityEngine.TextCoreTextEngineModule.dll: 117 classes
+[SP+]   image Cinemachine.dll: 242 classes
+[SP+]   image UnityEngine.UI.dll: 205 classes
+[SP+]   image Niantic.Platform.Analytics.Telemetry.dll: 254 classes
+[SP+]   image Zeppelin.dll: 268 classes
+[SP+]   image Niantic.Lightship.Maps.Core.dll: 277 classes
+[SP+]   image FMODUnity.dll: 338 classes
+[SP+]   image Unity.XR.ARFoundation.dll: 149 classes
+[SP+]   image Unity.RenderPipelines.GPUDriven.Runtime.dll: 226 classes
+[SP+] il2cpp probe: class .PokemonBagImpl
+[SP+] il2cpp probe: ReleasePokemon(PokemonProto) resolved
+[SP+] bag-resolve: class .PokemonBagImpl
+[SP+] bag-resolve: no static Instance/_instance field
+[SP+] bag-resolve: no get_Instance method

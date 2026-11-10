@@ -1,0 +1,6 @@
+[SP+] init: cfg ok
+[SP+] init: objs ok
+[SP+] hooked base NSURLSession (dt=1 dt2=1 en=0)
+[SP+] hooked NSURLSession subclasses (dt=0 dt2=0)
+[SP+] +sessionWithConfiguration:delegate:delegateQueue: disabled
+[SP+] init: done
