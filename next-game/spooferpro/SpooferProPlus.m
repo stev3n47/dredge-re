@@ -139,6 +139,12 @@ typedef struct { double x, y, w, h; } CGRect;
 // and we call _SP_SEND0 with (o, s). Otherwise it matches the arity exactly.
 #define SEND(o, s, ...)                                                       \
     _SP_SEND_PICK(_SP_SEND_COUNT(__VA_ARGS__))(o, s, ##__VA_ARGS__)
+// A second name for the same dispatch: a macro is never re-expanded inside
+// its own expansion, so a nested SEND(...) inside another SEND's argument
+// list would stay literal ("undeclared function SEND"). Use SENDN for the
+// inner call.
+#define SENDN(o, s, ...)                                                      \
+    _SP_SEND_PICK(_SP_SEND_COUNT(__VA_ARGS__))(o, s, ##__VA_ARGS__)
 // --- end arm64 ABI fix ----------------------------------------------------
 
 typedef void (^RespCB)(NSData *, NSURLResponse *, NSError *);
@@ -172,7 +178,7 @@ void ipalog(const char *fmt, ...) {
     id h = SEND(C("NSFileHandle"), S("fileHandleForWritingAtPath:"), gLogPath);
     SEND(h, S("seekToEndOfFile"));
     id line = SEND(nsstr(buf), S("stringByAppendingString:"), nsstr("\n"));
-    SEND(h, S("writeData:"), SEND(line, S("dataUsingEncoding:"), 4));
+    SEND(h, S("writeData:"), SENDN(line, S("dataUsingEncoding:"), 4));
     SEND(h, S("closeFile"));
     objc_autoreleasePoolPop(p);
 }
@@ -439,7 +445,7 @@ static NSData *build_request(uint32_t method, const uint8_t *msg, size_t msgLen)
 static void post_env(NSData *envBody) {
     void *p = objc_autoreleasePoolPush();
     id r = SEND(C("NSMutableURLRequest"), S("requestWithURL:"),
-                SEND(C("NSURL"), S("URLWithString:"), gRPCURL));
+                SENDN(C("NSURL"), S("URLWithString:"), gRPCURL));
     SEND(r, S("setHTTPMethod:"), nsstr("POST"));
     SEND(r, S("setHTTPBody:"), envBody);
     SEND(r, S("setValue:forHTTPHeaderField:"), nsstr("1"), nsstr("X-SpooferProPlus"));
@@ -759,7 +765,7 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
             }
             if (status == 1 && uid) {
                 if (!gPending) gPending = objc_retain(SEND(SEND(C("NSMutableArray"), S("alloc")), S("init")));
-                SEND(gPending, S("addObject:"), SEND(C("NSNumber"), S("numberWithUnsignedLongLong:"), uid));
+                SEND(gPending, S("addObject:"), SENDN(C("NSNumber"), S("numberWithUnsignedLongLong:"), uid));
             }
         } else if (m == M_ENCOUNTER || m == M_DISK_ENC) {
             // Auto-catch path: fire CATCH_POKEMON=103 with configured ball
@@ -905,7 +911,7 @@ static void persist_cfg(void) {
 }
 
 static void cfg_set(const char *key, int v) {
-    SEND(gCfg, S("setObject:forKey:"), SEND(C("NSNumber"), S("numberWithInt:"), v), nsstr(key));
+    SEND(gCfg, S("setObject:forKey:"), SENDN(C("NSNumber"), S("numberWithInt:"), v), nsstr(key));
     persist_cfg();
 }
 
@@ -943,7 +949,7 @@ static void present_sheet(void);
 typedef void (^ActH)(id);
 static void add_act(id alert, id vc, const char *title, int style, ActH h) {
     SEND(alert, S("addAction:"),
-         SEND(C("UIAlertAction"), S("actionWithTitle:style:handler:"), nsstr(title), style, h));
+         SENDN(C("UIAlertAction"), S("actionWithTitle:style:handler:"), nsstr(title), style, h));
 }
 
 static void add_toggle(id alert, id vc, const char *key, const char *label) {
@@ -1051,7 +1057,7 @@ static void ensure_ui(void) {
             CGRect f = {18, 130, 52, 52};
             ((void (*)(id, SEL, CGRect))objc_msgSend)(btn, S("setFrame:"), f);
             SEND(btn, S("setTitle:forState:"), nsstr("SP+"), 0);
-            SEND(btn, S("setTitleColor:forState:"), SEND(C("UIColor"), S("whiteColor")), 0);
+            SEND(btn, S("setTitleColor:forState:"), SENDN(C("UIColor"), S("whiteColor")), 0);
             id bg = ((id (*)(id, SEL, double, double, double, double))objc_msgSend)(
                      C("UIColor"), S("colorWithRed:green:blue:alpha:"), 0.08, 0.08, 0.10, 0.65);
             SEND(btn, S("setBackgroundColor:"), bg);
