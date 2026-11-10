@@ -1124,7 +1124,14 @@ typedef void (^handler_t)(NSData *, NSURLResponse *, NSError *);
 
 static id hook_dt2(id self, SEL _cmd, id request) {
     log_host(request);
-    return pick_dt2(object_getClass(self))(self, _cmd, request);
+    DataTaskImp2 f = pick_dt2(object_getClass(self));
+    if (!f) {
+        static int logged_null2;
+        if (!logged_null2) { logged_null2 = 1;
+            ipalog("[SP+] hook_dt2 NULL forward cls=%s", class_getName(object_getClass(self))); }
+        return nil;
+    }
+    return f(self, _cmd, request);
 }
 
 static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
@@ -1137,6 +1144,13 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
     id body = SEND(request, S("HTTPBody"));
 
     DataTaskImp forward = pick_dt(object_getClass(self));
+    if (!forward) {
+        static int logged_null;
+        if (!logged_null) { logged_null = 1;
+            ipalog("[SP+] hook_dt NULL forward cls=%s", class_getName(object_getClass(self))); }
+        objc_autoreleasePoolPop(p);
+        return nil;
+    }
     if (!ours && u && SEND(u, S("containsString:"), nsstr("/plfe/rpc2")) &&
         body && (uintptr_t)SEND(body, S("length")) > 50 && completionHandler) {
         NSData *captured = body;
@@ -1179,7 +1193,7 @@ static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
         SEND(buf, S("appendData:"), data);
     }
     for (int i = 0; i < gNSwz; i++)
-        if (gSwz[i] == object_getClass(self))
+        if (gSwz[i] == object_getClass(self) && gSwzData[i])
             ((DelImp)gSwzData[i])(self, _cmd, session, task, data);
     objc_autoreleasePoolPop(p);
 }
@@ -1215,7 +1229,7 @@ static void hook_done(id self, SEL _cmd, id session, id task, id err) {
         objc_release(buf);
     }
     for (int i = 0; i < gNSwz; i++)
-        if (gSwz[i] == object_getClass(self))
+        if (gSwz[i] == object_getClass(self) && gSwzDone[i])
             ((DelImp)gSwzDone[i])(self, _cmd, session, task, err);
     objc_autoreleasePoolPop(p);
 }
@@ -1245,6 +1259,12 @@ static void swizzle_delegate(id delegate) {
 typedef id (*SessImp)(id, SEL, id, id, id);
 static SessImp orig_swc;
 static id hook_swc(id self, SEL _cmd, id config, id delegate, id queue) {
+    if (!orig_swc) {
+        static int logged_null_swc;
+        if (!logged_null_swc) { logged_null_swc = 1;
+            ipalog("[SP+] hook_swc NULL orig"); }
+        return nil;
+    }
     id session = orig_swc(self, _cmd, config, delegate, queue);
     void *p = objc_autoreleasePoolPush();
     if (delegate)
@@ -1259,9 +1279,11 @@ static id hook_swc(id self, SEL _cmd, id config, id delegate, id queue) {
 __attribute__((constructor)) static void spplus_init(void) {
     void *p = objc_autoreleasePoolPush();
     load_config();
+    ipalog("[SP+] init: cfg ok");
     gSyncObj = objc_retain(SEND(SEND(C("NSMutableArray"), S("alloc")), S("init")));
     gTaskBuf = objc_retain(SEND(SEND(C("NSMutableDictionary"), S("alloc")), S("init")));
     gOwnSession = SEND(C("NSURLSession"), S("sharedSession"));
+    ipalog("[SP+] init: objs ok");
 
     // NSURLSession is a class cluster — Foundation's concrete classes
     // (__NSCFURLSession, __NSCFURLSessionLocal, etc) can override the
@@ -1358,5 +1380,6 @@ __attribute__((constructor)) static void spplus_init(void) {
     dispatch_after(dispatch_time(0, 4000000000LL), dispatch_get_main_queue(), ^{
         ensure_ui();
     });
+    ipalog("[SP+] init: done");
     objc_autoreleasePoolPop(p);
 }
