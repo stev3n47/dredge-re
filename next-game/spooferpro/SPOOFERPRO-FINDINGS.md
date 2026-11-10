@@ -291,16 +291,155 @@ id cleaner = [cls sharedCleaner];
 [cleaner PerformPokemonCleanupManually];
 ```
 
-Zero il2cpp, zero Zenject, zero crash-class exposure. The cleaner's
-implementation at 0x770f34 is 100+ instructions that load from the
-global `*(0x16447C8)` — SpooferPro's own invoke-table pointer. The
-same code path the Pro UI uses, just without the Pro gate.
+### FOLLOW-UP 2026-11-10 — the ObjC bypass runs but DOES NOTHING
 
-**Per-pokemon release** uses `-releasePokemon:` the same way (SEND the
-pokemon-id or PokemonProto as the arg; signature TBD at first call).
-This means `release_on_catch` + keep-rules can be wired to SpooferPro's
-cleaner instead of our rpc2 splice — Niantic's anti-cheat sees
-SpooferPro's own envelopes (which it already accepts), not ours.
+v23 shipped with the three-line bypass wired to SP+'s "Clean Bag Now"
+button. On-device log `debug/crashes/v23-sppro_plus.log`:
+
+```
+236  [SP+] SpooferPro cleaner: invoking PerformPokemonCleanupManually on 0x152dd3260
+237  [SP+] SpooferPro cleaner: dispatch returned (async cleanup is in flight)
+...
+256  [SP+] SpooferPro cleaner: invoking PerformPokemonCleanupManually on 0x152dd3260
+257  [SP+] SpooferPro cleaner: dispatch returned (async cleanup is in flight)
+...
+269  [SP+] SpooferPro cleaner: invoking PerformPokemonCleanupManually on 0x152dd3260
+270  [SP+] SpooferPro cleaner: dispatch returned (async cleanup is in flight)
+```
+
+Three button presses across ~4 minutes, same singleton pointer each
+time, every dispatch returned cleanly — **and neither the pokemon bag
+nor the item bag changed**. The call is a silent no-op.
+
+Earlier reading of "the implementation at 0x770f34 loads from the
+invoke-table pointer `*(0x16447C8)`" was wrong. `0x16447C8` is inside
+`__got` and is just `___stack_chk_guard` — the stack cookie, not an
+invoke table. The real dispatch pattern uses encrypted state words
+loaded from `hooksengine_ek::g_hooker_lib` (SpooferPro's VM data
+block). See the new section below.
+
+Likewise: there is NO separate ObjC item-bag cleaner class worth
+wiring — the `gu5nyo3pkexjug7to2` class exposes only pokemon methods
+(`TransferPokemon:`, `releasePokemon:`), and its surrounding selref
+cluster at `__objc_selrefs 0x199edc0..0x199edf8` is all
+pokemon-themed. Item-bag cleanup in SpooferPro's Pro UI is driven
+separately (probably through the same VM dispatcher, different
+magic constants).
+
+The three-line unlock remains valid shorthand — the gate is NOT in
+the UI button-enable logic alone — but it isn't sufficient.
+
+## License-tied VM dispatcher (Option A to re-enable the ObjC cleaner)
+
+**What goes wrong.** Both `-PerformPokemonCleanupManually @ 0x770f34`
+and `-PerformPokemonCleanupTask:completion: @ 0x7698b0` begin with
+an obfuscated dispatcher that reads encrypted 32-bit words from
+`hooksengine_ek::g_hooker_lib` (located at `0x1b17000 + 0x5210` in
+libSpooferPro v4-strip; symbol name
+`__ZN14hooksengine_ek12g_hooker_libE+0x5210`), XOR-decodes them against
+hard-coded constants, and dispatches to the real cleaner only if the
+decoded result equals a magic value. On a free-tier license, the
+block is populated with values that don't decode to the magic → the
+dispatcher takes a no-op branch (or spins on an atomic at 0x1bb8050
+until a never-flipped state word changes).
+
+**Prologue of `-[gu5nyo3pkexjug7to2 PerformPokemonCleanupTask:completion:]`:**
+
+```asm
+adrp x8, 0x1b17000         ; hooksengine_ek::g_hooker_lib base
+ldr  w8, [x8, #0x930]      ; encrypted state flag
+mov  w9, #0x5d79
+movk w9, #0xc19, lsl #16   ; XOR key = 0x0c195d79
+eor  w8, w8, w9
+adrp x9, 0x1b17000
+ldr  w9, [x9, #0x934]      ; encrypted divisor
+mov  w10, #0x957d
+movk w10, #0x8c98, lsl #16 ; XOR key = 0x8c98957d
+eor  w9, w9, w10
+udiv w8, w8, w9
+mov  w9, #0xa1f5
+movk w9, #0xcc90, lsl #16  ; add  0xcc90a1f5
+add  w8, w8, w9
+mov  w9, #0x57a9
+movk w9, #0xaef6, lsl #16  ; and  0xaef657a9
+and  w8, w8, w9
+mov  w9, #0xc472
+movk w9, #0xc991, lsl #16  ; cmp  0xc991c472  ← target magic
+adrp x16, 0x1bb8000
+add  x16, x16, #0x50       ; spin lock word @ 0x1bb8050
+cmp  w8, w9
+b.eq 0x76995c              ; MATCH → proceed to real cleanup
+ldar w8, [x16]             ; else: spin on atomic state
+mov  w9, #0xa95d
+movk w9, #0x6b4d, lsl #16  ; spin threshold = 0x6b4da95d
+mov  w10, #0xdefd
+movk w10, #0x6ed7, lsl #16 ; spin ceiling   = 0x6ed7defd
+cmp  w10, w9
+b.hs 0x769964
+ldar wzr, [x16]
+b    0x769940              ; back to top of spin
+```
+
+The decoded expression that must hold for the cleaner to run:
+
+```
+((((g_hooker_lib[0x930] ^ 0x0c195d79)
+   / (g_hooker_lib[0x934] ^ 0x8c98957d))
+  + 0xcc90a1f5) & 0xaef657a9) == 0xc991c472
+```
+
+**Patch options (ordered by effort / robustness):**
+
+1. **Flip the branch at 0x7698f8 (approx) from `b.eq` to `b` (always).**
+   Smallest change: NOP-or-rewrite the gate so the method always
+   proceeds to the cleanup body. Requires inject_spooferpro.py to
+   emit a 4-byte instruction overwrite at the branch site in
+   `libSpooferPro.dylib`. Risk: downstream code paths inside the
+   cleanup body may themselves re-check `g_hooker_lib` state and
+   bail. A full audit of every `adrp x?, 0x1b17000` in the method
+   body is needed before assuming one branch flip is sufficient.
+   Exact file offset: __text VMA 0x4000 → file offset = VMA − 0x4000
+   = (branch site) − 0x4000.
+
+2. **Populate `g_hooker_lib[0x930]` and [0x934] with Pro-decode
+   values at runtime.** From the formula above, any pair
+   `(A, B)` where `((((A^0x0c195d79) / (B^0x8c98957d)) +
+   0xcc90a1f5) & 0xaef657a9) == 0xc991c472` works. Simplest choice:
+   set `A^0x0c195d79 = B^0x8c98957d`, so the division yields 1,
+   then `(1 + 0xcc90a1f5) & 0xaef657a9` must equal `0xc991c472`.
+   0xcc90a1f6 & 0xaef657a9 = 0x8c9001a0. Does not match 0xc991c472,
+   so the division ≠ 1. Solve algebraically or brute-force in a
+   script (~2^32 keyspace per unknown, but constrained enough to
+   search in minutes with the right ordering). Risk: this is only
+   the FIRST gate — later ones use different offsets (0x940, …) and
+   likely different magic constants. Each needs its own solve.
+
+3. **Discover the Pro-tier values from a signed-response capture.**
+   SpooferPro's license response from `static.spooferpro.com` at
+   session start populates these slots. A MITM proxy capture of
+   that response on a Pro-licensed device would give us the full
+   block to memcpy at init time. We don't have a Pro license for
+   capture, and the response is likely signed so synthesis won't
+   validate client-side. Needs an inside-out solve of SpooferPro's
+   own license decoder.
+
+**Why we picked Option B (our own rpc2 path) over A instead.** Even
+assuming we solve all N gates, SpooferPro's cleanup body ends up
+calling the game's own `IPokemonBag.ReleasePokemon` via SpooferPro's
+il2cpp invoke — which is precisely the path v11..v22 crashed trying
+to reach, because our `DiContainer.Resolve` chain hit a non-code-signed
+anonymous page. If we re-enable the ObjC dispatcher we still run into
+the same il2cpp instance-resolve crash class; we've just moved the
+gate upstream. Option B bypasses the entire problem by reading
+inventory off the rpc2 wire (via our already-flowing hook on
+UnityWebRequestDelegate) and sending `METHOD_RELEASE_POKEMON=112`
+envelopes signed by the game's own auth from `gTemplate`.
+
+If someone later wants to pick up Option A: the branch offset to
+flip in `-PerformPokemonCleanupTask:completion:` is roughly at
+file offset `0x7698f8 - 0x4000 + <__text file offset>`. Verify the
+target jump destination on each build — the obfuscator may re-shuffle
+offsets per release.
 
 ## libSpooferPro anti-tamper (crashes the app when SPPlus is injected)
 

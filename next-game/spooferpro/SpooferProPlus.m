@@ -486,6 +486,8 @@ static NSData *build_request(uint32_t method, const uint8_t *msg, size_t msgLen)
 }
 
 // our own POST — runs on gOwnSession; marker header X-SpooferProPlus stops our hook recursing
+static void handle_response(NSData *reqBody, NSData *respBody, NSString *url);
+
 static void post_env(NSData *envBody) {
     void *p = objc_autoreleasePoolPush();
     id r = SEND(C("NSMutableURLRequest"), S("requestWithURL:"),
@@ -499,6 +501,38 @@ static void post_env(NSData *envBody) {
                (long)(uintptr_t)SEND(d, S("length")));
     };
     id task = SEND(gOwnSession, S("dataTaskWithRequest:completionHandler:"), r, cb);
+    SEND(task, S("resume"));
+    objc_autoreleasePoolPop(p);
+}
+
+// Spliced rpc2 request whose response must be consumed by handle_response()
+// (so method-dispatch — M_HOLO_INV → bag scan → M_RELEASE batch — fires).
+// post_env's plain completion handler only logs; this variant routes the body
+// into the same pipeline that intercepts the game's natural rpc2 responses.
+// Takes the envelope with the NEW request spliced in so handle_response sees
+// the right methods[] on the way out.
+static void post_env_handle(NSData *envBody) {
+    void *p = objc_autoreleasePoolPush();
+    id req = SEND(C("NSMutableURLRequest"), S("requestWithURL:"),
+                  SENDN(C("NSURL"), S("URLWithString:"), gRPCURL));
+    SEND(req, S("setHTTPMethod:"), nsstr("POST"));
+    SEND(req, S("setHTTPBody:"), envBody);
+    SEND(req, S("setValue:forHTTPHeaderField:"), nsstr("1"), nsstr("X-SpooferProPlus"));
+    SEND(req, S("setValue:forHTTPHeaderField:"), nsstr("application/x-protobuf"), nsstr("Content-Type"));
+    NSData *envRetained = objc_retain(envBody);
+    NSString *urlRetained = objc_retain(gRPCURL);
+    RespCB cb = ^(NSData *d, NSURLResponse *r, NSError *e) {
+        if (e || !d) {
+            ipalog("[SP+] spliced request failed err=%p body=%p", e, d);
+        } else {
+            ipalog("[SP+] spliced response %ldB — dispatching to handle_response",
+                   (long)(uintptr_t)SEND(d, S("length")));
+            handle_response(envRetained, d, urlRetained);
+        }
+        objc_release(envRetained);
+        objc_release(urlRetained);
+    };
+    id task = SEND(gOwnSession, S("dataTaskWithRequest:completionHandler:"), req, cb);
     SEND(task, S("resume"));
     objc_autoreleasePoolPop(p);
 }
@@ -1055,39 +1089,56 @@ static void present_sheet(void) {
     add_toggle(alert, vc, "block_non_shiny", "Block Non-Shiny (needs flee_method_id)");
     add_toggle(alert, vc, "block_non_hundo", "Block Non-Hundo (needs flee_method_id)");
     add_toggle(alert, vc, "block_non_shundo", "Block Non-Shundo (needs flee_method_id)");
-    add_act(alert, vc, gCleanOnce ? "Clean armed — open your bag" : "Clean Bag Now", 2, ^(id a) {
+    // Clean Bag Now — our own rpc2 path.
+    //
+    // History: an earlier build routed this through SpooferPro's own ObjC
+    // cleaner (+[gu5nyo3pkexjug7to2 sharedCleaner]
+    //   / -PerformPokemonCleanupManually). The call returned successfully but
+    // the bag never changed — on-device test 2026-11-10 showed three dispatches
+    // over 4 minutes with zero bag mutation. Audit of libSpooferPro v4-strip
+    // (debug/bin/libSpooferPro-v4strip.dylib.zip) found the method is gated by
+    // a license-tied VM state check that reads encrypted flags from
+    // hooksengine_ek::g_hooker_lib+0x930/0x934/0x940, XOR-decodes them against
+    // hard-coded constants, and dispatches to the real cleaner only if they
+    // match the Pro-tier magic. Our UI bypass gets past the button-enable gate
+    // but not past that internal VM check. See SPOOFERPRO-FINDINGS.md section
+    // "License-tied VM dispatcher" for the full disassembly and Option-A
+    // runtime-patch requirements.
+    //
+    // This path instead:
+    //   1. Sets gCleanOnce = 1 so the next HOLO_INV response triggers our
+    //      own bag scan in mode=2 (walk_mons → should_keep → batched
+    //      M_RELEASE envelope).
+    //   2. Splices a GET_HOLOHOLO_INVENTORY (method 4) rpc2 request on our
+    //      own session so the user doesn't wait for the game's natural poll.
+    //      The response flows back through our completion handler, which
+    //      calls handle_response() just like the game's own rpc2 responses
+    //      do — the bag scan + release is dispatched from there.
+    //   3. Keep-rules (shiny / 100IV / favorite / buddy / lucky / species
+    //      whitelist) are evaluated client-side in should_keep(); the
+    //      bag_clean_max safety cap aborts if more than N% of the bag
+    //      would be released (parse-sanity backstop).
+    //
+    // Niantic sees our rpc2 envelope with METHOD_RELEASE_POKEMON=112 —
+    // same wire path iPoGo and SpooferPro both use, just signed by the
+    // game's own auth from gTemplate.
+    add_act(alert, vc, gCleanOnce ? "Clean armed — syncing inventory…" : "Clean Bag Now", 2, ^(id a) {
         gCleanOnce = 1;
-        ipalog("[SP+] manual bag clean armed");
-        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
-    });
-    // SpooferPro's own bag cleaner — plain ObjC, no il2cpp bridge, no Zenject.
-    // Audited 2026-11-10:
-    //   Class gu5nyo3pkexjug7to2   (classref @0x19ad6a0 in libSpooferPro v4-strip)
-    //   + [gu5nyo3pkexjug7to2 sharedCleaner]            (singleton accessor)
-    //   - [sharedCleaner PerformPokemonCleanupManually]  (does the work)
-    // The singleton is already alive by the time our sheet opens, so there is
-    // no init-time crash exposure. SpooferPro's own tested code then calls
-    // the game's C# IPokemonBag.ReleasePokemon via its own il2cpp path —
-    // same code path as the Pro-gated UI button, just without the gate.
-    add_act(alert, vc, "Clean Bag Now (SpooferPro)", 0, ^(id a) {
-        Class cls = (Class)objc_getClass("gu5nyo3pkexjug7to2");
-        if (!cls) {
-            ipalog("[SP+] SpooferPro cleaner: class gu5nyo3pkexjug7to2 not found "
-                   "(libSpooferPro renamed? audit classref 0x19ad6a0)");
+        if (!gTemplate) {
+            ipalog("[SP+] manual bag clean armed — no envelope template yet "
+                   "(play a few seconds so an rpc2 request flows, then retap)");
             SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
             return;
         }
-        id cleaner = SEND((id)cls, S("sharedCleaner"));
-        if (!cleaner) {
-            ipalog("[SP+] SpooferPro cleaner: +sharedCleaner returned nil "
-                   "(singleton not initialized yet? try after login)");
-            SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
-            return;
-        }
-        ipalog("[SP+] SpooferPro cleaner: invoking PerformPokemonCleanupManually on %p",
-               cleaner);
-        SEND(cleaner, S("PerformPokemonCleanupManually"));
-        ipalog("[SP+] SpooferPro cleaner: dispatch returned (async cleanup is in flight)");
+        // Splice GET_HOLOHOLO_INVENTORY so the clean runs now, not on the next
+        // game-initiated inventory poll. post_env_handle() routes the response
+        // into handle_response() instead of just logging it.
+        NSData *req = build_request(M_HOLO_INV, NULL, 0);
+        NSData *env = env_with_request(gTemplate, gRequestsField,
+            (const uint8_t *)SEND(req, S("bytes")),
+            (size_t)(uintptr_t)SEND(req, S("length")));
+        ipalog("[SP+] manual bag clean: splicing HOLO_INV seq=%lu", ++gSeq);
+        post_env_handle(env);
         SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
     });
     add_act(alert, vc, "Done", 1, nil);
