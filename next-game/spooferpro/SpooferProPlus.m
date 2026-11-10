@@ -59,6 +59,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include "il2cpp_bridge.h"
 
 // ---- minimal ObjC runtime surface (SDK headers are partially symlink-broken) --
 typedef void *IMP;
@@ -255,7 +256,12 @@ static void load_config(void) {
             // every PokemonProto field (shiny/fav/buddy/lucky/atk/def/sta/
             // uid) is parsing correctly for your Pokémon GO version. See
             // SPOOFERPRO-FINDINGS.md "on-device verification order".
-            "{\"dry_run\":true,\"bag_clean_max\":50,"
+            //
+            // release_mode: "rpc2" (default, experimental), "il2cpp" (try
+            // il2cpp first, fall back to rpc2), "il2cpp_only" (il2cpp only,
+            // skip release if not ready). il2cpp is the architecturally
+            // correct path; see the il2cpp bridge probe output in the log.
+            "{\"dry_run\":true,\"bag_clean_max\":50,\"release_mode\":\"rpc2\","
             "\"release_on_catch\":false,\"bag_full_clean\":false,"
             "\"keep_shiny\":true,\"keep_hundo\":true,\"keep_favorite\":true,"
             "\"keep_buddy\":true,\"keep_lucky\":true,\"keep_legendary\":true,"
@@ -411,14 +417,43 @@ static void post_env(NSData *envBody) {
 }
 
 static void release_pokemon(uint64_t pid) {
-    if (!gTemplate) { ipalog("[SP+] no template — release skipped"); return; }
     if (cfg_i("dry_run")) {
         ipalog("[SP+] DRY-RUN release uid=%llu (dry_run=1; set to 0 to really release)",
                pid);
         return;
     }
-    // First live release this session: log the architectural warning so the
-    // user knows what they're getting. One line per session, not per call.
+
+    // release_mode selects the underlying path:
+    //   "il2cpp" — preferred; calls IPokemonBag.ReleasePokemon via the
+    //     game's own C# so the request is signed correctly and sails
+    //     past anti-cheat. Needs spp_il2cpp_ready() AND the Zenject
+    //     chain resolved (Phase 4). Falls through to rpc2 on failure
+    //     unless release_mode="il2cpp_only".
+    //   "rpc2" (default) — the original splice path. Experimental;
+    //     may be detected by Niantic anti-cheat signals on
+    //     platform_request[5].
+    //   "il2cpp_only" — only try il2cpp; if the bridge isn't ready,
+    //     skip the release instead of falling back to rpc2.
+    id mode_obj = SEND(gCfg, S("objectForKey:"), nsstr("release_mode"));
+    const char *mode = mode_obj ? (const char *)SEND(mode_obj, S("UTF8String")) : "rpc2";
+    if (!mode) mode = "rpc2";
+    int try_il2cpp = (strcmp(mode, "il2cpp") == 0 || strcmp(mode, "il2cpp_only") == 0);
+    int fallback_rpc2 = (strcmp(mode, "il2cpp_only") != 0);
+
+    if (try_il2cpp) {
+        int rc = spp_il2cpp_release_pokemon(pid);
+        if (rc == 0) return;          // success
+        if (!fallback_rpc2) {
+            ipalog("[SP+] il2cpp_only release skipped uid=%llu rc=%d", pid, rc);
+            return;
+        }
+        ipalog("[SP+] il2cpp release unavailable (rc=%d); falling back to rpc2", rc);
+    }
+
+    if (!gTemplate) { ipalog("[SP+] no template — release skipped"); return; }
+
+    // First live rpc2 release this session: log the architectural warning
+    // so the user knows what they're getting. One line per session.
     static int warned_live;
     if (!warned_live) {
         warned_live = 1;
@@ -426,7 +461,8 @@ static void release_pokemon(uint64_t pid) {
                "SpooferPro both use il2cpp invoke (see SPOOFERPRO-FINDINGS.md); "
                "our rpc2 envelope shape may be detected by Niantic anti-cheat. "
                "If releases silently fail or your account gets shadow-banned, "
-               "flip dry_run back on and use iPoGo for automation.");
+               "flip dry_run back on and use release_mode=\"il2cpp_only\" (once "
+               "Phase 4 lands).");
     }
     wbuf msg = {0};
     wb_f64(&msg, 2, pid);  // pokemon_ids (repeated fixed64, field 2)
@@ -902,10 +938,11 @@ static void present_sheet(void) {
     void *p = objc_autoreleasePoolPush();
     id vc = front_vc();
     if (!vc) { ipalog("[SP+] no root vc — sheet skipped"); objc_autoreleasePoolPop(p); return; }
-    char msg[224];
+    char msg[256];
     snprintf(msg, sizeof msg,
-             "%s   |   IV min %d%%   |   bag at %d%s",
+             "%s   |   il2cpp %s   |   IV min %d%%   |   bag at %d%s",
              cfg_i("dry_run") ? "DRY-RUN" : "LIVE",
+             spp_il2cpp_ready() ? "READY" : "off",
              cfg_i("iv_pct_min"), cfg_i("bag_threshold"),
              gCleanOnce ? "   |   clean armed" : "");
     id alert = SEND(C("UIAlertController"), S("alertControllerWithTitle:message:preferredStyle:"),
@@ -1253,6 +1290,27 @@ __attribute__((constructor)) static void spplus_init(void) {
     } else {
         ipalog("[SP+] +sessionWithConfiguration:delegate:delegateQueue: NOT FOUND");
     }
+    // Initialize the il2cpp bridge once UnityFramework is loaded. The
+    // constructor runs before UF is mapped (we're a sibling framework
+    // dyld also loads), so defer to a short dispatch_after to let the
+    // app finish boot — UF comes up during -[NSBundle loadAndReturnError:]
+    // from the main exe. 2s is enough on modern devices; the bridge itself
+    // is idempotent and we also retry from the first rpc2 hit if init
+    // failed the first time.
+    dispatch_after(dispatch_time(0, 2000000000LL), dispatch_get_main_queue(), ^{
+        char err[128] = {0};
+        int rc = spp_il2cpp_init(err, sizeof err);
+        if (rc == 0) {
+            ipalog("[SP+] il2cpp bridge READY (tag=%s)", SPP_IL2CPP_VERSION_TAG);
+            spp_il2cpp_log_classes_once();
+            // Probe IPokemonBag.ReleasePokemon so the user can confirm
+            // their build's class names in the log before going live.
+            spp_il2cpp_probe_release_pokemon();
+        } else {
+            ipalog("[SP+] il2cpp bridge init failed rc=%d: %s", rc, err);
+        }
+    });
+
     // button appears unconditionally — don't wait for first rpc2 hit
     dispatch_after(dispatch_time(0, 4000000000LL), dispatch_get_main_queue(), ^{
         ensure_ui();

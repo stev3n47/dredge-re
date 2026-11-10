@@ -474,28 +474,65 @@ Two tracks now. Pick one; the first is tiny, the second is a project.
 | Journal of everything caught | SQLite in Documents, UI tab | medium-high |
 | Teleport to coordinates (with cooldown) | Swizzle `CLLocationManager startUpdatingLocation` to feed our own coords | medium |
 
-**il2cpp bridge (the architecturally-correct automation path):**
+**il2cpp bridge — phases 1–3 landed, phase 4 is the Zenject chain**
 
-Mirrors iPoGo's and SpooferPro's design. Rough plan:
+Mirrors iPoGo's and SpooferPro's design. Progress:
 
-1. Write a Python tool (`tools/dump_il2cpp_offsets.py`) that reads the
-   SpooferPro UnityFramework, locates the `il2cpp_*` entry points by
-   signature matching (the function prologues are stable because they're
-   libil2cpp runtime glue), and emits a C header with offsets for
-   PoGo v0.743.
-2. In the dylib: `dlopen` UnityFramework, resolve each entry point by
-   base + offset, cache in a per-version table.
-3. Implement `invoke_il2cpp(image, namespace, class_name, method_name,
-   args[])` — iterate `il2cpp_domain_get_assemblies`,
-   `il2cpp_assembly_get_image`, `il2cpp_image_get_class`,
-   `il2cpp_class_get_method_from_name`, then `il2cpp_runtime_invoke`.
-4. For `release_on_catch`: resolve `IPokemonBag` via
-   `ProjectContext._instance.Container` Zenject chain (POGO-FINDINGS has
-   the chain for PoGo 0.435.1 — needs re-dumping for 0.743).
-5. Switch `release_pokemon()` to call
-   `IPokemonBag.ReleasePokemon(PokemonProto)` with uid set.
+- **Phase 1 ✅** `tools/dump_il2cpp_offsets.py` parses UnityFramework's
+  `LC_SYMTAB` directly (llvm-nm hangs on 191 MB) and emits a C header.
+  29 of the il2cpp_* glue entry points were found for PoGo 0.743; they
+  cluster in a tight 0x20b92c..0x20c854 VMA range (libil2cpp runtime).
+  Header: `next-game/spooferpro/il2cpp_offsets_pogo0743.h`.
 
-Once the bridge exists, bag-clean, auto-catch, berry-feeding, auto-spin
-and bulk-evolve all become 5-line functions that just resolve+invoke the
-matching method (`MethodReleasePokemon`, `MethodUseItemEncounter`,
+  UnityFramework exports a 24-byte empty trie, so `dlsym` can't find
+  these symbols — but they're still present in the classic symbol
+  table. The dumper walks `nlist_64` entries once at build time.
+
+- **Phase 2 ✅** `next-game/spooferpro/il2cpp_bridge.{h,c}` dlopens
+  UnityFramework, locates its mach_header via `_dyld_image_name`,
+  reads the ASLR slide via `_dyld_get_image_vmaddr_slide`, and
+  materialises typed function pointers for every il2cpp_* glue we
+  need. One-shot init on a 2-second dispatch_after from
+  `spplus_init` so UnityFramework has time to boot.
+
+  Exposes `spp_il2cpp_find_class` (walks every assembly's class list,
+  caches hits) and `spp_il2cpp_find_method` (calls
+  `il2cpp_class_get_method_from_name` with implicit
+  `il2cpp_runtime_class_init`). Both have result caches so the
+  linear-scan cost is paid once per name.
+
+- **Phase 3 ✅ (scaffold)** `spp_il2cpp_probe_release_pokemon()` walks
+  likely namespaces for Pokémon GO's bag class — currently
+  `Niantic.Holoholo.Inventory.Pokemon.PokemonBagImpl` plus fallbacks
+  for `PokemonBag` / `IPokemonBag` — and logs whether
+  `ReleasePokemon(1)` resolves. Runs at init so the user can verify
+  class/method naming on their build in `sppro_plus.log` before
+  trusting the path.
+
+  `release_mode` config now dispatches between `rpc2` (default,
+  current fragile path), `il2cpp` (try il2cpp, fall back to rpc2 on
+  failure), and `il2cpp_only` (never fall back). The sheet header
+  also shows `il2cpp READY` / `off` based on
+  `spp_il2cpp_ready()`.
+
+- **Phase 4 — Zenject instance resolution.** To actually call
+  `IPokemonBag.ReleasePokemon`, we need a live instance pointer. The
+  Zenject chain on PoGo 0.435.1 (per POGO-FINDINGS) is
+  `ProjectContext._instance → Container → Resolve<IPokemonBag>()`,
+  with field offsets at +0x20 (instance) and +0x60 (container). These
+  offsets are per-version and will almost certainly have shifted on
+  0.743; they need to be re-dumped.
+
+  Options for next turn:
+  - Dump the field offsets via Il2CppInspectorRedux (needed anyway
+    for v39 metadata; classic Il2CppDumper 6.7.46 caps at v31).
+  - Or: cache `this` from a frequently-called method on
+    PokemonBagImpl by swizzling its first few bytes to jump through
+    our thunk, record the arg, chain to the original. Cheaper than
+    a full metadata dump but Phase 4-level complexity in its own
+    right.
+
+Once Phase 4 lands, bag-clean, auto-catch, berry-feeding, auto-spin
+and bulk-evolve all become 5-line functions that just resolve+invoke
+the matching method (`MethodReleasePokemon`, `MethodUseItemEncounter`,
 `MethodFortSearch`, etc — same names SpooferPro uses).

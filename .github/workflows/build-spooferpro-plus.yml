@@ -21,7 +21,9 @@ jobs:
             -fno-objc-arc -fblocks -O2 -fno-objc-exceptions \
             -Wl,-undefined,dynamic_lookup -lSystem \
             -install_name '@executable_path/Frameworks/SPPlus.framework/SPPlus' \
-            -o SPPlus next-game/spooferpro/SpooferProPlus.m
+            -o SPPlus \
+              next-game/spooferpro/SpooferProPlus.m \
+              next-game/spooferpro/il2cpp_bridge.c
           # Real (self-signed) cert — not ad-hoc. Signulous-style re-signers
           # enumerate nested binaries by their CMS signature; a stripped stub
           # gets skipped, stays unsigned, and iOS kills the app on launch.
