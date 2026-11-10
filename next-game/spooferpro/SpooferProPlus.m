@@ -1203,7 +1203,7 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
 // Compile-time bisect for the FBSDK-adjacent crash — the user can't edit
 // sppro_plus.json on-device, so variant builds bake the disable flags in.
 #ifndef SPP_BISECT_NONET
-#define SPP_BISECT_NONET 1
+#define SPP_BISECT_NONET 0
 #endif
 
 // ---- delegate capture (UnityWebRequest path) ---------------------------------------
