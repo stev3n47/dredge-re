@@ -92,6 +92,29 @@ LEVEL_EPILOGUE_OFF = 0xbdbc8
 PREGATE_RET_OFF = 0x7d03e4
 PREGATE_STOCK   = 0xf9400100  # ldr x0, [x8, #0]
 
+# Anti-tamper neutering. libSpooferPro imports
+# __dyld_register_func_for_add_image and uses it to run an integrity check
+# on every newly-loaded image. When SPPlus (our feature dylib) is loaded
+# via LC_LOAD_DYLIB on the main exe, the callback fires, sees a foreign
+# framework, and aborts — the app "crashes" on launch.
+#
+# Defense in depth:
+#   (a) NOP each of the 5 `bl __dyld_register_func_for_add_image` call
+#       sites so no callback is registered.
+#   (b) Force the 3 identifiable callback entry points to `ret` so even
+#       if some registration slips past (indirect-call or extra path we
+#       haven't located), the callback is a no-op when fired.
+#
+# Found via BL-xref scan of the stub at 0xea54f4 in libSpooferPro v0.743
+# (PoGo 0.743) — see commit message for the audit.
+NOP = 0xD503201F
+ANTITAMPER_REG_BLS = [
+    0x606bc4, 0x606c84, 0x00c50e50, 0x00c510ac, 0x00c54e3c,
+]
+ANTITAMPER_CB_ENTRIES = [
+    0x6055ac, 0x00c51478, 0x00c55028,
+]
+
 
 def rd_u32(b, off):
     return struct.unpack_from('<I', b, off)[0]
@@ -173,6 +196,30 @@ def patch_dylib(dyb: bytes, args) -> bytes:
             raise SystemExit(f'error: 0x{off:08x} is {w:08x}, expected '
                              f'{PREGATE_STOCK:08x} (ldr x0,[x8]) or a movz.')
 
+    if args.strip_antitamper:
+        for off in ANTITAMPER_REG_BLS:
+            w = rd_u32(b, off)
+            if w == NOP:
+                print(f'  0x{off:08x}  antitamper reg BL                           already NOPed')
+                continue
+            if (w & 0xfc000000) != 0x94000000:
+                raise SystemExit(f'error: 0x{off:08x} is 0x{w:08x}, '
+                                 f'expected BL (0x94xxxxxx). Dylib drift.')
+            print(f'  0x{off:08x}  antitamper reg BL                           NOP (was {w:08x})')
+            wr_u32(b, off, NOP)
+        for off in ANTITAMPER_CB_ENTRIES:
+            w = rd_u32(b, off)
+            if w == RET:
+                print(f'  0x{off:08x}  antitamper callback entry                   already ret')
+                continue
+            # First instruction of each callback should be a standard stp
+            # prologue (0xa9...). If someone else already stuffed `ret`
+            # there by mistake, be forgiving.
+            if (w & 0xffc00000) != 0xa9800000 and w != 0xa9be4ff4 and w != 0xd2800001:
+                print(f'  warn: 0x{off:08x} first word 0x{w:08x} not a known prologue — writing ret anyway')
+            print(f'  0x{off:08x}  antitamper callback entry                   ret (was {w:08x})')
+            wr_u32(b, off, RET)
+
     return bytes(b)
 
 
@@ -224,6 +271,16 @@ def main():
                         'if default build leaves Pro/Elite rows grayed.')
     p.add_argument('--pregate-value', type=int, default=1,
                    help='value for pre-gate return override (default 1)')
+    p.add_argument('--strip-antitamper', dest='strip_antitamper',
+                   action='store_true', default=True,
+                   help='NOP libSpooferPro.dylib\'s dyld-add-image callback '
+                        'registrations + force the callback entries to ret '
+                        '(default on). Needed when SPPlus.framework is also '
+                        'injected, otherwise the integrity check aborts on '
+                        'the foreign dylib.')
+    p.add_argument('--no-strip-antitamper', dest='strip_antitamper',
+                   action='store_false',
+                   help='leave the dyld add-image anti-tamper in place.')
     args = p.parse_args()
     ipa_in, ipa_out = args.input, args.output
 
