@@ -264,9 +264,14 @@ static int gNSwz, gSwzCap;
 // Nearest registered swizzle entry up the superclass chain — an inherited
 // hook can fire for subclasses that aren't in gSwz directly.
 static IMP find_swz(Class c, IMP *tab) {
-    for (Class p = c; p; p = class_getSuperclass(p))
-        for (int i = 0; i < gNSwz; i++) if (gSwz[i] == p) return tab[i];
-    return NULL;
+    IMP f = NULL;
+    @synchronized ((id)gSyncObj) {
+        for (Class p = c; p; p = class_getSuperclass(p))
+            for (int i = 0; i < gNSwz; i++)
+                if (gSwz[i] == p) { f = tab[i]; goto out; }
+    }
+out:
+    return f;
 }
 
 // inventory walk modes
@@ -1131,10 +1136,15 @@ static NSMutableArray *gHosts;         // distinct hosts logged once
 static void log_host(id request) {
     NSString *h = SEND(SEND(request, S("URL")), S("host"));
     if (!h) return;
-    if (!gHosts) gHosts = objc_retain(SEND(SEND(C("NSMutableArray"), S("alloc")), S("init")));
-    if (!SEND(gHosts, S("containsObject:"), h)) {
-        SEND(gHosts, S("addObject:"), h);
-        ipalog("[SP+] req host: %s", SEND(h, S("UTF8String")));
+    // dataTask hooks fire on any caller's thread — gHosts mutation needs a
+    // lock or concurrent addObject: corrupts the array (wild-ptr crash later
+    // inside libobjc, blamed on whatever frame is on the stack).
+    @synchronized ((id)gSyncObj) {
+        if (!gHosts) gHosts = objc_retain(SEND(SEND(C("NSMutableArray"), S("alloc")), S("init")));
+        if (!SEND(gHosts, S("containsObject:"), h)) {
+            SEND(gHosts, S("addObject:"), h);
+            ipalog("[SP+] req host: %s", SEND(h, S("UTF8String")));
+        }
     }
 }
 
@@ -1253,8 +1263,9 @@ static void hook_done(id self, SEL _cmd, id session, id task, id err) {
 }
 
 static void swizzle_delegate(id delegate) {
-    if (!delegate) return;
+    if (!delegate || cfg_i("disable_delegate_hooks")) return;
     Class dc = object_getClass(delegate);
+    @synchronized ((id)gSyncObj) {
     for (int i = 0; i < gNSwz; i++) if (gSwz[i] == dc) return;
     if (gNSwz >= gSwzCap) {
         int nc = gSwzCap ? gSwzCap * 2 : 8;
@@ -1294,6 +1305,7 @@ static void swizzle_delegate(id delegate) {
     }
     gNSwz++;
     ipalog("[SP+] delegate %s swizzled (data=%d done=%d)", class_getName(dc), !!gSwzData[i], !!gSwzDone[i]);
+    }
 }
 
 // +[NSURLSession sessionWithConfiguration:delegate:delegateQueue:]
@@ -1331,20 +1343,21 @@ __attribute__((constructor)) static void spplus_init(void) {
     // task selectors, so swizzling the abstract parent alone is a no-op
     // for them. Walk the loaded class list and install on every subclass
     // that implements the selectors.
+    int en_task = !cfg_i("disable_task_hooks");
     SEL s = S("dataTaskWithRequest:completionHandler:");
     SEL s2 = S("dataTaskWithRequest:");
     Class root = C("NSURLSession");
     Method m = class_getInstanceMethod(root, s);
     orig_dt = m ? (DataTaskImp)method_getImplementation(m) : NULL;
-    if (m) method_setImplementation(m, (IMP)hook_dt);
+    if (m && en_task) method_setImplementation(m, (IMP)hook_dt);
     Method m2 = class_getInstanceMethod(root, s2);
     orig_dt2 = m2 ? (DataTaskImp2)method_getImplementation(m2) : NULL;
-    if (m2) method_setImplementation(m2, (IMP)hook_dt2);
-    ipalog("[SP+] hooked base NSURLSession (dt=%d dt2=%d)", !!m, !!m2);
+    if (m2 && en_task) method_setImplementation(m2, (IMP)hook_dt2);
+    ipalog("[SP+] hooked base NSURLSession (dt=%d dt2=%d en=%d)", !!m, !!m2, en_task);
 
-    int n = objc_getClassList(NULL, 0);
-    Class *cls = (Class *)malloc(sizeof(Class) * n);
-    n = objc_getClassList(cls, n);
+    int n = en_task ? objc_getClassList(NULL, 0) : 0;
+    Class *cls = (Class *)malloc(sizeof(Class) * (n ? n : 1));
+    if (n) n = objc_getClassList(cls, n);
     int sub_dt = 0, sub_dt2 = 0;
     for (int i = 0; i < n; i++) {
         Class c = cls[i];
@@ -1390,11 +1403,11 @@ __attribute__((constructor)) static void spplus_init(void) {
 
     SEL sw = S("sessionWithConfiguration:delegate:delegateQueue:");
     Method mw = class_getInstanceMethod(object_getClass((id)C("NSURLSession")), sw);
-    if (mw) {
+    if (mw && !cfg_i("disable_factory_hook")) {
         orig_swc = (SessImp)method_setImplementation(mw, (IMP)hook_swc);
         ipalog("[SP+] hooked +%s", sel_getName(sw));
     } else {
-        ipalog("[SP+] +sessionWithConfiguration:delegate:delegateQueue: NOT FOUND");
+        ipalog("[SP+] +sessionWithConfiguration:delegate:delegateQueue: %s", mw ? "disabled" : "NOT FOUND");
     }
     // Initialize the il2cpp bridge once UnityFramework is loaded. The
     // constructor runs before UF is mapped (we're a sibling framework
