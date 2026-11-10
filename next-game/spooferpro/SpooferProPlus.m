@@ -101,6 +101,18 @@ extern void *_Block_copy(const void *);
 extern int objc_getClassList(Class *, int);
 extern Class class_getSuperclass(Class);
 
+// POSIX/libSystem surface for the _GetN2Api brk-guard (no SDK headers).
+extern int sigaction(int, const void *, void *);
+extern int mprotect(void *, unsigned long, int);
+extern void sys_icache_invalidate(void *, unsigned long);
+extern void *dlsym(void *, const char *);
+extern int _dyld_image_count(void);
+extern const char *_dyld_get_image_name(unsigned);
+extern long _dyld_get_image_vmaddr_slide(unsigned);
+extern int open(const char *, int, ...);
+extern long write(int, const void *, unsigned long);
+extern int close(int);
+
 typedef struct { double x, y; } CGPoint;
 typedef struct { double x, y, w, h; } CGRect;
 
@@ -1342,14 +1354,112 @@ static id hook_swc(id self, SEL _cmd, id config, id delegate, id queue) {
     return session;
 }
 
+// ---- _GetN2Api brk-guard -----------------------------------------------------
+// NianticLabsPlugin._GetN2Api (image offset 0x4df9e4) intermittently has its
+// first instruction overwritten at runtime with brk #0x80 — v11 and v16 both
+// died with pc=_GetN2Api+0, esr=EXC_BREAKPOINT, on-disk bytes clean
+// (stp x20,x19,[sp,#-0x20]! = 0xa9be4ff4). Whether it's a disguised
+// anti-tamper poison or a half-installed patch checkpoint, the recovery is
+// the same: on SIGTRAP at that pc, write the original word back, flush the
+// icache, and resume — brk faults return to the faulting pc on arm64, so the
+// call re-executes through the real prologue. Worst case is the N2 API runs
+// unhooked; the alternative is the process dies at splash every time.
+static void *gN2Api;
+static uint32_t gN2Orig = 0xa9be4ff4;
+static volatile int gN2Restores;
+static char gLogPathC[1024];
+// Minimal layouts (arm64 Darwin) — uc_mcontext is a pointer into the kernel's
+// saved state; __ss.__pc is the trapped program counter.
+typedef struct { uint64_t far; uint32_t esr, exc; } n2_es64;
+typedef struct { uint64_t x[29], fp, lr, sp, pc; uint32_t cpsr, pad; } n2_ss64;
+typedef struct { n2_es64 es; n2_ss64 ss; } n2_mctx64;
+typedef struct {
+    int onstack; uint32_t sigmask;
+    struct { void *sp; uint64_t size; int flags; int pad; } stack;
+    void *link; uint64_t mcsize; n2_mctx64 *mcontext;
+} n2_uctx64;
+typedef struct {
+    union { void (*h)(int); void (*sa)(int, void *, void *); } u;
+    uint32_t mask; int flags;
+} n2_sa;
+
+static n2_sa gN2Prev;
+#define N2_SIGTRAP   5
+#define N2_SA_SIGINFO 0x40
+#define N2_SA_NODEFER 0x10
+#define N2_SIG_DFL   ((void (*)(int))0)
+#define N2_SIG_IGN   ((void (*)(int))1)
+#define N2_BRK(w)    (((w) & 0xffe0001f) == 0xd4200000)
+
+static void n2_log_from_signal(const char *msg, int len) {
+    if (!gLogPathC[0]) return;
+    int fd = open(gLogPathC, 0x0001 /*WRONLY*/ | 0x0008 /*APPEND*/ | 0x0200 /*CREAT*/, 0644);
+    if (fd >= 0) { write(fd, msg, len); close(fd); }
+}
+
+static void n2_trap(int sig, void *info, void *vctx) {
+    uint64_t pc = ((n2_uctx64 *)vctx)->mcontext->ss.pc;
+    if (gN2Api && pc == (uint64_t)(uintptr_t)gN2Api &&
+        N2_BRK(*(volatile uint32_t *)gN2Api) && gN2Restores < 128) {
+        uintptr_t page = (uintptr_t)gN2Api & ~0x3fffULL;
+        if (mprotect((void *)page, 0x4000, 1|2|4) == 0) {
+            *(volatile uint32_t *)gN2Api = gN2Orig;
+            mprotect((void *)page, 0x4000, 1|4);
+            sys_icache_invalidate(gN2Api, 4);
+            gN2Restores++;
+            static const char m[] = "[SP+] _GetN2Api brk restored\n";
+            n2_log_from_signal(m, sizeof m - 1);
+            return;   // resume -> re-executes the restored prologue
+        }
+    }
+    // Not ours (or unmendable): chain to the previous handler.
+    if (gN2Prev.u.sa && (gN2Prev.flags & N2_SA_SIGINFO))
+        gN2Prev.u.sa(sig, info, vctx);
+    else if (gN2Prev.u.h && gN2Prev.u.h != N2_SIG_DFL && gN2Prev.u.h != N2_SIG_IGN)
+        gN2Prev.u.h(sig);
+    else if (gN2Prev.u.h == N2_SIG_IGN)
+        return;
+    else {
+        n2_sa d = {0}; d.u.h = N2_SIG_DFL;
+        sigaction(sig, &d, 0);   // return -> re-trap under default = original kill
+    }
+}
+
+static void n2_guard_install(void) {
+    if (gN2Api) return;
+    void *sym = dlsym((void *)-2 /*RTLD_DEFAULT*/, "_GetN2Api");
+    if (!sym) {
+        int n = _dyld_image_count();
+        for (int i = 0; i < n; i++) {
+            const char *nm = _dyld_get_image_name(i);
+            if (nm && strstr(nm, "NianticLabsPlugin")) {
+                sym = (void *)(_dyld_get_image_vmaddr_slide(i) + 0x4df9e4);
+                break;
+            }
+        }
+    }
+    if (!sym) return;
+    gN2Api = sym;
+    uint32_t live = *(volatile uint32_t *)gN2Api;
+    if (!N2_BRK(live)) gN2Orig = live;   // prefer the live prologue over the hardcode
+    n2_sa sa = {0};
+    sa.u.sa = n2_trap;
+    sa.flags = N2_SA_SIGINFO | N2_SA_NODEFER;
+    sigaction(N2_SIGTRAP, &sa, &gN2Prev);
+    ipalog("[SP+] N2 guard armed on _GetN2Api=%p insn=%08x", gN2Api, live);
+}
+
 __attribute__((constructor)) static void spplus_init(void) {
     void *p = objc_autoreleasePoolPush();
     load_config();
+    const char *lp = gLogPath ? (const char *)SEND(gLogPath, S("fileSystemRepresentation")) : 0;
+    if (lp) { strncpy(gLogPathC, lp, sizeof gLogPathC - 1); }
     ipalog("[SP+] init: cfg ok");
     gSyncObj = objc_retain(SEND(SEND(C("NSMutableArray"), S("alloc")), S("init")));
     gTaskBuf = objc_retain(SEND(SEND(C("NSMutableDictionary"), S("alloc")), S("init")));
     gOwnSession = SEND(C("NSURLSession"), S("sharedSession"));
     ipalog("[SP+] init: objs ok");
+    n2_guard_install();
 
     // NSURLSession is a class cluster — Foundation's concrete classes
     // (__NSCFURLSession, __NSCFURLSessionLocal, etc) can override the
@@ -1436,6 +1546,9 @@ __attribute__((constructor)) static void spplus_init(void) {
         // blows the 18s scene-create watchdog budget.
         id q = SEND(SEND(C("NSOperationQueue"), S("alloc")), S("init"));
         SEND(q, S("addOperationWithBlock:"), (id)^{
+            // Retry the brk-guard here too — NianticLabsPlugin may not have
+            // been mapped yet when the constructor ran (dlsym fails then).
+            n2_guard_install();
             char err[128] = {0};
             int rc = spp_il2cpp_init(err, sizeof err);
             if (rc == 0) {
