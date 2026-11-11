@@ -1629,17 +1629,14 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
             ipalog("[SP+] hook_dt NULL forward cls=%s", class_getName(object_getClass(self))); }
         return nil;
     }
-    // Anti-tamper neutralization. raw.spooferpro.com is SpooferPro's tamper-
-    // policy endpoint: it is present in EVERY build that force-closes with the
-    // "ipa appears tampered" warning and ABSENT from every working build's log
-    // (v20/v21/v23 hit only static.spooferpro.com). SpooferPro fetches a
-    // verdict/policy there and acts on it — which is why nothing about SPPlus's
-    // own bytes (symbols, strings, structure) ever mattered. We log the real
-    // response for analysis, then hand SpooferPro an EMPTY body so its
-    // anti-tamper has no policy to act on. Blocked by default; set
-    // "allow_raw_spooferpro":1 in sppro_plus.json to let it through.
+    // raw.spooferpro.com turned out to be SpooferPro TELEMETRY (device
+    // fingerprint + game state), NOT the anti-tamper verdict — the detector is
+    // local image-enumeration inside libSpooferPro (neutralized by the
+    // dyld_image_count defang in inject_spooferpro.py). Blocking this endpoint
+    // did nothing for the warning, so it is OFF by default and left only as an
+    // opt-in diagnostic: set "block_raw_spooferpro":1 in sppro_plus.json.
     if (!ours && u && SEND(u, S("containsString:"), nsstr("raw.spooferpro.com")) &&
-        completionHandler && !cfg_i("allow_raw_spooferpro")) {
+        completionHandler && cfg_i("block_raw_spooferpro")) {
         handler_t orig = (handler_t)completionHandler;
         handler_t wrapped = ^(NSData *d, NSURLResponse *r, NSError *e) {
             unsigned long n = d ? (unsigned long)(uintptr_t)SEND(d, S("length")) : 0;
@@ -1701,15 +1698,15 @@ static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
     // lock-free for all other traffic.
     id req = SEND(task, S("originalRequest"));
     NSString *u = SEND(SEND(req, S("URL")), S("absoluteString"));
-    // Anti-tamper neutralization (delegate path): starve SpooferPro's
-    // raw.spooferpro.com response of its body by dropping every data chunk,
-    // so the policy its tamper check reads arrives empty. Mirrors the
-    // completion-handler stub in hook_dt. See that comment for the rationale.
+    // raw.spooferpro.com is telemetry, not the tamper verdict (see hook_dt).
+    // Opt-in diagnostic only: drop its delegate data when block_raw_spooferpro
+    // is set. Off by default — the real fix is the dyld_image_count defang in
+    // inject_spooferpro.py.
     if (u && SEND(u, S("containsString:"), nsstr("raw.spooferpro.com")) &&
-        !cfg_i("allow_raw_spooferpro")) {
+        cfg_i("block_raw_spooferpro")) {
         static int logged_drop;
         if (!logged_drop) { logged_drop = 1;
-            ipalog("[SP+] raw.spooferpro.com delegate data DROPPED (anti-tamper stub)"); }
+            ipalog("[SP+] raw.spooferpro.com delegate data DROPPED (diagnostic)"); }
         return;  // do not forward the chunk to SpooferPro's delegate
     }
     if (u && (SEND(u, S("containsString:"), nsstr("/plfe/rpc2")) ||

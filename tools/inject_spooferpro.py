@@ -115,6 +115,29 @@ ANTITAMPER_CB_ENTRIES = [
     0x6055ac, 0x00c51478, 0x00c55028,
 ]
 
+# Second anti-tamper path (found by disasm on pogo-0.743): libSpooferPro does
+# NOT only register a dyld add-image callback — it also DIRECTLY enumerates
+# loaded images (dyld_image_count + dyld_get_image_name/header + task_info /
+# mach_vm_region_recurse) at 0xc4f7e4 / 0xc4cfa4 and spots our injected
+# SPPlus framework there. That scan is what fires the "ipa appears tampered /
+# Game will close" warning on builds the add-image strip alone doesn't stop.
+#
+# Fix: defang the dyld_image_count stub so every caller sees only the main
+# executable (count = 1). Image-enumeration loops then never iterate to
+# SPPlus (or libSpooferPro) and never flag anything. Verified the stub has
+# exactly 7 callers, all in the Sentry symbolication path (0x3f19xx, cosmetic
+# — crash reports list fewer images) or the anti-tamper cluster
+# (0xc4f/0xc50/0xc51). NONE are in SpooferPro's core / UnityFramework-lookup
+# path, so location spoofing is unaffected.
+#   stub @0xea54e8:  adrp x16 ; ldr x16,[x16,#..] ; br x16
+#   ->               mov w0,#1 ; ret              ; nop
+DYLD_COUNT_STUB_PATCH = [
+    # (offset, expected_original_word, patched_word)
+    (0x00ea54e8, 0x90004b90, 0x52800020),  # adrp x16,..  -> mov  w0, #1
+    (0x00ea54ec, 0xf9413e10, 0xd65f03c0),  # ldr  x16,..  -> ret
+    (0x00ea54f0, 0xd61f0200, 0xd503201f),  # br   x16     -> nop  (dead)
+]
+
 
 def rd_u32(b, off):
     return struct.unpack_from('<I', b, off)[0]
@@ -219,6 +242,20 @@ def patch_dylib(dyb: bytes, args) -> bytes:
                 print(f'  warn: 0x{off:08x} first word 0x{w:08x} not a known prologue — writing ret anyway')
             print(f'  0x{off:08x}  antitamper callback entry                   ret (was {w:08x})')
             wr_u32(b, off, RET)
+        # Defang dyld_image_count (the direct image-enumeration anti-tamper
+        # that the add-image strip misses).
+        for off, orig, patched in DYLD_COUNT_STUB_PATCH:
+            w = rd_u32(b, off)
+            if w == patched:
+                print(f'  0x{off:08x}  dyld_image_count defang                     already patched')
+                continue
+            if w != orig:
+                raise SystemExit(
+                    f'error: 0x{off:08x} is 0x{w:08x}, expected 0x{orig:08x} '
+                    f'(dyld_image_count stub). Dylib drift — re-audit the stub.')
+            print(f'  0x{off:08x}  dyld_image_count defang                     '
+                  f'{patched:08x} (was {w:08x})')
+            wr_u32(b, off, patched)
 
     return bytes(b)
 

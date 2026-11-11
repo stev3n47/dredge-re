@@ -1166,3 +1166,55 @@ build logs it). If empty-200 fails-closed, next step is to return a crafted
 "clean" verdict, or to block the host at the config layer
 (static.spooferpro.com likely tells the client to call raw.spooferpro.com —
 intercepting that config is the deeper fix).
+
+## v29 — the REAL anti-tamper: local dyld image enumeration
+
+raw.spooferpro.com was a red herring. The uploaded 149-byte POST body to it
+decodes to device fingerprint + game state ("MapExplore", "Ultra High",
+iPhone18,2, iOS 26.2) — SpooferPro TELEMETRY, not a tamper verdict. Our
+stub dropped its response (log: "raw.spooferpro.com delegate data DROPPED")
+and the warning still fired. The detector is LOCAL.
+
+Disassembly of libSpooferPro found a SECOND anti-tamper path the add-image
+strip misses: libSpooferPro directly enumerates loaded images via
+`dyld_image_count` + `dyld_get_image_name`/`dyld_get_image_header`
+(+ `task_info` / `mach_vm_region_recurse` anti-debug) at 0xc4f7e4 / 0xc4cfa4,
+spots our injected SPPlus.framework in the image list, and shows the
+"ipa appears tampered / Game will close" warning. The warning text is
+XOR-obfuscated so it never appeared in a strings scan.
+
+Why v25 passed and v26 didn't with the SAME stripped libSpooferPro remains
+unproven (likely a SpooferPro server-gated enable flag flipped between the
+tests, OR a timing difference in when the scan runs) — but it no longer
+matters, because the fix is content-independent.
+
+### Fix: defang dyld_image_count (inject_spooferpro.py)
+
+`DYLD_COUNT_STUB_PATCH` overwrites the `dyld_image_count` stub @0xea54e8 to
+return 1 (only the main executable), so every image-enumeration loop sees
+nothing to flag:
+
+```
+0xea54e8  adrp x16,..  -> mov w0,#1   (52800020)
+0xea54ec  ldr  x16,..  -> ret         (d65f03c0)
+0xea54f0  br   x16     -> nop         (d503201f)
+```
+
+Verified: exactly 7 callers of the stub, all Sentry symbolication (0x3f19xx,
+cosmetic) or the anti-tamper cluster (0xc4f/0xc50/0xc51). None in
+SpooferPro's core / UnityFramework-lookup path, so location spoofing is
+unaffected. Applied under `--strip_antitamper` alongside the existing
+add-image strip.
+
+### raw.spooferpro.com stub → opt-in
+
+The SPPlus-side raw.spooferpro.com block is now OFF by default
+(block_raw_spooferpro=1 to re-enable as a diagnostic) since it did nothing
+and dropping telemetry is a needless confound.
+
+### Fallback if the warning persists
+
+If the scan reads image[0]'s macho header instead of relying on the count,
+force the two direct-scan function entries to `ret`: 0xc4f7e4, 0xc4cfa4.
+Surgical alternative: patch the single verdict-store (strb/cset) inside
+0xc4f7e4 so it always writes "clean" — needs disasm of 0xc4f7e4..0xc4fb00.
