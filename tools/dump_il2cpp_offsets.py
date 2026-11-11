@@ -78,6 +78,15 @@ WANTED = [
     'il2cpp_field_get_flags',
     'il2cpp_class_get_type_token',
     'il2cpp_class_num_fields',
+    # v26 — GC heap walk for instance discovery without Zenject/code-patching.
+    # il2cpp_gc_foreach_heap(cb, user) enumerates every live managed object;
+    # we match the one whose class is (assignable to) PokemonBagImpl. gc_disable
+    # / gc_enable bracket the walk so nothing is collected under us.
+    'il2cpp_gc_foreach_heap',
+    'il2cpp_gc_disable',
+    'il2cpp_gc_enable',
+    'il2cpp_class_is_assignable_from',
+    'il2cpp_class_is_subclass_of',
 ]
 
 MH_MAGIC_64 = 0xFEEDFACF

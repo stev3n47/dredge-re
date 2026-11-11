@@ -300,6 +300,7 @@ static int gBatchN;
 static NSString *gCfgPath;
 static id gBtn, gTarget;
 static int gUIInit, gCleanOnce;
+static int gSawFlatbuffers;   // set once we detect the N2/FlatBuffers rpc2 wire
 
 #define M_HOLO_INV   4
 #define M_ENCOUNTER 102
@@ -803,6 +804,31 @@ static void hex_dump(const char *label, const uint8_t *d, uint32_t n) {
     ipalog("[SP+] %s (%uB%s): %s", label, n, n > 64 ? ", first 64" : "", buf);
 }
 
+// FlatBuffers detector. PoGo 0.743's /plfe/rpc2 envelope is FlatBuffers,
+// not Protocol Buffers — see SPOOFERPRO-FINDINGS.md "ROOT CAUSE (v25)".
+// A FlatBuffers root: first 4 bytes = uoffset to the root table; that table
+// begins with a soffset back to a vtable whose first two u16 are
+// (vtable_size, table_inline_size), both small, 4-aligned, and vtable_size
+// is a multiple of 2 within the buffer. Our protobuf splice cannot touch
+// this format at all, so detecting it lets us stop pretending the envelope
+// is "thin/pre-login" and say plainly that release must go via il2cpp.
+static int looks_flatbuffers(const uint8_t *d, uint32_t n) {
+    if (!d || n < 16) return 0;
+    uint32_t root = (uint32_t)d[0] | ((uint32_t)d[1]<<8) |
+                    ((uint32_t)d[2]<<16) | ((uint32_t)d[3]<<24);
+    if (root < 4 || root + 4 > n || (root & 3)) return 0;
+    int32_t soff = (int32_t)((uint32_t)d[root] | ((uint32_t)d[root+1]<<8) |
+                             ((uint32_t)d[root+2]<<16) | ((uint32_t)d[root+3]<<24));
+    int64_t vt = (int64_t)root - soff;
+    if (vt < 0 || vt + 4 > n) return 0;
+    uint16_t vt_size = (uint16_t)(d[vt] | (d[vt+1]<<8));
+    uint16_t tb_size = (uint16_t)(d[vt+2] | (d[vt+3]<<8));
+    // vtable: header is 4 bytes, each field slot is 2 bytes, must fit and be sane.
+    if (vt_size < 4 || (vt_size & 1) || vt_size > n) return 0;
+    if (tb_size < 4 || tb_size > n) return 0;
+    return 1;
+}
+
 static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
     @synchronized (gSyncObj) {
     ensure_ui();
@@ -826,14 +852,33 @@ static void handle_response(NSData *reqBody, NSData *respBody, NSString *url) {
                reqN, SEND(url, S("UTF8String")), gRequestsField, quality);
         hex_dump("template head", reqD, reqN);
     } else if (!quality) {
-        static int logged_thin;
-        if (!logged_thin && reqN > 0) {
-            logged_thin = 1;
-            ipalog("[SP+] template REJECTED (thin/pre-login): %uB url=%s — "
-                   "waiting for a real game envelope. Open your bag in-game, "
-                   "move around on the map, or catch a pokemon.",
-                   reqN, SEND(url, S("UTF8String")));
-            hex_dump("thin template", reqD, reqN);
+        // Distinguish the two rejection reasons. FlatBuffers is terminal for
+        // the rpc2-splice approach; a merely-thin protobuf envelope just means
+        // keep waiting. The old message always said "thin/pre-login" even for
+        // FlatBuffers — misleading us into chasing a bigger protobuf envelope
+        // that will never arrive on this game version.
+        if (looks_flatbuffers(reqD, reqN)) {
+            gSawFlatbuffers = 1;
+            static int logged_fb;
+            if (!logged_fb) {
+                logged_fb = 1;
+                ipalog("[SP+] rpc2 is FLATBUFFERS, not protobuf (%uB url=%s). "
+                       "The protobuf splice CANNOT work on this game version. "
+                       "Release must go through il2cpp (the game's own C# "
+                       "IPokemonBag.ReleasePokemon). See SPOOFERPRO-FINDINGS.md "
+                       "'ROOT CAUSE (v25)'.", reqN, SEND(url, S("UTF8String")));
+                hex_dump("flatbuffer envelope", reqD, reqN);
+            }
+        } else {
+            static int logged_thin;
+            if (!logged_thin && reqN > 0) {
+                logged_thin = 1;
+                ipalog("[SP+] template REJECTED (thin protobuf): %uB url=%s — "
+                       "waiting for a real game envelope. Open your bag in-game, "
+                       "move around on the map, or catch a pokemon.",
+                       reqN, SEND(url, S("UTF8String")));
+                hex_dump("thin template", reqD, reqN);
+            }
         }
     }
 
@@ -1256,8 +1301,13 @@ static void present_main(void) {
     char keeps[96] = {0}; keep_summary(keeps, sizeof keeps);
     char msg[512];
     const char *dry   = cfg_i("dry_run") ? "DRY RUN — releases only logged" : "LIVE — releases will post";
-    char tmpl[96];
-    if (!gTemplate) {
+    char tmpl[128];
+    if (gSawFlatbuffers && !gTemplate) {
+        // Terminal state on pogo-0.743: the wire is FlatBuffers, the protobuf
+        // splice can't work. Don't tell the user to walk around — it won't help.
+        snprintf(tmpl, sizeof tmpl,
+                 "rpc2: FlatBuffers (N2) — protobuf splice N/A, release needs il2cpp");
+    } else if (!gTemplate) {
         snprintf(tmpl, sizeof tmpl,
                  "rpc2: not captured yet — move around the map or open the bag in-game");
     } else {
@@ -1274,17 +1324,37 @@ static void present_main(void) {
                     S("alertControllerWithTitle:message:preferredStyle:"),
                     nsstr("SpooferProPlus"), nsstr(msg), 1);
 
-    // Primary CTA — destructive style stands out visually. Splices HOLO_INV
-    // so the clean fires now instead of waiting for the game's natural poll.
-    const char *clean_title = gCleanOnce
-        ? "Clean armed — syncing inventory…"
-        : "Clean bag now";
+    // Primary CTA — destructive style stands out visually.
+    const char *clean_title = "Clean bag now";
     add_act(alert, vc, clean_title, 2, ^(id a) {
+        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
+
+        // Preferred path on 0.743: il2cpp. The rpc2 splice CANNOT work here
+        // because the wire is FlatBuffers (see SPOOFERPRO-FINDINGS.md
+        // "ROOT CAUSE (v25)"). The bag is found via the GC heap walk
+        // (no Zenject, no code-patching) and release goes through the
+        // game's own C# IPokemonBag.ReleasePokemon, which serializes the
+        // FlatBuffer + signs the N2 request itself.
+        if (spp_il2cpp_ready()) {
+            ipalog("[SP+] manual bag clean: il2cpp path (heap-walk bag inspect)");
+            // Defer so the sheet-dismiss animation isn't frozen by the
+            // GC-stop-the-world heap walk. Runs on the main thread, which is
+            // Unity's thread and always il2cpp-attached.
+            run_on_main_later(0.2, ^{
+                int rc = spp_il2cpp_bag_inspect();
+                ipalog("[SP+] manual bag clean: bag_inspect rc=%d "
+                       "(see the bag API dump above — the keep-rule clean is "
+                       "wired against these method names next build)", rc);
+            });
+            return;
+        }
+
+        // Legacy protobuf rpc2 splice — only reachable on older game versions
+        // where the il2cpp bridge never came up. DEAD on FlatBuffers (0.743).
         gCleanOnce = 1;
         if (!gTemplate) {
             ipalog("[SP+] manual bag clean armed — no envelope template yet "
                    "(play a few seconds so an rpc2 request flows, then retap)");
-            SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
             return;
         }
         NSData *req = build_request(M_HOLO_INV, NULL, 0);
@@ -1293,7 +1363,6 @@ static void present_main(void) {
             (size_t)(uintptr_t)SEND(req, S("length")));
         ipalog("[SP+] manual bag clean: splicing HOLO_INV seq=%lu", ++gSeq);
         post_env_handle(env);
-        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
     });
 
     add_act(alert, vc, "Keep rules…",           0, ^(id a) { reopen_as(vc, present_keep); });

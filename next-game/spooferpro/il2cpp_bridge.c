@@ -49,9 +49,15 @@ const MethodInfo    *(*spp_il2cpp_class_get_methods)(Il2CppClass *, void **iter)
 void                *(*spp_il2cpp_class_get_fields)(Il2CppClass *, void **iter);
 const char          *(*spp_il2cpp_field_get_name)(void *field);
 void                 (*spp_il2cpp_field_static_get_value)(void *field, void *out);
+void                 (*spp_il2cpp_gc_foreach_heap)(void (*func)(void *obj, void *user), void *user);
+void                 (*spp_il2cpp_gc_disable)(void);
+void                 (*spp_il2cpp_gc_enable)(void);
+int32_t              (*spp_il2cpp_class_is_assignable_from)(Il2CppClass *to, Il2CppClass *from);
 
 // --- state --------------------------------------------------------------
 static int g_ready = 0;
+static int g_allow_zenject = 0;   // Strategy C (crashes at launch) off by default
+void spp_il2cpp_set_allow_zenject(int on) { g_allow_zenject = on ? 1 : 0; }
 
 int spp_il2cpp_ready(void) { return g_ready; }
 
@@ -126,6 +132,10 @@ int spp_il2cpp_init(char *errbuf, size_t errbuflen) {
     RESOLVE(il2cpp_class_get_fields,           SPP_IL2CPP_CLASS_GET_FIELDS_OFF);
     RESOLVE(il2cpp_field_get_name,             SPP_IL2CPP_FIELD_GET_NAME_OFF);
     RESOLVE(il2cpp_field_static_get_value,     SPP_IL2CPP_FIELD_STATIC_GET_VALUE_OFF);
+    RESOLVE(il2cpp_gc_foreach_heap,            SPP_IL2CPP_GC_FOREACH_HEAP_OFF);
+    RESOLVE(il2cpp_gc_disable,                 SPP_IL2CPP_GC_DISABLE_OFF);
+    RESOLVE(il2cpp_gc_enable,                  SPP_IL2CPP_GC_ENABLE_OFF);
+    RESOLVE(il2cpp_class_is_assignable_from,   SPP_IL2CPP_CLASS_IS_ASSIGNABLE_FROM_OFF);
 #undef RESOLVE
 
     // Attach this thread to the il2cpp runtime before we call anything —
@@ -359,6 +369,42 @@ static Il2CppClass *find_bag_class(const char **out_ns, const char **out_cls) {
     return NULL;
 }
 
+// Strategy E — GC heap walk. Enumerate every live managed object and keep
+// the first whose class is (assignable to) the bag class. This is the only
+// instance-discovery path that touches neither Zenject (DiContainer.Resolve
+// hits a code-signature-invalid page on this build, SIGKILL) nor the game's
+// native code pages (inline hooks would fail the hardened-runtime CS check).
+// The callback runs with the GC world stopped — it must not allocate.
+struct bag_search { Il2CppClass *target; Il2CppObject *found; long scanned; };
+
+static void bag_heap_cb(void *obj, void *user) {
+    struct bag_search *s = (struct bag_search *)user;
+    s->scanned++;
+    if (s->found || !obj) return;
+    Il2CppClass *k = spp_il2cpp_object_get_class((Il2CppObject *)obj);
+    if (!k) return;
+    if (k == s->target ||
+        (spp_il2cpp_class_is_assignable_from &&
+         spp_il2cpp_class_is_assignable_from(s->target, k))) {
+        s->found = (Il2CppObject *)obj;
+    }
+}
+
+static Il2CppObject *heap_walk_find(Il2CppClass *target) {
+    if (!spp_il2cpp_gc_foreach_heap || !target) return NULL;
+    // Attach this thread to the runtime — the walk and any later invoke run
+    // on our background completion-handler queue, not a managed thread.
+    if (spp_il2cpp_thread_attach && spp_il2cpp_domain_get)
+        spp_il2cpp_thread_attach(spp_il2cpp_domain_get());
+    struct bag_search s = { target, NULL, 0 };
+    if (spp_il2cpp_gc_disable) spp_il2cpp_gc_disable();
+    spp_il2cpp_gc_foreach_heap(bag_heap_cb, &s);
+    if (spp_il2cpp_gc_enable) spp_il2cpp_gc_enable();
+    ipalog("[SP+] bag-resolve: heap walk scanned %ld objects, %s",
+           s.scanned, s.found ? "FOUND bag" : "no match");
+    return s.found;
+}
+
 Il2CppObject *spp_il2cpp_get_pokemon_bag(void) {
     if (!g_ready) return NULL;
     if (g_cached_bag) return g_cached_bag;
@@ -370,6 +416,16 @@ Il2CppObject *spp_il2cpp_get_pokemon_bag(void) {
         return NULL;
     }
     ipalog("[SP+] bag-resolve: class %s.%s", ns, cls);
+
+    // Strategy E — GC heap walk (primary; no Zenject, no code-patching).
+    {
+        Il2CppObject *inst = heap_walk_find(bag_class);
+        if (inst) {
+            ipalog("[SP+] bag-resolve: heap walk hit");
+            g_cached_bag = inst;
+            return inst;
+        }
+    }
 
     // Strategy A — static Instance / _instance field
     {
@@ -402,54 +458,62 @@ Il2CppObject *spp_il2cpp_get_pokemon_bag(void) {
         ipalog("[SP+] bag-resolve: no get_Instance method");
     }
 
-    // Strategy C — Zenject ProjectContext._instance.Container.Resolve(type)
-    Il2CppClass *pc_class = spp_il2cpp_find_class("Assembly-CSharp.dll",
-                                                   "Zenject", "ProjectContext");
-    if (!pc_class) {
-        pc_class = spp_il2cpp_find_class(NULL, "Zenject", "ProjectContext");
-    }
-    if (pc_class) {
-        Il2CppObject *pc = spp_il2cpp_static_field_object(pc_class, "_instance");
-        if (!pc) pc = spp_il2cpp_static_field_object(pc_class, "s_Instance");
-        if (!pc) {
-            const MethodInfo *gi = spp_il2cpp_find_method(pc_class, "get_Instance", 0);
-            if (gi) pc = spp_il2cpp_invoke_0(gi, NULL);
+    // Strategy C — Zenject ProjectContext._instance.Container.Resolve(type).
+    // KNOWN CRASHER: on pogo-0.743 this reaches a code-signature-invalid page
+    // and the kernel SIGKILLs us (v20). Off unless the host explicitly opts in
+    // via spp_il2cpp_set_allow_zenject(1). Kept for older builds / future use.
+    if (g_allow_zenject) {
+        Il2CppClass *pc_class = spp_il2cpp_find_class("Assembly-CSharp.dll",
+                                                       "Zenject", "ProjectContext");
+        if (!pc_class) {
+            pc_class = spp_il2cpp_find_class(NULL, "Zenject", "ProjectContext");
         }
-        if (pc) {
-            const MethodInfo *get_container = spp_il2cpp_find_method(
-                spp_il2cpp_object_get_class(pc), "get_Container", 0);
-            Il2CppObject *container = get_container
-                ? spp_il2cpp_invoke_0(get_container, pc) : NULL;
-            if (container) {
-                // Resolve(Type)
-                Il2CppClass *container_class = spp_il2cpp_object_get_class(container);
-                const MethodInfo *resolve = spp_il2cpp_find_method(container_class,
-                                                                    "Resolve", 1);
-                if (resolve) {
-                    Il2CppType *bag_type = spp_il2cpp_class_get_type(bag_class);
-                    Il2CppObject *type_obj = spp_il2cpp_type_get_object
-                        ? spp_il2cpp_type_get_object(bag_type) : NULL;
-                    if (type_obj) {
-                        Il2CppObject *inst = spp_il2cpp_invoke_1(resolve, container,
-                                                                 type_obj);
-                        if (inst) {
-                            ipalog("[SP+] bag-resolve: Zenject Resolve() hit");
-                            g_cached_bag = inst;
-                            return inst;
+        if (pc_class) {
+            Il2CppObject *pc = spp_il2cpp_static_field_object(pc_class, "_instance");
+            if (!pc) pc = spp_il2cpp_static_field_object(pc_class, "s_Instance");
+            if (!pc) {
+                const MethodInfo *gi = spp_il2cpp_find_method(pc_class, "get_Instance", 0);
+                if (gi) pc = spp_il2cpp_invoke_0(gi, NULL);
+            }
+            if (pc) {
+                const MethodInfo *get_container = spp_il2cpp_find_method(
+                    spp_il2cpp_object_get_class(pc), "get_Container", 0);
+                Il2CppObject *container = get_container
+                    ? spp_il2cpp_invoke_0(get_container, pc) : NULL;
+                if (container) {
+                    // Resolve(Type)
+                    Il2CppClass *container_class = spp_il2cpp_object_get_class(container);
+                    const MethodInfo *resolve = spp_il2cpp_find_method(container_class,
+                                                                        "Resolve", 1);
+                    if (resolve) {
+                        Il2CppType *bag_type = spp_il2cpp_class_get_type(bag_class);
+                        Il2CppObject *type_obj = spp_il2cpp_type_get_object
+                            ? spp_il2cpp_type_get_object(bag_type) : NULL;
+                        if (type_obj) {
+                            Il2CppObject *inst = spp_il2cpp_invoke_1(resolve, container,
+                                                                     type_obj);
+                            if (inst) {
+                                ipalog("[SP+] bag-resolve: Zenject Resolve() hit");
+                                g_cached_bag = inst;
+                                return inst;
+                            }
                         }
+                        ipalog("[SP+] bag-resolve: Resolve(Type) returned null");
+                    } else {
+                        ipalog("[SP+] bag-resolve: DiContainer.Resolve(1) missing");
                     }
-                    ipalog("[SP+] bag-resolve: Resolve(Type) returned null");
                 } else {
-                    ipalog("[SP+] bag-resolve: DiContainer.Resolve(1) missing");
+                    ipalog("[SP+] bag-resolve: ProjectContext.Container unreachable");
                 }
             } else {
-                ipalog("[SP+] bag-resolve: ProjectContext.Container unreachable");
+                ipalog("[SP+] bag-resolve: ProjectContext._instance null");
             }
         } else {
-            ipalog("[SP+] bag-resolve: ProjectContext._instance null");
+            ipalog("[SP+] bag-resolve: Zenject.ProjectContext class not found");
         }
     } else {
-        ipalog("[SP+] bag-resolve: Zenject.ProjectContext class not found");
+        ipalog("[SP+] bag-resolve: Zenject Resolve skipped (disabled; "
+               "known CODESIGNING crash on 0.743)");
     }
 
     // Strategy D — GameManager.Instance.PokemonBag
@@ -513,8 +577,55 @@ int spp_il2cpp_probe_release_pokemon(void) {
     // DiContainer.Resolve() during launch runs managed code inside an
     // initializing Zenject container — on this build that call chain
     // reaches a code-signature-invalid page and the kernel kills us.
-    // The bag can't exist pre-login anyway, so nothing is lost.
-    ipalog("[SP+] il2cpp probe: bag instance deferred (resolve on feature use)");
+    // The bag can't exist pre-login anyway, so nothing is lost. The bag is
+    // now found at feature time via the GC heap walk (Strategy E).
+    ipalog("[SP+] il2cpp probe: bag instance deferred (heap walk at feature use)");
+    return 0;
+}
+
+// Feature-time bag inspection. Finds the live bag via the heap walk, then
+// dumps its methods/fields and (if we can reach one) a sample pokemon's
+// members — so we can wire enumeration + per-pokemon field reads for the
+// keep-rule clean. The bag's collection API (GetPokemon / get_Pokemon /
+// indexer / count) is renamed per build, so we learn it from this dump
+// rather than hard-coding guesses. Returns 0 if the bag was found.
+//
+// Also attempts the common enumeration accessors directly; if one returns
+// an object, logs its class so the next build can iterate it. This is the
+// bridge between "we can find + release one pokemon" and "we can clean the
+// whole bag by keep-rules".
+int spp_il2cpp_bag_inspect(void) {
+    if (!g_ready) { ipalog("[SP+] bag-inspect: bridge not ready"); return -10; }
+    const char *ns = NULL, *cls = NULL;
+    Il2CppClass *bag_class = find_bag_class(&ns, &cls);
+    if (!bag_class) { ipalog("[SP+] bag-inspect: no bag class"); return -1; }
+
+    Il2CppObject *bag = spp_il2cpp_get_pokemon_bag();
+    if (!bag) { ipalog("[SP+] bag-inspect: heap walk found no live bag "
+                       "(log in and open your pokemon storage first)"); return -2; }
+    ipalog("[SP+] bag-inspect: live bag @ %p — dumping its API", (void *)bag);
+    spp_il2cpp_dump_class_members(bag_class, 60);
+
+    // Try common enumeration accessors so we can see the collection type.
+    static const char *k_enum_getters[] = {
+        "GetPokemon", "get_Pokemon", "GetAllPokemon", "get_AllPokemon",
+        "GetPokemonList", "get_PokemonList", "GetPokedex", "get_Count",
+        "GetCount", "get_Pokemons", "GetPokemons", NULL };
+    for (int i = 0; k_enum_getters[i]; i++) {
+        const MethodInfo *g = spp_il2cpp_find_method(bag_class, k_enum_getters[i], 0);
+        if (!g) continue;
+        Il2CppObject *r = spp_il2cpp_invoke_0(g, bag);
+        if (r) {
+            Il2CppClass *rc = spp_il2cpp_object_get_class(r);
+            ipalog("[SP+] bag-inspect: %s() -> %s.%s @ %p",
+                   k_enum_getters[i],
+                   rc ? (spp_il2cpp_class_get_namespace(rc) ?: "") : "",
+                   rc ? (spp_il2cpp_class_get_name(rc) ?: "?") : "null-class",
+                   (void *)r);
+        } else {
+            ipalog("[SP+] bag-inspect: %s() -> null/empty", k_enum_getters[i]);
+        }
+    }
     return 0;
 }
 

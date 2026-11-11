@@ -920,3 +920,142 @@ other schema puzzle.
   misses it entirely. TODO: widen to any `pgorelease.nianticlabs.com`
   POST ≥500B if the v25 template-quality gate still doesn't catch
   a good envelope.
+
+## ★ ROOT CAUSE (v25): /plfe/rpc2 is FlatBuffers, not Protocol Buffers
+
+The single most important finding of the whole effort. On-device v25 log
+(`da42e313-sppro_plus.log`) with the template-quality gate finally gave
+us the raw bytes:
+
+```
+800  [SP+] template REJECTED (thin/pre-login): 384B url=.../plfe/rpc2
+801  [SP+] thin template (384B, first 64):
+     100000000c00140010000f00080004000c000000100000000100000000000002
+     0100000058010000100000000000000008000a00090004000800000018000000
+```
+
+Decoded as FlatBuffers (NOT protobuf):
+
+```
+[0..3]  root table uoffset = 16
+[16]    soffset to vtable   = 12   -> vtable at offset 4
+[4]     vtable_size = 12 bytes, table_inline_size = 20 bytes
+          field[0] table-relative offset = 16
+          field[1] table-relative offset = 15
+          field[2] table-relative offset = 8
+          field[3] table-relative offset = 4
+```
+
+`vtable_size / table_size / 16-bit-aligned field-offset table` is the
+unmistakable FlatBuffers layout. Protocol Buffers has no vtable, no
+fixed-width offsets, no root uoffset. **PoGo 0.743's rpc2 envelope is
+FlatBuffers.**
+
+### Why this invalidates the entire rpc2-splice approach
+
+Every assumption SPPlus was built on is a protobuf assumption:
+
+| SPPlus assumes (protobuf) | Reality (FlatBuffers) |
+|---------------------------|------------------------|
+| `requests[]` repeated submessage at field 4 | no "fields"; a vtable + inline table |
+| method id = varint, first inner field | method dispatch encoded structurally |
+| `returns[]` repeated bytes at field 100 | FlatBuffer table/vector, no field 100 |
+| splice = append a protobuf field | splice = rebuild the whole FlatBuffer + fix all offsets |
+| `pb_varint` / `pb_field` walk | reads FlatBuffer bytes as garbage → `f0×1 f2×1` |
+
+The `f0×1 f2×1` "layout" we saw every build was our protobuf parser
+mis-reading FlatBuffer bytes. The 100B spliced responses were
+FlatBuffer-encoded errors. Real traffic flows fine (a 3696B inventory
+response is in the same log) — we simply can't read or write the format.
+
+### Connection to _GetN2Api
+
+The "N2" (Niantic 2.0 / NIA platform) API we fought for 22 builds — the
+`_GetN2Api` brk-poison saga — IS the FlatBuffers rpc channel. SpooferPro
+caches the N2 API table at init and poisons the export precisely because
+N2 is the live rpc2 surface. It was never a protobuf endpoint.
+
+### The only viable path: il2cpp (the C# layer)
+
+We cannot practically hand-build FlatBuffer N2 envelopes (need the full
+.fbs schema + the N2 request signing SpooferPro's own cache encapsulates).
+But we don't have to: the game's C# code already does it. Call
+
+```
+IPokemonBag.ReleasePokemon(PokemonProto)   // il2cpp probe: RESOLVED
+```
+
+via il2cpp and the game serializes the FlatBuffer and signs the N2
+request itself. We hand C# a managed PokemonProto; we never touch the
+wire format. This sidesteps FlatBuffers entirely.
+
+Blocker (known): getting the live `PokemonBagImpl` instance to call the
+method on. v20 used Zenject `DiContainer.Resolve` and hit a CODESIGNING
+Invalid Page crash. Non-Zenject instance-acquisition options:
+  1. il2cpp GC heap walk — enumerate all objects, find the single
+     `PokemonBagImpl` (il2cpp_gc_foreach / managed heap iteration).
+  2. Hook a frequently-called `PokemonBagImpl` instance method and
+     capture `this` the first time the game calls it; cache the pointer.
+  3. Find a static singleton field / get_Instance accessor if one
+     exists on the bag or a holder class (v20 probe said no static
+     Instance on PokemonBagImpl itself — check holder classes).
+
+Recommendation: option 2 (capture `this` from a hooked bag method) is
+the lowest-risk — no Resolve, no heap walk, just a trampoline that
+stores a pointer. Once we have the instance, ReleasePokemon is a
+direct il2cpp_runtime_invoke with a PokemonProto arg we build via
+il2cpp (not via the wire).
+
+### rpc2 code status
+
+`handle_response`, the splice path, `post_env_handle`, and the whole
+protobuf envelope machinery are DEAD CODE against 0.743. Keep for now
+(older game versions may still be protobuf; and the parsing helpers are
+reusable), but gate all splicing behind an explicit
+`allow_protobuf_splice` config flag defaulting OFF, and make the UI say
+"release runs via il2cpp" once the il2cpp release path lands.
+
+## v26 — il2cpp release path via GC heap walk (bag instance w/o Zenject)
+
+Given the FlatBuffers finding, release must go through the game's own C#
+`IPokemonBag.ReleasePokemon(PokemonProto)` (the game serializes the
+FlatBuffer + signs the N2 request itself). The only blocker was getting
+the live bag instance:
+
+- v20 used Zenject `DiContainer.Resolve` → CODESIGNING Invalid Page SIGKILL.
+- Inline-hooking a bag method to capture `this` → fails the hardened-runtime
+  code-signature check the same way (can't make `__text` writable).
+
+Solution: **GC heap walk.** `il2cpp_gc_foreach_heap(cb, user)` (present in
+0.743 UnityFramework at VMA 0x20c320) enumerates every live managed object
+with the GC world stopped. We match the first object whose class is
+(assignable to) `PokemonBagImpl`. No Zenject, no code-patching, no
+crash-class exposure.
+
+New symbols dumped + bound: `il2cpp_gc_foreach_heap`, `il2cpp_gc_disable`,
+`il2cpp_gc_enable`, `il2cpp_class_is_assignable_from` (45/45 total).
+
+New bag-resolve order (`spp_il2cpp_get_pokemon_bag`):
+  E. GC heap walk            ← primary, tried first
+  A. static Instance field
+  B. get_Instance property
+  C. Zenject Resolve         ← OFF by default (known crasher; opt-in via
+                               spp_il2cpp_set_allow_zenject)
+  D. GameManager.PokemonBag
+
+Runs at feature time only (post-login, when the bag exists) — never at
+launch. The heap walk + subsequent invokes run on the main thread (Unity's
+thread, always il2cpp-attached); the walk hitch is a few hundred ms for a
+one-shot button press.
+
+### Open: enumeration API not yet known
+
+We can now find the bag and release one pokemon by uid. We still need the
+bag's own pokemon list (we can't read inventory off the wire — it's
+FlatBuffers). `spp_il2cpp_bag_inspect()` dumps the bag class's methods +
+probes common enumeration accessors (`GetPokemon` / `get_Pokemon` /
+`get_Count` / …) and logs the returned collection's class. Clean Bag Now
+calls it (when il2cpp is ready) so the next build can wire
+enumerate → should_keep → ReleasePokemon against this build's real method
+names. The keep-rule evaluation moves from wire-parse (`parse_mon`) to
+il2cpp field reads on each pokemon object.
