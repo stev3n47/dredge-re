@@ -17,15 +17,38 @@ jobs:
       - name: Compile dylib
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          # -fvisibility=hidden + -Wl,-x + -unexported_symbol '*' strip SPPlus's
+          # own symbol names out of the Mach-O. SPPlus exports nothing (it runs
+          # from a __mod_init_func constructor, invoked by pointer, not by
+          # symbol), so hiding every symbol is safe. This removes the symbol
+          # table / export-trie attack surface SpooferPro's anti-tamper scans:
+          # v26 added `spp_il2cpp_gc_foreach_heap` — `il2cpp_gc_foreach_heap`
+          # is a textbook IOC for il2cpp memory-dumping cheats, and SpooferPro
+          # force-closed the game the instant that symbol was present (v25,
+          # which lacked it, launched fine). See SPOOFERPRO-FINDINGS.md
+          # "v26 anti-tamper: il2cpp symbol IOC".
           clang -arch arm64 -dynamiclib \
             -isysroot "$SDK" \
             -miphoneos-version-min=13.0 \
             -fno-objc-arc -fblocks -O2 -fno-objc-exceptions \
+            -fvisibility=hidden \
             -Wl,-undefined,dynamic_lookup -lSystem \
+            -Wl,-x -Wl,-unexported_symbol,'*' \
             -install_name '@executable_path/Frameworks/SPPlus.framework/SPPlus' \
             -o SPPlus \
               next-game/spooferpro/SpooferProPlus.m \
               next-game/spooferpro/il2cpp_bridge.c
+          # Belt-and-suspenders: remove any local symbols the linker kept.
+          strip -x SPPlus || true
+          # Verify the IOC symbols are actually gone — fail the build if not,
+          # so we never ship another tamper-tripping dylib by accident.
+          for ioc in foreach_heap is_assignable_from spp_il2cpp gc_disable; do
+            if grep -qa "$ioc" SPPlus; then
+              echo "ERROR: symbol IOC '$ioc' still present in SPPlus after strip"
+              exit 1
+            fi
+          done
+          echo "symbol IOC check passed — SPPlus carries no il2cpp symbol names"
           # Real (self-signed) cert — not ad-hoc. Signulous-style re-signers
           # enumerate nested binaries by their CMS signature; a stripped stub
           # gets skipped, stays unsigned, and iOS kills the app on launch.

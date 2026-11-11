@@ -1059,3 +1059,63 @@ calls it (when il2cpp is ready) so the next build can wire
 enumerate → should_keep → ReleasePokemon against this build's real method
 names. The keep-rule evaluation moves from wire-parse (`parse_mon`) to
 il2cpp field reads on each pokemon object.
+
+## v26 anti-tamper: il2cpp symbol IOC (force-close on launch)
+
+v26 force-closed at the loading screen with SpooferPro's "This ipa appears
+to be tampered with or something is injected" warning. v25 (identical base,
+identical stripped libSpooferPro, identical inject + sign steps) launched
+fine. The ONLY variable was the SPPlus.dylib binary.
+
+Binary diff of SPPlus-v25.dylib vs SPPlus-v26.dylib
+(debug/bin/, pulled from the two IPAs):
+
+- Same linked dylibs (libSystem + self), same 55 imported symbols.
+- v26 adds these DEFINED EXTERNAL symbols (exported in the Mach-O export
+  trie / symbol table):
+    _spp_il2cpp_gc_foreach_heap        ← the smoking gun
+    _spp_il2cpp_gc_disable
+    _spp_il2cpp_gc_enable
+    _spp_il2cpp_class_is_assignable_from
+    _spp_il2cpp_bag_inspect  _bag_heap_cb  _g_allow_zenject  …
+
+`il2cpp_gc_foreach_heap` is a textbook IOC (indicator of compromise) for
+il2cpp memory-dumping cheats — Il2CppDumper, cheat engines, and heap
+scanners all call it, and anti-cheat / anti-tamper systems signature-scan
+loaded images for exactly this symbol name. v25's symbol table already
+carried `spp_il2cpp_runtime_invoke`, `spp_il2cpp_object_new`, etc. (all
+containing "il2cpp") and did NOT trip — so SpooferPro is not scanning for
+"il2cpp" broadly; it flags the specific `gc_foreach_heap` heap-enumeration
+API the instant it appears.
+
+Verified the IOC strings live in __LINKEDIT (symbol table / export trie),
+not __cstring: `foreach_heap` at file offsets 0x1c6aa / 0x1de61, both above
+__cstring's end (0x12ced). So they are symbol names, not string literals.
+`strip` alone does not remove them (they are exported external symbols the
+export trie keeps).
+
+### Fix
+
+SPPlus exports nothing — it runs from a single `__mod_init_func`
+constructor, invoked by pointer, never by symbol. So every symbol can be
+hidden with zero functional impact (the il2cpp calls resolve by VMA offset,
+not by name). CI now builds with:
+
+    -fvisibility=hidden  -Wl,-x  -Wl,-unexported_symbol,'*'
+    + strip -x
+    + a grep gate that FAILS the build if foreach_heap / is_assignable_from
+      / spp_il2cpp / gc_disable survive
+
+This empties SPPlus's symbol name surface, so no il2cpp symbol IOC is
+scannable. The gate guarantees we never ship another tamper-tripping dylib
+by accident.
+
+Note: this is symbol stripping, NOT code-signature stripping — the
+self-signed CMS signature is still applied afterward, so re-signers that
+enumerate nested binaries by CMS still see SPPlus.
+
+Open: if a future build still trips, the next suspects are __cstring
+literals, but the only SP+-specific ones are log strings and the
+`GetPokemon`/`GetPokedex` enumerator names — and those also appear in the
+game's own binary, so SpooferPro can't blocklist them without
+false-positiving PoGo itself.
