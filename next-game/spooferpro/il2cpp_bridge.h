@@ -75,6 +75,20 @@ extern void                *(*spp_il2cpp_class_get_fields)(Il2CppClass *, void *
 extern const char          *(*spp_il2cpp_field_get_name)(void *field);
 extern void                 (*spp_il2cpp_field_static_get_value)(void *field, void *out);
 
+// v26 — GC heap walk, for finding a live instance without Zenject Resolve
+// (which crashes on this build) or code-patching (code-signing risk).
+// il2cpp_gc_foreach_heap invokes `func(obj, user)` for every live managed
+// object; it stops the GC world for the duration, so the callback must not
+// allocate or block. gc_disable/enable bracket the walk defensively.
+extern void                 (*spp_il2cpp_gc_foreach_heap)(void (*func)(void *obj, void *user), void *user);
+extern void                 (*spp_il2cpp_gc_disable)(void);
+extern void                 (*spp_il2cpp_gc_enable)(void);
+extern int32_t              (*spp_il2cpp_class_is_assignable_from)(Il2CppClass *to, Il2CppClass *from);
+
+// Zenject Strategy C crashes during launch and is OFF by default. The host
+// can opt in (post-login only) via config if a future build needs it.
+void              spp_il2cpp_set_allow_zenject(int on);
+
 // High-level helpers (cached by name so the walk cost is paid once).
 //
 // `image_name` is the assembly's file name e.g. "Assembly-CSharp.dll" or
@@ -119,6 +133,13 @@ int               spp_il2cpp_probe_release_pokemon(void);
 // Invoke IPokemonBag.ReleasePokemon via il2cpp. Returns 0 on success,
 // non-zero if any resolution step failed (logged).
 int               spp_il2cpp_release_pokemon(uint64_t uid);
+
+// Feature-time bag inspection: find the live bag via the GC heap walk and
+// dump its enumeration API + a sample collection object's class, so the
+// per-keep-rule clean can be wired against this build's real method names.
+// Returns 0 if a live bag was found. Call when the user taps Clean Bag Now
+// (post-login) — never at launch.
+int               spp_il2cpp_bag_inspect(void);
 
 #ifdef __cplusplus
 }

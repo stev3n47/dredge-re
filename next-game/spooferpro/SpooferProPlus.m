@@ -1324,17 +1324,37 @@ static void present_main(void) {
                     S("alertControllerWithTitle:message:preferredStyle:"),
                     nsstr("SpooferProPlus"), nsstr(msg), 1);
 
-    // Primary CTA — destructive style stands out visually. Splices HOLO_INV
-    // so the clean fires now instead of waiting for the game's natural poll.
-    const char *clean_title = gCleanOnce
-        ? "Clean armed — syncing inventory…"
-        : "Clean bag now";
+    // Primary CTA — destructive style stands out visually.
+    const char *clean_title = "Clean bag now";
     add_act(alert, vc, clean_title, 2, ^(id a) {
+        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
+
+        // Preferred path on 0.743: il2cpp. The rpc2 splice CANNOT work here
+        // because the wire is FlatBuffers (see SPOOFERPRO-FINDINGS.md
+        // "ROOT CAUSE (v25)"). The bag is found via the GC heap walk
+        // (no Zenject, no code-patching) and release goes through the
+        // game's own C# IPokemonBag.ReleasePokemon, which serializes the
+        // FlatBuffer + signs the N2 request itself.
+        if (spp_il2cpp_ready()) {
+            ipalog("[SP+] manual bag clean: il2cpp path (heap-walk bag inspect)");
+            // Defer so the sheet-dismiss animation isn't frozen by the
+            // GC-stop-the-world heap walk. Runs on the main thread, which is
+            // Unity's thread and always il2cpp-attached.
+            run_on_main_later(0.2, ^{
+                int rc = spp_il2cpp_bag_inspect();
+                ipalog("[SP+] manual bag clean: bag_inspect rc=%d "
+                       "(see the bag API dump above — the keep-rule clean is "
+                       "wired against these method names next build)", rc);
+            });
+            return;
+        }
+
+        // Legacy protobuf rpc2 splice — only reachable on older game versions
+        // where the il2cpp bridge never came up. DEAD on FlatBuffers (0.743).
         gCleanOnce = 1;
         if (!gTemplate) {
             ipalog("[SP+] manual bag clean armed — no envelope template yet "
                    "(play a few seconds so an rpc2 request flows, then retap)");
-            SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
             return;
         }
         NSData *req = build_request(M_HOLO_INV, NULL, 0);
@@ -1343,7 +1363,6 @@ static void present_main(void) {
             (size_t)(uintptr_t)SEND(req, S("length")));
         ipalog("[SP+] manual bag clean: splicing HOLO_INV seq=%lu", ++gSeq);
         post_env_handle(env);
-        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
     });
 
     add_act(alert, vc, "Keep rules…",           0, ^(id a) { reopen_as(vc, present_keep); });

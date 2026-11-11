@@ -1014,3 +1014,48 @@ protobuf envelope machinery are DEAD CODE against 0.743. Keep for now
 reusable), but gate all splicing behind an explicit
 `allow_protobuf_splice` config flag defaulting OFF, and make the UI say
 "release runs via il2cpp" once the il2cpp release path lands.
+
+## v26 — il2cpp release path via GC heap walk (bag instance w/o Zenject)
+
+Given the FlatBuffers finding, release must go through the game's own C#
+`IPokemonBag.ReleasePokemon(PokemonProto)` (the game serializes the
+FlatBuffer + signs the N2 request itself). The only blocker was getting
+the live bag instance:
+
+- v20 used Zenject `DiContainer.Resolve` → CODESIGNING Invalid Page SIGKILL.
+- Inline-hooking a bag method to capture `this` → fails the hardened-runtime
+  code-signature check the same way (can't make `__text` writable).
+
+Solution: **GC heap walk.** `il2cpp_gc_foreach_heap(cb, user)` (present in
+0.743 UnityFramework at VMA 0x20c320) enumerates every live managed object
+with the GC world stopped. We match the first object whose class is
+(assignable to) `PokemonBagImpl`. No Zenject, no code-patching, no
+crash-class exposure.
+
+New symbols dumped + bound: `il2cpp_gc_foreach_heap`, `il2cpp_gc_disable`,
+`il2cpp_gc_enable`, `il2cpp_class_is_assignable_from` (45/45 total).
+
+New bag-resolve order (`spp_il2cpp_get_pokemon_bag`):
+  E. GC heap walk            ← primary, tried first
+  A. static Instance field
+  B. get_Instance property
+  C. Zenject Resolve         ← OFF by default (known crasher; opt-in via
+                               spp_il2cpp_set_allow_zenject)
+  D. GameManager.PokemonBag
+
+Runs at feature time only (post-login, when the bag exists) — never at
+launch. The heap walk + subsequent invokes run on the main thread (Unity's
+thread, always il2cpp-attached); the walk hitch is a few hundred ms for a
+one-shot button press.
+
+### Open: enumeration API not yet known
+
+We can now find the bag and release one pokemon by uid. We still need the
+bag's own pokemon list (we can't read inventory off the wire — it's
+FlatBuffers). `spp_il2cpp_bag_inspect()` dumps the bag class's methods +
+probes common enumeration accessors (`GetPokemon` / `get_Pokemon` /
+`get_Count` / …) and logs the returned collection's class. Clean Bag Now
+calls it (when il2cpp is ready) so the next build can wire
+enumerate → should_keep → ReleasePokemon against this build's real method
+names. The keep-rule evaluation moves from wire-parse (`parse_mon`) to
+il2cpp field reads on each pokemon object.
