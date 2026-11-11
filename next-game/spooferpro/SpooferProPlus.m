@@ -1629,6 +1629,36 @@ static id hook_dt(id self, SEL _cmd, id request, id completionHandler) {
             ipalog("[SP+] hook_dt NULL forward cls=%s", class_getName(object_getClass(self))); }
         return nil;
     }
+    // Anti-tamper neutralization. raw.spooferpro.com is SpooferPro's tamper-
+    // policy endpoint: it is present in EVERY build that force-closes with the
+    // "ipa appears tampered" warning and ABSENT from every working build's log
+    // (v20/v21/v23 hit only static.spooferpro.com). SpooferPro fetches a
+    // verdict/policy there and acts on it — which is why nothing about SPPlus's
+    // own bytes (symbols, strings, structure) ever mattered. We log the real
+    // response for analysis, then hand SpooferPro an EMPTY body so its
+    // anti-tamper has no policy to act on. Blocked by default; set
+    // "allow_raw_spooferpro":1 in sppro_plus.json to let it through.
+    if (!ours && u && SEND(u, S("containsString:"), nsstr("raw.spooferpro.com")) &&
+        completionHandler && !cfg_i("allow_raw_spooferpro")) {
+        handler_t orig = (handler_t)completionHandler;
+        handler_t wrapped = ^(NSData *d, NSURLResponse *r, NSError *e) {
+            unsigned long n = d ? (unsigned long)(uintptr_t)SEND(d, S("length")) : 0;
+            if (d && n) {
+                const uint8_t *bb = (const uint8_t *)SEND(d, S("bytes"));
+                char hex[160]; int o = 0; unsigned cap = n < 48 ? (unsigned)n : 48;
+                for (unsigned i = 0; i < cap && o < 150; i++)
+                    o += snprintf(hex + o, sizeof hex - o, "%02x", bb[i]);
+                hex[o] = 0;
+                ipalog("[SP+] raw.spooferpro.com resp=%luB err=%d — STUB empty. head: %s",
+                       n, !!e, hex);
+            } else {
+                ipalog("[SP+] raw.spooferpro.com resp=%luB err=%d — STUB empty", n, !!e);
+            }
+            id empty = SEND(C("NSData"), S("data"));
+            if (orig) orig(empty, r, nil);
+        };
+        return forward(self, _cmd, request, _Block_copy(wrapped));
+    }
     if (!ours && u && SEND(u, S("containsString:"), nsstr("/plfe/rpc2")) &&
         body && (uintptr_t)SEND(body, S("length")) > 50 && completionHandler) {
         NSData *captured = body;
@@ -1671,6 +1701,17 @@ static void hook_recvdata(id self, SEL _cmd, id session, id task, id data) {
     // lock-free for all other traffic.
     id req = SEND(task, S("originalRequest"));
     NSString *u = SEND(SEND(req, S("URL")), S("absoluteString"));
+    // Anti-tamper neutralization (delegate path): starve SpooferPro's
+    // raw.spooferpro.com response of its body by dropping every data chunk,
+    // so the policy its tamper check reads arrives empty. Mirrors the
+    // completion-handler stub in hook_dt. See that comment for the rationale.
+    if (u && SEND(u, S("containsString:"), nsstr("raw.spooferpro.com")) &&
+        !cfg_i("allow_raw_spooferpro")) {
+        static int logged_drop;
+        if (!logged_drop) { logged_drop = 1;
+            ipalog("[SP+] raw.spooferpro.com delegate data DROPPED (anti-tamper stub)"); }
+        return;  // do not forward the chunk to SpooferPro's delegate
+    }
     if (u && (SEND(u, S("containsString:"), nsstr("/plfe/rpc2")) ||
               SEND(u, S("containsString:"), nsstr("nianticlabs.com")))) {
         @synchronized ((id)gTaskBuf) {

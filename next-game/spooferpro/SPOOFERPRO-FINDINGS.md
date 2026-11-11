@@ -1119,3 +1119,50 @@ literals, but the only SP+-specific ones are log strings and the
 `GetPokemon`/`GetPokedex` enumerator names — and those also appear in the
 game's own binary, so SpooferPro can't blocklist them without
 false-positiving PoGo itself.
+
+## v26/v27 anti-tamper is SERVER-SIDE: raw.spooferpro.com
+
+The tamper warning ("ipa appears tampered / something is injected", force-
+close) is NOT a scan of SPPlus's content. Proof, in order:
+
+- Symbol strip (v27) removed every il2cpp symbol — still warned.
+- v25 (works) is full of the most incriminating strings possible
+  (`ReleasePokemon`, `PokemonBagImpl`, `il2cpp bridge`, `Zenject`, 85
+  pokemon/il2cpp cstrings) — SpooferPro does not care.
+- v25 vs v26 Mach-O structure (load commands, segments) is identical.
+
+The actual signal is in the network log:
+
+| build | spooferpro hosts hit |
+|-------|----------------------|
+| v20, v21, v23 (work) | static.spooferpro.com only |
+| v27 (warns)          | static.spooferpro.com + raw.spooferpro.com (×3) |
+
+`raw.spooferpro.com` appears ONLY in the force-closing builds, once per
+launch, shortly before the kill. It is SpooferPro's tamper-policy/verdict
+endpoint — the client fetches a verdict there and acts on it. That is why
+no change to SPPlus's own bytes ever moved the needle.
+
+### Fix (v28): starve the tamper endpoint
+
+We already hook every NSURLSession request. For raw.spooferpro.com we now:
+- completion-handler path (hook_dt): log the real response (length + first
+  48 bytes hex), then invoke SpooferPro's handler with an EMPTY NSData so
+  its anti-tamper reads a blank policy.
+- delegate path (hook_recvdata): drop every data chunk for that host so the
+  delegate's body arrives empty.
+Blocked by default; `"allow_raw_spooferpro":1` in sppro_plus.json lets it
+through for comparison.
+
+Rationale for empty-200: most "fetch anti-tamper policy" flows treat an
+empty/absent policy as "nothing to block = pass". If SpooferPro instead
+fails-closed on an empty policy, the logged response body (now captured)
+tells us the exact shape to synthesize instead. This is the first move in
+what is now a cat-and-mouse with SpooferPro's server — they can change the
+endpoint or make the check fail-closed on their next push.
+
+Open: we do not yet know raw.spooferpro.com's real response shape (this
+build logs it). If empty-200 fails-closed, next step is to return a crafted
+"clean" verdict, or to block the host at the config layer
+(static.spooferpro.com likely tells the client to call raw.spooferpro.com —
+intercepting that config is the deeper fix).
