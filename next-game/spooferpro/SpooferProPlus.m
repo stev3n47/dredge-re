@@ -1337,8 +1337,14 @@ static void present_main(void) {
         // transition interleaving. It only reads the bag class's method/field
         // names so we can design the keep-rule clean against the real API.
         if (spp_il2cpp_ready()) {
-            ipalog("[SP+] manual bag clean: il2cpp metadata inspect (no managed exec)");
-            int rc = spp_il2cpp_bag_inspect();
+            // Enum probe defaults ON for this test build (metadata-only is
+            // already proven stable). Set "bag_enum_probe":0 in sppro_plus.json
+            // to force metadata-only if the probe's managed invokes crash.
+            int probe = 1;
+            id pv = SEND(gCfg, S("objectForKey:"), nsstr("bag_enum_probe"));
+            if (pv) probe = (int)(intptr_t)SEND(pv, S("intValue"));
+            ipalog("[SP+] manual bag clean: il2cpp inspect (enum_probe=%d)", probe);
+            int rc = spp_il2cpp_bag_inspect(probe);
             ipalog("[SP+] manual bag clean: bag_inspect rc=%d "
                    "(see the bag method/field dump above)", rc);
             SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);

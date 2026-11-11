@@ -381,25 +381,25 @@ static void bag_heap_cb(void *obj, void *user) {
     struct bag_search *s = (struct bag_search *)user;
     s->scanned++;
     if (s->found || !obj) return;
+    // Exact class match only. PokemonBagImpl is concrete, so we don't need
+    // is_assignable_from (which walks the class hierarchy and is heavier to
+    // run inside the stop-the-world callback).
     Il2CppClass *k = spp_il2cpp_object_get_class((Il2CppObject *)obj);
-    if (!k) return;
-    if (k == s->target ||
-        (spp_il2cpp_class_is_assignable_from &&
-         spp_il2cpp_class_is_assignable_from(s->target, k))) {
-        s->found = (Il2CppObject *)obj;
-    }
+    if (k && k == s->target) s->found = (Il2CppObject *)obj;
 }
 
 static Il2CppObject *heap_walk_find(Il2CppClass *target) {
     if (!spp_il2cpp_gc_foreach_heap || !target) return NULL;
-    // Attach this thread to the runtime — the walk and any later invoke run
-    // on our background completion-handler queue, not a managed thread.
+    // Main thread (Unity's) is already attached; attach again only as a
+    // no-op safety. Do NOT touch gc_disable/gc_enable — v29 showed poking the
+    // GC around the walk destabilized the runtime and the N2 anti-cheat BRK
+    // fired in SpooferPro's next managed execution. il2cpp_gc_foreach_heap
+    // stops the world itself for the duration of the callback, so no extra
+    // GC control is needed.
     if (spp_il2cpp_thread_attach && spp_il2cpp_domain_get)
         spp_il2cpp_thread_attach(spp_il2cpp_domain_get());
     struct bag_search s = { target, NULL, 0 };
-    if (spp_il2cpp_gc_disable) spp_il2cpp_gc_disable();
     spp_il2cpp_gc_foreach_heap(bag_heap_cb, &s);
-    if (spp_il2cpp_gc_enable) spp_il2cpp_gc_enable();
     ipalog("[SP+] bag-resolve: heap walk scanned %ld objects, %s",
            s.scanned, s.found ? "FOUND bag" : "no match");
     return s.found;
@@ -600,7 +600,7 @@ int spp_il2cpp_probe_release_pokemon(void) {
 // clean can be designed against it — WITHOUT a heap walk, class init, or
 // invoke. Finding the live instance + releasing is a later, carefully-staged
 // step once we know exactly which members to use.
-int spp_il2cpp_bag_inspect(void) {
+int spp_il2cpp_bag_inspect(int enum_probe) {
     if (!g_ready) { ipalog("[SP+] bag-inspect: bridge not ready"); return -10; }
     const char *ns = NULL, *cls = NULL;
     Il2CppClass *bag_class = find_bag_class(&ns, &cls);
@@ -629,6 +629,56 @@ int spp_il2cpp_bag_inspect(void) {
         ipalog("[SP+]   bag.field %s", fn ?: "?");
     }
     ipalog("[SP+] bag-inspect: %d fields — metadata dump complete", nf);
+
+    // Phase 2 — enumeration PROBE (no release). Opt-in via `enum_probe` (the
+    // host passes cfg_i("bag_enum_probe")) so we can ship it dark and flip it
+    // on when ready to test managed invokes. Finds the live instance (heap
+    // walk, no GC poke), reads get_Count(), calls get_AllPokemon(), and dumps
+    // the collection + member names so the keep-rule clean can be wired
+    // against the real pokemon API. Runs in the stable synchronous window
+    // (before the sheet dismiss). Reads only — releases nothing.
+    if (!enum_probe) {
+        ipalog("[SP+] bag-inspect: enum probe off "
+               "(set bag_enum_probe=1 in sppro_plus.json to run it)");
+        return 0;
+    }
+    ipalog("[SP+] bag-enum: resolving live instance (heap walk)");
+    Il2CppObject *bag = spp_il2cpp_get_pokemon_bag();
+    if (!bag) { ipalog("[SP+] bag-enum: no live bag instance"); return 0; }
+    ipalog("[SP+] bag-enum: bag @ %p", (void *)bag);
+
+    const MethodInfo *m_count = spp_il2cpp_find_method(bag_class, "get_Count", 0);
+    if (m_count) {
+        Il2CppObject *boxed = spp_il2cpp_invoke_0(m_count, bag);
+        // get_Count returns int; il2cpp boxes it — the value sits just past
+        // the object header (2 pointers) for a boxed primitive.
+        if (boxed) {
+            int cnt = *(int *)((uint8_t *)boxed + 2 * sizeof(void *));
+            ipalog("[SP+] bag-enum: get_Count() = %d", cnt);
+        }
+    }
+
+    const MethodInfo *m_all = spp_il2cpp_find_method(bag_class, "get_AllPokemon", 0);
+    if (!m_all) { ipalog("[SP+] bag-enum: no get_AllPokemon"); return 0; }
+    Il2CppObject *coll = spp_il2cpp_invoke_0(m_all, bag);
+    if (!coll) { ipalog("[SP+] bag-enum: get_AllPokemon() returned null"); return 0; }
+    Il2CppClass *coll_cls = spp_il2cpp_object_get_class(coll);
+    ipalog("[SP+] bag-enum: get_AllPokemon() -> %s.%s @ %p",
+           coll_cls ? (spp_il2cpp_class_get_namespace(coll_cls) ?: "") : "",
+           coll_cls ? (spp_il2cpp_class_get_name(coll_cls) ?: "?") : "?",
+           (void *)coll);
+    // Dump the collection's methods so we can see how to index/count it
+    // (get_Item / get_Count / ToArray / GetEnumerator / …).
+    if (coll_cls) {
+        void *ci = NULL; int cm = 0;
+        for (; cm < 40; cm++) {
+            const MethodInfo *m = spp_il2cpp_class_get_methods(coll_cls, &ci);
+            if (!m) break;
+            ipalog("[SP+]   coll.method %s / argc=%u",
+                   spp_il2cpp_method_get_name(m) ?: "?",
+                   spp_il2cpp_method_get_param_count(m));
+        }
+    }
     return 0;
 }
 

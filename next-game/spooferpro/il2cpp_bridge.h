@@ -138,8 +138,10 @@ int               spp_il2cpp_release_pokemon(uint64_t uid);
 // dump its enumeration API + a sample collection object's class, so the
 // per-keep-rule clean can be wired against this build's real method names.
 // Returns 0 if a live bag was found. Call when the user taps Clean Bag Now
-// (post-login) — never at launch.
-int               spp_il2cpp_bag_inspect(void);
+// (post-login) — never at launch. `enum_probe` (host: cfg_i("bag_enum_probe"))
+// gates the phase-2 enumeration probe that runs managed invokes
+// (get_Count / get_AllPokemon); 0 = metadata-only.
+int               spp_il2cpp_bag_inspect(int enum_probe);
 
 #ifdef __cplusplus
 }
