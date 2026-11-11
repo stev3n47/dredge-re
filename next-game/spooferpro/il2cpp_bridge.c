@@ -583,49 +583,52 @@ int spp_il2cpp_probe_release_pokemon(void) {
     return 0;
 }
 
-// Feature-time bag inspection. Finds the live bag via the heap walk, then
-// dumps its methods/fields and (if we can reach one) a sample pokemon's
-// members — so we can wire enumeration + per-pokemon field reads for the
-// keep-rule clean. The bag's collection API (GetPokemon / get_Pokemon /
-// indexer / count) is renamed per build, so we learn it from this dump
-// rather than hard-coding guesses. Returns 0 if the bag was found.
+// Feature-time bag inspection — METADATA ONLY (v30).
 //
-// Also attempts the common enumeration accessors directly; if one returns
-// an object, logs its class so the next build can iterate it. This is the
-// bridge between "we can find + release one pokemon" and "we can clean the
-// whole bag by keep-rules".
+// v29 crashed here: running managed code from our Clean-bag-now path
+// (the heap walk's gc_disable/gc_foreach_heap, runtime_class_init, and the
+// enumeration invokes) destabilized the il2cpp runtime, and the next
+// managed execution — SpooferPro's willEnterForeground scene hook — hit the
+// game's N2 anti-cheat BRK at UnityFramework+0x7196310 (EXC_BREAKPOINT).
+// The crash stack had NO SPPlus frames; our calls poisoned the runtime
+// state asynchronously.
+//
+// So this version executes NO managed code and touches NO GC: it only reads
+// class metadata (method + field names, param counts) directly from the
+// Il2CppClass. That is enough to learn the bag's real enumeration API
+// (GetPokemon / get_Count / a pokemon-collection field) so the keep-rule
+// clean can be designed against it — WITHOUT a heap walk, class init, or
+// invoke. Finding the live instance + releasing is a later, carefully-staged
+// step once we know exactly which members to use.
 int spp_il2cpp_bag_inspect(void) {
     if (!g_ready) { ipalog("[SP+] bag-inspect: bridge not ready"); return -10; }
     const char *ns = NULL, *cls = NULL;
     Il2CppClass *bag_class = find_bag_class(&ns, &cls);
     if (!bag_class) { ipalog("[SP+] bag-inspect: no bag class"); return -1; }
+    ipalog("[SP+] bag-inspect: %s.%s — metadata dump (no managed exec)", ns, cls);
 
-    Il2CppObject *bag = spp_il2cpp_get_pokemon_bag();
-    if (!bag) { ipalog("[SP+] bag-inspect: heap walk found no live bag "
-                       "(log in and open your pokemon storage first)"); return -2; }
-    ipalog("[SP+] bag-inspect: live bag @ %p — dumping its API", (void *)bag);
-    spp_il2cpp_dump_class_members(bag_class, 60);
-
-    // Try common enumeration accessors so we can see the collection type.
-    static const char *k_enum_getters[] = {
-        "GetPokemon", "get_Pokemon", "GetAllPokemon", "get_AllPokemon",
-        "GetPokemonList", "get_PokemonList", "GetPokedex", "get_Count",
-        "GetCount", "get_Pokemons", "GetPokemons", NULL };
-    for (int i = 0; k_enum_getters[i]; i++) {
-        const MethodInfo *g = spp_il2cpp_find_method(bag_class, k_enum_getters[i], 0);
-        if (!g) continue;
-        Il2CppObject *r = spp_il2cpp_invoke_0(g, bag);
-        if (r) {
-            Il2CppClass *rc = spp_il2cpp_object_get_class(r);
-            ipalog("[SP+] bag-inspect: %s() -> %s.%s @ %p",
-                   k_enum_getters[i],
-                   rc ? (spp_il2cpp_class_get_namespace(rc) ?: "") : "",
-                   rc ? (spp_il2cpp_class_get_name(rc) ?: "?") : "null-class",
-                   (void *)r);
-        } else {
-            ipalog("[SP+] bag-inspect: %s() -> null/empty", k_enum_getters[i]);
-        }
+    // Methods (names + arg counts) via pure metadata iteration. No
+    // runtime_class_init (that would run the static ctor), no invoke.
+    void *iter = NULL; int n = 0;
+    for (; n < 80; n++) {
+        const MethodInfo *m = spp_il2cpp_class_get_methods(bag_class, &iter);
+        if (!m) break;
+        const char *name = spp_il2cpp_method_get_name(m);
+        uint32_t argc = spp_il2cpp_method_get_param_count(m);
+        ipalog("[SP+]   bag.method %s / argc=%u", name ?: "?", argc);
     }
+    ipalog("[SP+] bag-inspect: %d methods", n);
+
+    // Fields (names) — a pokemon-collection field read directly is the safest
+    // enumeration path (field read executes no managed code).
+    iter = NULL; int nf = 0;
+    for (; nf < 80; nf++) {
+        void *fld = spp_il2cpp_class_get_fields(bag_class, &iter);
+        if (!fld) break;
+        const char *fn = spp_il2cpp_field_get_name(fld);
+        ipalog("[SP+]   bag.field %s", fn ?: "?");
+    }
+    ipalog("[SP+] bag-inspect: %d fields — metadata dump complete", nf);
     return 0;
 }
 

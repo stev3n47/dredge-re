@@ -1218,3 +1218,42 @@ If the scan reads image[0]'s macho header instead of relying on the count,
 force the two direct-scan function entries to `ret`: 0xc4f7e4, 0xc4cfa4.
 Surgical alternative: patch the single verdict-store (strb/cset) inside
 0xc4f7e4 so it always writes "clean" — needs disasm of 0xc4f7e4..0xc4fb00.
+
+## v29 crash → v30: il2cpp managed exec trips the N2 anti-cheat BRK
+
+Anti-tamper is beaten (v29 reached the map, no warning). But tapping Clean
+bag now crashed: EXC_BREAKPOINT (SIGTRAP) at UnityFramework+0x7196310.
+Decoded stack (debug/crashes/v29-PokmonGO-2026-11-11-125033.ips):
+
+```
+0  UnityFramework +0x7196310   ← BRK (N2 anti-cheat tripwire)
+11 UnityFramework +0x29b578    ← il2cpp_runtime_invoke
+...
+36 libSpooferPro  +0x56c830    ← SpooferPro willEnterForeground hook
+39 -[_UISceneLifecycleMonitor willEnterForeground]
+```
+
+NO SPPlus frames. The BRK is a different tripwire than the _GetN2Api entry
+our watch guards (hence restores=0). Mechanism: v29's Clean bag now was the
+first build to run the il2cpp path — the heap walk's gc_disable /
+gc_foreach_heap, runtime_class_init, and enumeration invokes destabilized
+the runtime/GC; the next managed execution (SpooferPro's foreground scene
+hook, fired by our sheet dismiss's scene transition) then hit the N2 BRK.
+Earlier builds' Clean bag now did the rpc2 splice with zero il2cpp, so the
+dismiss→foreground path never crashed.
+
+### v30 fix: metadata-only inspect, no managed execution
+
+spp_il2cpp_bag_inspect now reads ONLY class metadata — method names + arg
+counts (il2cpp_class_get_methods) and field names (il2cpp_class_get_fields).
+No heap walk, no runtime_class_init (no static ctor), no invoke, no GC
+disable/foreach. It runs synchronously BEFORE the sheet dismiss so there is
+no scene-transition interleaving. This learns the bag's real enumeration API
+(GetPokemon / get_Count / a pokemon-collection field) without touching the
+runtime, so the keep-rule clean can be designed against it.
+
+Design consequence: the eventual release must minimize managed execution and
+never destabilize the GC. A pokemon-collection FIELD read (no managed code)
+is preferred over method invokes for enumeration; the release itself
+(ReleasePokemon invoke) must be done carefully, possibly off the
+foreground-transition window, with the GC left untouched.

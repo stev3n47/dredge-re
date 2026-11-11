@@ -1327,27 +1327,24 @@ static void present_main(void) {
     // Primary CTA — destructive style stands out visually.
     const char *clean_title = "Clean bag now";
     add_act(alert, vc, clean_title, 2, ^(id a) {
-        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
-
-        // Preferred path on 0.743: il2cpp. The rpc2 splice CANNOT work here
-        // because the wire is FlatBuffers (see SPOOFERPRO-FINDINGS.md
-        // "ROOT CAUSE (v25)"). The bag is found via the GC heap walk
-        // (no Zenject, no code-patching) and release goes through the
-        // game's own C# IPokemonBag.ReleasePokemon, which serializes the
-        // FlatBuffer + signs the N2 request itself.
+        // il2cpp path on 0.743 (rpc2 is FlatBuffers; see ROOT CAUSE v25).
+        //
+        // v29 crashed because we ran managed code / GC ops here and that
+        // destabilized the runtime, so the N2 anti-cheat BRK fired in
+        // SpooferPro's willEnterForeground hook. v30: bag_inspect is now
+        // METADATA-ONLY (no heap walk, no class-init, no invoke, no GC) and
+        // runs SYNCHRONOUSLY *before* the dismiss so there is no scene-
+        // transition interleaving. It only reads the bag class's method/field
+        // names so we can design the keep-rule clean against the real API.
         if (spp_il2cpp_ready()) {
-            ipalog("[SP+] manual bag clean: il2cpp path (heap-walk bag inspect)");
-            // Defer so the sheet-dismiss animation isn't frozen by the
-            // GC-stop-the-world heap walk. Runs on the main thread, which is
-            // Unity's thread and always il2cpp-attached.
-            run_on_main_later(0.2, ^{
-                int rc = spp_il2cpp_bag_inspect();
-                ipalog("[SP+] manual bag clean: bag_inspect rc=%d "
-                       "(see the bag API dump above — the keep-rule clean is "
-                       "wired against these method names next build)", rc);
-            });
+            ipalog("[SP+] manual bag clean: il2cpp metadata inspect (no managed exec)");
+            int rc = spp_il2cpp_bag_inspect();
+            ipalog("[SP+] manual bag clean: bag_inspect rc=%d "
+                   "(see the bag method/field dump above)", rc);
+            SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
             return;
         }
+        SEND(vc, S("dismissViewControllerAnimated:completion:"), YES, nil);
 
         // Legacy protobuf rpc2 splice — only reachable on older game versions
         // where the il2cpp bridge never came up. DEAD on FlatBuffers (0.743).
