@@ -143,6 +143,14 @@ int               spp_il2cpp_release_pokemon(uint64_t uid);
 // (get_Count / get_AllPokemon); 0 = metadata-only.
 int               spp_il2cpp_bag_inspect(int enum_probe);
 
+// Crash-safe Zenject chain probe (v37): reaches the DiContainer via pure data
+// reads (ProjectContext._instance -> _container) and dumps its field layout +
+// the provider-dictionary/ProviderInfo/BindingId metadata, so the provider
+// walk that yields the live bag can be written from real offsets. Executes NO
+// generic-dispatch invoke, so it cannot trip the CODESIGNING page that killed
+// v36. Logs how far it reached.
+void              spp_il2cpp_zenject_probe(void);
+
 #ifdef __cplusplus
 }
 #endif

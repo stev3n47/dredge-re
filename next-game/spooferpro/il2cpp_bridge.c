@@ -53,6 +53,9 @@ void                 (*spp_il2cpp_gc_foreach_heap)(void (*func)(void *obj, void 
 void                 (*spp_il2cpp_gc_disable)(void);
 void                 (*spp_il2cpp_gc_enable)(void);
 int32_t              (*spp_il2cpp_class_is_assignable_from)(Il2CppClass *to, Il2CppClass *from);
+void                *(*spp_il2cpp_class_get_field_from_name)(Il2CppClass *, const char *name);
+Il2CppType          *(*spp_il2cpp_field_get_type)(void *field);
+char                *(*spp_il2cpp_type_get_name)(const Il2CppType *);
 
 // --- state --------------------------------------------------------------
 static int g_ready = 0;
@@ -137,6 +140,9 @@ int spp_il2cpp_init(char *errbuf, size_t errbuflen) {
     RESOLVE(il2cpp_gc_disable,                 SPP_IL2CPP_GC_DISABLE_OFF);
     RESOLVE(il2cpp_gc_enable,                  SPP_IL2CPP_GC_ENABLE_OFF);
     RESOLVE(il2cpp_class_is_assignable_from,   SPP_IL2CPP_CLASS_IS_ASSIGNABLE_FROM_OFF);
+    RESOLVE(il2cpp_class_get_field_from_name,   SPP_IL2CPP_CLASS_GET_FIELD_FROM_NAME_OFF);
+    RESOLVE(il2cpp_field_get_type,              SPP_IL2CPP_FIELD_GET_TYPE_OFF);
+    RESOLVE(il2cpp_type_get_name,               SPP_IL2CPP_TYPE_GET_NAME_OFF);
 #undef RESOLVE
 
     // Attach this thread to the il2cpp runtime before we call anything —
@@ -305,6 +311,77 @@ void spp_il2cpp_dump_class_members(Il2CppClass *klass, int limit) {
         ipalog("[SP+]   field  %s", spp_il2cpp_field_get_name(f) ?: "?");
     }
     ipalog("[SP+]   (%d methods, %d fields shown)", n, fn);
+}
+
+// --- crash-safe data-read field access -----------------------------------
+//
+// il2cpp FieldInfo layout is stable across the Unity 2019-2022 il2cpp line:
+//   const char*       name;    // +0x00
+//   const Il2CppType* type;    // +0x08
+//   Il2CppClass*      parent;  // +0x10
+//   int32_t           offset;  // +0x18  (byte offset of the field in the obj)
+//   int32_t           token;   // +0x1c
+// Reading offset straight out of the struct avoids needing an extra export.
+static int32_t field_offset_of(void *field) {
+    if (!field) return -1;
+    return *(int32_t *)((uint8_t *)field + 0x18);
+}
+
+// Guarded read of a pointer-sized instance field. `obj` must be a real,
+// aligned managed object (we only ever pass values that came from a static
+// field read / object_get_class), and `off` a metadata field offset that
+// therefore lands inside the object. Returns NULL on anything suspicious so
+// we never dereference garbage — no managed code runs, so there is no
+// code-signature-invalid-page risk here, only a bad-pointer risk, which the
+// range/alignment checks remove.
+static void *read_ptr_field(void *obj, int32_t off) {
+    uintptr_t p = (uintptr_t)obj;
+    if (!obj || (p & 7)) return NULL;
+    if (off < (int32_t)sizeof(void *) || off > 0x8000) return NULL;
+    return *(void **)((uint8_t *)obj + off);
+}
+
+// Guarded read of a 4-byte int instance field (e.g. Dictionary._count).
+static int read_int_field(void *obj, int32_t off, int *out) {
+    uintptr_t p = (uintptr_t)obj;
+    if (!obj || (p & 3) || off < 0 || off > 0x8000) return 0;
+    *out = *(int *)((uint8_t *)obj + off);
+    return 1;
+}
+
+// Dump a class's instance fields with type name + byte offset. Pure metadata
+// (names/types/offsets) — executes no managed code. This is how we learn the
+// exact Zenject struct layout (provider dictionary field, entry/count offsets)
+// without another device round-trip.
+static void dump_fields_typed(Il2CppClass *klass, const char *tag, int limit) {
+    if (!g_ready || !klass) return;
+    spp_il2cpp_runtime_class_init(klass);
+    void *iter = NULL; int n = 0;
+    for (; n < limit; n++) {
+        void *f = spp_il2cpp_class_get_fields(klass, &iter);
+        if (!f) break;
+        const char *fn = spp_il2cpp_field_get_name(f);
+        int32_t off = field_offset_of(f);
+        const char *tyn = NULL;
+        if (spp_il2cpp_field_get_type && spp_il2cpp_type_get_name) {
+            Il2CppType *ty = spp_il2cpp_field_get_type(f);
+            if (ty) tyn = spp_il2cpp_type_get_name(ty);  // heap str; intentionally leaked (a few/run)
+        }
+        ipalog("[SP+]   %s.field %-28s : %-40s @ +0x%x",
+               tag, fn ?: "?", tyn ?: "?", off);
+    }
+    ipalog("[SP+]   %s: %d fields", tag, n);
+}
+
+// Read a named pointer field off an object by looking its offset up in the
+// class metadata. Logs the offset and resulting pointer. Returns NULL safely
+// if the field name is absent.
+static void *read_named_ptr(void *obj, Il2CppClass *cls, const char *fname) {
+    if (!obj || !cls || !spp_il2cpp_class_get_field_from_name) return NULL;
+    void *f = spp_il2cpp_class_get_field_from_name(cls, fname);
+    if (!f) return NULL;
+    int32_t off = field_offset_of(f);
+    return read_ptr_field(obj, off);
 }
 
 // --- resolve IPokemonBag ---------------------------------------------------
@@ -678,6 +755,112 @@ int spp_il2cpp_probe_release_pokemon(void) {
     return 0;
 }
 
+// --- Zenject chain probe (v37) — DATA READS ONLY -------------------------
+//
+// v36 SIGKILL'd (CODESIGNING "Invalid Page" at 0x11444c700): the Strategy-C
+// path fed a hand-built System.Type into il2cpp_runtime_invoke(Resolve). That
+// ran real Zenject generic-shared code which then indirect-called through an
+// uninitialised binding and jumped to a non-executable heap page — the kernel
+// killed us. Conclusion: we must NEVER invoke Resolve (or any generic-shared
+// dispatch) ourselves on 0.743.
+//
+// This probe reaches the DiContainer with pure DATA READS instead:
+//   Zenject.ProjectContext (static _instance)  -> the global ProjectContext
+//     ._container (instance field, read by metadata offset) -> DiContainer
+// then DUMPS the DiContainer field layout (names + types + offsets) and the
+// provider-dictionary metadata, so the exact provider walk can be written from
+// real offsets with no further guessing. Every dereference is guarded
+// (aligned, in-range), so a wrong offset logs and bails — it cannot crash, and
+// since no managed code runs there is no code-signature page to trip.
+//
+// Logs precisely how far it got so the v38 provider walk needs no more
+// guessing.
+void spp_il2cpp_zenject_probe(void) {
+    if (!g_ready) { ipalog("[SP+] zenject-probe: bridge not ready"); return; }
+
+    // 1. ProjectContext class.
+    Il2CppClass *pc = spp_il2cpp_find_class("Assembly-CSharp.dll", "Zenject", "ProjectContext");
+    if (!pc) pc = spp_il2cpp_find_class(NULL, "Zenject", "ProjectContext");
+    if (!pc) pc = spp_il2cpp_find_class(NULL, NULL, "ProjectContext");
+    if (!pc) {
+        ipalog("[SP+] zenject-probe: ProjectContext class not found; matches:");
+        dump_matching_classes("ProjectContext");
+        return;
+    }
+    ipalog("[SP+] zenject-probe: ProjectContext class @ %p", (void *)pc);
+
+    // 2. static _instance — pure data read (field_static_get_value). The
+    //    trivial static getter fallback is AOT and safe (unlike Resolve).
+    Il2CppObject *inst = spp_il2cpp_static_field_object(pc, "_instance");
+    if (!inst) inst = spp_il2cpp_static_field_object(pc, "s_Instance");
+    if (!inst) {
+        const MethodInfo *gi = spp_il2cpp_find_method(pc, "get_Instance", 0);
+        if (gi) inst = spp_il2cpp_invoke_0(gi, NULL);
+    }
+    if (!inst) {
+        ipalog("[SP+] zenject-probe: ProjectContext._instance null — static fields:");
+        dump_fields_typed(pc, "PC", 48);
+        return;
+    }
+    Il2CppClass *inst_cls = spp_il2cpp_object_get_class(inst);
+    ipalog("[SP+] zenject-probe: _instance @ %p (%s.%s)", (void *)inst,
+           inst_cls ? (spp_il2cpp_class_get_namespace(inst_cls) ?: "") : "",
+           inst_cls ? (spp_il2cpp_class_get_name(inst_cls) ?: "?") : "?");
+
+    // 3. _container (DiContainer) via metadata field offset — data read.
+    Il2CppObject *container = read_named_ptr(inst, inst_cls, "_container");
+    if (!container) container = read_named_ptr(inst, inst_cls, "Container");
+    if (!container) {
+        ipalog("[SP+] zenject-probe: no _container field — ProjectContext layout:");
+        dump_fields_typed(inst_cls, "PC", 48);
+        const MethodInfo *gc = spp_il2cpp_find_method(inst_cls, "get_Container", 0);
+        if (gc) container = spp_il2cpp_invoke_0(gc, inst);  // trivial getter, safe
+    }
+    if (!container) { ipalog("[SP+] zenject-probe: DiContainer unreachable"); return; }
+    Il2CppClass *dc_cls = spp_il2cpp_object_get_class(container);
+    ipalog("[SP+] zenject-probe: DiContainer @ %p (%s.%s) — layout:", (void *)container,
+           dc_cls ? (spp_il2cpp_class_get_namespace(dc_cls) ?: "") : "",
+           dc_cls ? (spp_il2cpp_class_get_name(dc_cls) ?: "?") : "?");
+    dump_fields_typed(dc_cls, "DiC", 64);
+
+    // 4. Locate the provider dictionary field, read it, dump its layout+count.
+    //    (Its type name contains "Dictionary`2"; Zenject names it _providers.)
+    static const char *k_dict_fields[] = { "_providers", "providers", NULL };
+    Il2CppObject *dict = NULL; const char *dict_name = NULL;
+    for (int i = 0; k_dict_fields[i]; i++) {
+        dict = read_named_ptr(container, dc_cls, k_dict_fields[i]);
+        if (dict) { dict_name = k_dict_fields[i]; break; }
+    }
+    if (dict) {
+        Il2CppClass *dk = spp_il2cpp_object_get_class(dict);
+        ipalog("[SP+] zenject-probe: %s dict @ %p (%s) — layout:", dict_name, (void *)dict,
+               dk ? (spp_il2cpp_class_get_name(dk) ?: "?") : "?");
+        dump_fields_typed(dk, "DICT", 24);
+        // Read entry count if a count/_count field is present.
+        if (dk && spp_il2cpp_class_get_field_from_name) {
+            void *cf = spp_il2cpp_class_get_field_from_name(dk, "_count");
+            if (!cf) cf = spp_il2cpp_class_get_field_from_name(dk, "count");
+            int cnt = -1;
+            if (cf && read_int_field(dict, field_offset_of(cf), &cnt))
+                ipalog("[SP+] zenject-probe: provider dict entry count = %d", cnt);
+        }
+    } else {
+        ipalog("[SP+] zenject-probe: provider dict field not found by name "
+               "(see DiC layout above for the real field)");
+    }
+
+    // 5. Provider-chain TYPE metadata (names/offsets only — safe) so the v38
+    //    walk is fully specified: ProviderInfo + BindingId layouts.
+    Il2CppClass *pi = spp_il2cpp_find_class(NULL, "Zenject", "ProviderInfo");
+    if (!pi) pi = spp_il2cpp_find_class(NULL, NULL, "ProviderInfo");
+    if (pi) dump_fields_typed(pi, "ProviderInfo", 24);
+    Il2CppClass *bid = spp_il2cpp_find_class(NULL, "Zenject", "BindingId");
+    if (!bid) bid = spp_il2cpp_find_class(NULL, NULL, "BindingId");
+    if (bid) dump_fields_typed(bid, "BindingId", 16);
+
+    ipalog("[SP+] zenject-probe: complete (data-read chain; no Resolve invoke)");
+}
+
 // Feature-time bag inspection — METADATA ONLY (v30).
 //
 // v29 crashed here: running managed code from our Clean-bag-now path
@@ -737,13 +920,17 @@ int spp_il2cpp_bag_inspect(int enum_probe) {
                "(set bag_enum_probe=1 in sppro_plus.json to run it)");
         return 0;
     }
-    // Feature time (post-login): enable Zenject Resolve. v20's crash was at
-    // LAUNCH (container initializing). Now the container is built and
-    // Resolve returns the existing singleton with no activation.
-    spp_il2cpp_set_allow_zenject(1);
-    ipalog("[SP+] bag-enum: resolving live instance (Zenject feature-time)");
+    // v37: crash-safe Zenject chain probe (DATA READS ONLY). This REPLACES
+    // the v36 Resolve invoke that SIGKILL'd us (CODESIGNING invalid page).
+    // It maps the DiContainer layout so the provider walk can be finished
+    // from real offsets. Zenject Resolve stays DISABLED.
+    ipalog("[SP+] bag-enum: Zenject chain probe (data reads)");
+    spp_il2cpp_zenject_probe();
+    // Instance acquisition via the SAFE strategies only (A/B/D; Zenject
+    // Resolve off). Returns null today — enumeration below is kept ready for
+    // when the provider walk yields the live bag.
     Il2CppObject *bag = spp_il2cpp_get_pokemon_bag();
-    if (!bag) { ipalog("[SP+] bag-enum: no live bag instance"); return 0; }
+    if (!bag) { ipalog("[SP+] bag-enum: no live bag instance (safe strategies)"); return 0; }
     ipalog("[SP+] bag-enum: bag @ %p", (void *)bag);
 
     const MethodInfo *m_count = spp_il2cpp_find_method(bag_class, "get_Count", 0);

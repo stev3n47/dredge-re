@@ -1257,3 +1257,65 @@ never destabilize the GC. A pokemon-collection FIELD read (no managed code)
 is preferred over method invokes for enumeration; the release itself
 (ReleasePokemon invoke) must be done carefully, possibly off the
 foreground-transition window, with the GC left untouched.
+
+## v36 crash → the Zenject Resolve invoke is unusable on 0.743
+
+v36 flipped `g_allow_zenject=1` at feature time and let Strategy C run
+`il2cpp_runtime_invoke(DiContainer.Resolve, typeof(IPokemonBag))`. It SIGKILL'd.
+
+Crash (`debug/crashes/v36-PokmonGO-2026-11-12-065937.ips`):
+
+```
+EXC_BAD_ACCESS (SIGKILL) KERN_PROTECTION_FAILURE at 0x11444c700
+termination: namespace CODESIGNING, indicator "Invalid Page"
+faulting thread 0:
+  ?+0x11444c700            <- executed a NON-signed (heap/data) page: died
+  UnityFramework+0x876564c
+  UnityFramework+0x6940eb8   <- real Zenject Resolve body
+  UnityFramework+0x29b694    <- il2cpp_runtime_invoke thunk
+  UnityFramework+0x29b578
+  SPPlus+0xea50              <- Strategy C
+  ... UIAlertController _invokeHandlersForAction (our Clean-bag button)
+```
+
+Root cause: runtime_invoke DID dispatch into real, signed Zenject code
+(`+0x6940eb8`). That code looked up a binding keyed on the `System.Type` object
+we built by hand (`class_get_type` + `type_get_object`). Because that Type is
+not the exact RuntimeType instance Zenject's dictionary was keyed with, the
+lookup produced an uninitialised/garbage binding whose delegate target pointed
+into a heap page (`0x11444c700`). Zenject indirect-called it; the hardened
+runtime kills any jump to a page without a valid code signature.
+
+**Rule: never invoke `Resolve` (or any generic-shared / delegate-dispatching
+method) ourselves on 0.743.** Simple AOT getters (`get_Count`, `get_Container`,
+`get_Instance`) invoke fine — the danger is methods that dispatch through a
+runtime-built delegate/dictionary keyed on a managed object we fabricated.
+
+Every *self-invoked* instance-acquisition path is now exhausted:
+heap walk (dead — `foreach_heap` yields no clean objects on 0.743), static
+Instance field (none), `get_Instance` (none), GameManager (not found),
+Zenject Resolve (CODESIGNING SIGKILL).
+
+### v37: reach the bag by DATA READS, no Resolve invoke
+
+`spp_il2cpp_zenject_probe()` walks the container with pure memory reads:
+
+```
+Zenject.ProjectContext  (static _instance, field_static_get_value — safe)
+  -> ._container  (instance field, read at its metadata offset — DiContainer)
+  -> ._providers  (Dictionary<BindingId, List<ProviderInfo>>)
+```
+
+It dumps the DiContainer field layout (names + type names + byte offsets), the
+provider dictionary's layout + entry count, and the ProviderInfo / BindingId
+type metadata — enough to write the exact provider walk from REAL offsets with
+no further device round-trip. Every dereference is guarded (aligned + in-range),
+so a wrong offset logs and bails; and because no managed code runs, there is no
+code-signature page to trip. FieldInfo.offset is read straight from the struct
+(`+0x18`, stable across the Unity 2019-2022 il2cpp line).
+
+Open risk to confirm from the v37 log: if `IPokemonBag` is bound in a
+per-scene `SceneContext` (a child container) rather than the root
+ProjectContext container, the root `_providers` won't hold it and v38 must
+follow the container hierarchy (or find the active SceneContext) instead. The
+provider-dict entry count in the log will tell us which.
