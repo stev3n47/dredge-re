@@ -95,7 +95,8 @@ LC_SYMTAB = 0x02
 
 def dump(unity_path: str, header_path: str, version_tag: str):
     with open(unity_path, 'rb') as f:
-        mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+        kw = {'prot': mmap.PROT_READ} if hasattr(mmap, 'PROT_READ') else {'access': mmap.ACCESS_READ}
+        mm = mmap.mmap(f.fileno(), 0, **kw)
 
     magic, cputype, cpusub, ft, ncmds, soc = struct.unpack('<6I', mm[:24])
     if magic != MH_MAGIC_64:
