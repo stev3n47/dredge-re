@@ -375,60 +375,76 @@ static Il2CppClass *find_bag_class(const char **out_ns, const char **out_cls) {
 // hits a code-signature-invalid page on this build, SIGKILL) nor the game's
 // native code pages (inline hooks would fail the hardened-runtime CS check).
 // The callback runs with the GC world stopped — it must not allocate.
-// v32 SIGSEGV'd calling is_assignable_from / class_get_name INSIDE the
-// stop-the-world foreach callback (frame SPPlus+0xfb30 -> UnityFramework
-// il2cpp internals -> bad deref). Rule: the callback must do only cheap,
-// allocation-free, lock-free work. So it collects the DISTINCT class
-// pointers seen (plus one sample object each); the heavy name / match work
-// runs AFTER the walk, when the world is resumed and pointers are stable.
-#define BAG_MAXCLS 2048
+// v32/v33 both SIGSEGV'd because we called il2cpp functions
+// (is_assignable_from, class_get_name) on class pointers DERIVED FROM THE
+// HEAP WALK. il2cpp_gc_foreach_heap surfaces some non-managed-object
+// allocations whose klass field is garbage (that's why we saw 2048+
+// "distinct classes"); class_get_name on a garbage class returns a garbage
+// char* and strcmp deref'd it.
+//
+// Robust rule: NEVER call any il2cpp function on a heap-derived class
+// pointer. Instead, pre-resolve the VALID bag class pointers from image
+// METADATA (always safe — real classes), then the walk callback only does
+// obj->klass + pointer compares against that small whitelist. No names, no
+// assignability, no allocation inside the stop-the-world callback.
+
+// Collect every class whose name contains "PokemonBag" across all images
+// (metadata scan — safe). These are the whitelist of classes an instance
+// may be. Logs each candidate. Returns count.
+static int collect_bag_classes(Il2CppClass **out, int cap) {
+    int n = 0;
+    Il2CppDomain *dom = spp_il2cpp_domain_get();
+    size_t na = 0;
+    const Il2CppAssembly **asms = spp_il2cpp_domain_get_assemblies(dom, &na);
+    for (size_t ai = 0; ai < na; ai++) {
+        const Il2CppImage *img = spp_il2cpp_assembly_get_image(asms[ai]);
+        if (!img) continue;
+        size_t nc = spp_il2cpp_image_get_class_count(img);
+        for (size_t ci = 0; ci < nc; ci++) {
+            Il2CppClass *k = spp_il2cpp_image_get_class(img, ci);
+            if (!k) continue;
+            const char *nm = spp_il2cpp_class_get_name(k);   // metadata class: safe
+            if (nm && strstr(nm, "PokemonBag")) {
+                ipalog("[SP+] bag-resolve: candidate class %s @ %p", nm, (void *)k);
+                if (n < cap) out[n++] = k;
+            }
+        }
+    }
+    return n;
+}
+
 struct bag_search {
-    long scanned;
-    Il2CppClass *cls[BAG_MAXCLS]; Il2CppObject *sample[BAG_MAXCLS]; int ncls;
-    Il2CppClass *last;   // tiny cache: objects cluster by class
+    long scanned; Il2CppClass **set; int nset; Il2CppObject *found;
 };
 
 static void bag_heap_cb(void *obj, void *user) {
     struct bag_search *s = (struct bag_search *)user;
     s->scanned++;
-    if (!obj) return;
+    if (s->found || !obj) return;
     Il2CppClass *k = spp_il2cpp_object_get_class((Il2CppObject *)obj); // obj->klass; cheap
-    if (!k || k == s->last) return;
-    s->last = k;
-    for (int i = 0; i < s->ncls; i++) if (s->cls[i] == k) return;
-    if (s->ncls < BAG_MAXCLS) {
-        s->cls[s->ncls] = k; s->sample[s->ncls] = (Il2CppObject *)obj; s->ncls++;
-    }
+    if (!k) return;
+    for (int i = 0; i < s->nset; i++)
+        if (s->set[i] == k) { s->found = (Il2CppObject *)obj; return; }
 }
 
 static Il2CppObject *heap_walk_find(Il2CppClass *target) {
-    if (!spp_il2cpp_gc_foreach_heap || !target) return NULL;
-    // Do NOT touch gc_disable/gc_enable — v29 showed poking the GC around the
-    // walk destabilized the runtime (N2 BRK). foreach_heap stops the world
-    // itself for the callback's duration.
+    (void)target;
+    if (!spp_il2cpp_gc_foreach_heap) return NULL;
     if (spp_il2cpp_thread_attach && spp_il2cpp_domain_get)
         spp_il2cpp_thread_attach(spp_il2cpp_domain_get());
-    struct bag_search s; memset(&s, 0, sizeof s);
-    spp_il2cpp_gc_foreach_heap(bag_heap_cb, &s);
-    ipalog("[SP+] bag-resolve: heap walk scanned %ld objects, %d distinct classes",
-           s.scanned, s.ncls);
 
-    // Post-walk (world resumed, pointers stable): resolve names and match.
-    // Match by exact class pointer OR exact name "PokemonBagImpl"; log every
-    // *Bag*-named class so we can target the real runtime type if needed.
-    const char *tname = spp_il2cpp_class_get_name(target);
-    Il2CppObject *found = NULL;
-    for (int i = 0; i < s.ncls; i++) {
-        Il2CppClass *k = s.cls[i];
-        const char *nm = spp_il2cpp_class_get_name(k);
-        if (!found && (k == target || (nm && tname && strcmp(nm, tname) == 0)))
-            found = s.sample[i];
-        if (nm && strstr(nm, "Bag"))
-            ipalog("[SP+] bag-resolve:   *Bag* class: %s @ %p%s",
-                   nm, (void *)k, (k == target ? " (== target)" : ""));
-    }
-    ipalog("[SP+] bag-resolve: %s", found ? "FOUND bag" : "no match (see *Bag* list)");
-    return found;
+    Il2CppClass *set[64];
+    int nset = collect_bag_classes(set, 64);
+    ipalog("[SP+] bag-resolve: %d *PokemonBag* candidate classes", nset);
+    if (nset == 0) return NULL;
+
+    // Do NOT touch gc_disable/gc_enable (v29 N2 BRK). Callback only compares
+    // obj->klass against the whitelist — no il2cpp calls on heap pointers.
+    struct bag_search s; memset(&s, 0, sizeof s); s.set = set; s.nset = nset;
+    spp_il2cpp_gc_foreach_heap(bag_heap_cb, &s);
+    ipalog("[SP+] bag-resolve: heap walk scanned %ld objects, %s",
+           s.scanned, s.found ? "FOUND bag" : "no instance of any candidate");
+    return s.found;
 }
 
 Il2CppObject *spp_il2cpp_get_pokemon_bag(void) {
