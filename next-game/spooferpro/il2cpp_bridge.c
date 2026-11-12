@@ -57,6 +57,7 @@ int32_t              (*spp_il2cpp_class_is_assignable_from)(Il2CppClass *to, Il2
 // --- state --------------------------------------------------------------
 static int g_ready = 0;
 static int g_allow_zenject = 0;   // Strategy C (crashes at launch) off by default
+static int g_allow_heapwalk = 0;  // Strategy E dead on 0.743 (see heap_walk_find)
 void spp_il2cpp_set_allow_zenject(int on) { g_allow_zenject = on ? 1 : 0; }
 
 int spp_il2cpp_ready(void) { return g_ready; }
@@ -497,8 +498,12 @@ Il2CppObject *spp_il2cpp_get_pokemon_bag(void) {
     }
     ipalog("[SP+] bag-resolve: class %s.%s", ns, cls);
 
-    // Strategy E — GC heap walk (primary; no Zenject, no code-patching).
-    {
+    // Strategy E — GC heap walk. DISABLED by default: on pogo-0.743
+    // il2cpp_gc_foreach_heap does not hand us clean Il2CppObject* pointers
+    // (v35: 98k walked objects, 0 with a klass in the real metadata region),
+    // so object_get_class never lands on a real class and no instance is ever
+    // matched. Kept behind g_allow_heapwalk for other builds.
+    if (g_allow_heapwalk) {
         Il2CppObject *inst = heap_walk_find(bag_class);
         if (inst) {
             ipalog("[SP+] bag-resolve: heap walk hit");
@@ -561,24 +566,34 @@ Il2CppObject *spp_il2cpp_get_pokemon_bag(void) {
                 Il2CppObject *container = get_container
                     ? spp_il2cpp_invoke_0(get_container, pc) : NULL;
                 if (container) {
-                    // Resolve(Type)
                     Il2CppClass *container_class = spp_il2cpp_object_get_class(container);
                     const MethodInfo *resolve = spp_il2cpp_find_method(container_class,
                                                                         "Resolve", 1);
-                    if (resolve) {
-                        Il2CppType *bag_type = spp_il2cpp_class_get_type(bag_class);
-                        Il2CppObject *type_obj = spp_il2cpp_type_get_object
-                            ? spp_il2cpp_type_get_object(bag_type) : NULL;
-                        if (type_obj) {
-                            Il2CppObject *inst = spp_il2cpp_invoke_1(resolve, container,
-                                                                     type_obj);
+                    if (resolve && spp_il2cpp_type_get_object) {
+                        // Zenject binds by INTERFACE, so try the interfaces
+                        // first (IPokemonBag / IPokemonBagService), then the
+                        // impl. Resolve returns the already-built singleton at
+                        // feature time (post-login) — no ctor activation, which
+                        // is what crashed at launch in v20.
+                        static const char *k_resolve_names[] = {
+                            "IPokemonBag", "IPokemonBagService",
+                            "PokemonBagImpl", "PokemonBagService", NULL };
+                        for (int ri = 0; k_resolve_names[ri]; ri++) {
+                            Il2CppClass *rc = spp_il2cpp_find_class(NULL, NULL,
+                                                                    k_resolve_names[ri]);
+                            if (!rc) continue;
+                            Il2CppType *ty = spp_il2cpp_class_get_type(rc);
+                            Il2CppObject *tobj = ty ? spp_il2cpp_type_get_object(ty) : NULL;
+                            if (!tobj) continue;
+                            Il2CppObject *inst = spp_il2cpp_invoke_1(resolve, container, tobj);
                             if (inst) {
-                                ipalog("[SP+] bag-resolve: Zenject Resolve() hit");
+                                ipalog("[SP+] bag-resolve: Zenject Resolve(%s) hit @ %p",
+                                       k_resolve_names[ri], (void *)inst);
                                 g_cached_bag = inst;
                                 return inst;
                             }
+                            ipalog("[SP+] bag-resolve: Resolve(%s) null", k_resolve_names[ri]);
                         }
-                        ipalog("[SP+] bag-resolve: Resolve(Type) returned null");
                     } else {
                         ipalog("[SP+] bag-resolve: DiContainer.Resolve(1) missing");
                     }
@@ -722,7 +737,11 @@ int spp_il2cpp_bag_inspect(int enum_probe) {
                "(set bag_enum_probe=1 in sppro_plus.json to run it)");
         return 0;
     }
-    ipalog("[SP+] bag-enum: resolving live instance (heap walk)");
+    // Feature time (post-login): enable Zenject Resolve. v20's crash was at
+    // LAUNCH (container initializing). Now the container is built and
+    // Resolve returns the existing singleton with no activation.
+    spp_il2cpp_set_allow_zenject(1);
+    ipalog("[SP+] bag-enum: resolving live instance (Zenject feature-time)");
     Il2CppObject *bag = spp_il2cpp_get_pokemon_bag();
     if (!bag) { ipalog("[SP+] bag-enum: no live bag instance"); return 0; }
     ipalog("[SP+] bag-enum: bag @ %p", (void *)bag);
