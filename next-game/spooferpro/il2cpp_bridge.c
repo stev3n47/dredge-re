@@ -481,7 +481,7 @@ static Il2CppObject *heap_walk_find(Il2CppClass *target) {
                    nm, (void *)s.cls[i]);
     }
     if (!s.found && s.ncls == 0)
-        ipalog("[SP+] bag-resolve:   (0 in-range classes — foreach_heap may be partial)");
+        ipalog("[SP+] bag-resolve:   (0 in-range classes — heap walk may be partial)");
     return s.found;
 }
 
