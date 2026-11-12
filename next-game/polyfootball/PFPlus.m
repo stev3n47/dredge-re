@@ -50,46 +50,72 @@
 static unsigned long now_ms(void);
 
 // -------- logging --------
+//
+// SPPlus v23 (18.3s 0x8BADF00D watchdog) traced to libc stdio FILE-lock
+// contention between our logger and Unity's console writer under
+// `libsystem_c` fwrite/flockfile. SPPlus's permanent fix was NSFileHandle.
+// We go one step lower: cached fd + atomic write(2). Benefits:
+//   - no FILE lock to contend on
+//   - write() of lines < PIPE_BUF is atomic across processes & threads
+//   - no stderr branch, so nothing routes through libc stderr that Unity
+//     may also touch on diagnostic code paths
+//
+// Buffer size caps at 1 KiB per line; longer lines are truncated. Caller
+// never holds g_log_mtx across I/O — it protects only fd init.
 
-static FILE *g_logf = NULL;
+static int g_log_fd = -1;
 static pthread_mutex_t g_log_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-// Resolved via NSSearchPathForDirectoriesInDomains lookalike — but we
-// avoid the ObjC runtime entirely here. The sandbox's Documents is at
-// $HOME/Documents in every normal iOS process layout.
 static void pfp_resolve_doc_path(const char *fname, char *out, size_t cap) {
     const char *home = getenv("HOME");
     if (!home || !*home) home = "/var/mobile/Containers/Data/Application";
     snprintf(out, cap, "%s/Documents/%s", home, fname);
 }
 
-void pfp_log(const char *fmt, ...) {
+static int pfp_log_fd(void) {
+    if (g_log_fd >= 0) return g_log_fd;
     pthread_mutex_lock(&g_log_mtx);
-    if (!g_logf) {
+    if (g_log_fd < 0) {
         char path[1024];
         pfp_resolve_doc_path("pfplus.log", path, sizeof path);
-        g_logf = fopen(path, "a");
-        if (g_logf) setvbuf(g_logf, NULL, _IOLBF, 0);
+        int fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd >= 0) g_log_fd = fd;
     }
-    if (g_logf) {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        time_t t = tv.tv_sec;
-        struct tm lt;
-        localtime_r(&t, &lt);
-        fprintf(g_logf, "[%02d:%02d:%02d.%03d] ",
-                lt.tm_hour, lt.tm_min, lt.tm_sec, (int)(tv.tv_usec / 1000));
-        va_list ap; va_start(ap, fmt);
-        vfprintf(g_logf, fmt, ap);
-        va_end(ap);
-        fputc('\n', g_logf);
-    }
-    // Also to stderr so Console.app / Xcode see it during dev.
-    va_list ap2; va_start(ap2, fmt);
-    vfprintf(stderr, fmt, ap2);
-    fputc('\n', stderr);
-    va_end(ap2);
     pthread_mutex_unlock(&g_log_mtx);
+    return g_log_fd;
+}
+
+void pfp_log(const char *fmt, ...) {
+    int fd = pfp_log_fd();
+    if (fd < 0) return;
+
+    char line[1024];
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    time_t t = tv.tv_sec;
+    struct tm lt;
+    localtime_r(&t, &lt);
+    int w = snprintf(line, sizeof line, "[%02d:%02d:%02d.%03d] ",
+                     lt.tm_hour, lt.tm_min, lt.tm_sec, (int)(tv.tv_usec / 1000));
+    if (w < 0) return;
+    if ((size_t)w >= sizeof line) w = sizeof(line) - 2;
+
+    va_list ap;
+    va_start(ap, fmt);
+    int w2 = vsnprintf(line + w, sizeof(line) - w - 1, fmt, ap);
+    va_end(ap);
+    if (w2 < 0) w2 = 0;
+
+    size_t total = (size_t)w + (size_t)w2;
+    if (total >= sizeof line - 1) total = sizeof(line) - 2;
+    line[total++] = '\n';
+
+    // Single atomic write — no libc FILE lock, no stdio buffering. write()
+    // to a plain file on iOS doesn't short-write; one retry handles the
+    // rare EINTR.
+    if (write(fd, line, total) < 0) {
+        (void)write(fd, line, total);
+    }
 }
 
 // -------- config --------
@@ -131,11 +157,17 @@ static int pfp_cfg_reload_if_changed(void) {
     struct stat st;
     if (stat(path, &st) != 0) {
         // Write defaults on first run so the user has something to edit.
+        // Do the write + log OUTSIDE the mutex (SPPlus v16 "ipalog out of
+        // lock" pattern): we only need the mutex to serialize the
+        // loaded_ok flag flip.
+        int should_write = 0;
         pthread_mutex_lock(&g_cfg_mtx);
-        if (!g_cfg.loaded_ok) {
-            FILE *f = fopen(path, "w");
-            if (f) {
-                fprintf(f,
+        if (!g_cfg.loaded_ok) { g_cfg.loaded_ok = 1; should_write = 1; }
+        pthread_mutex_unlock(&g_cfg_mtx);
+        if (should_write) {
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                const char *defaults =
                     "# PFPlus v1a config — one key=value per line\n"
                     "# Edit in Files app or via SSH; reloaded automatically.\n"
                     "pro=1\n"
@@ -143,13 +175,12 @@ static int pfp_cfg_reload_if_changed(void) {
                     "triple_tickets=1\n"
                     "cap_increase=1\n"
                     "log_each_fire=0\n"
-                    "tick_hz=10\n");
-                fclose(f);
+                    "tick_hz=10\n";
+                (void)write(fd, defaults, strlen(defaults));
+                close(fd);
                 pfp_log("cfg: wrote default config to %s", path);
             }
-            g_cfg.loaded_ok = 1;
         }
-        pthread_mutex_unlock(&g_cfg_mtx);
         return 0;
     }
     pthread_mutex_lock(&g_cfg_mtx);
@@ -211,13 +242,14 @@ struct hook {
     const MethodInfo *s_mi;
     unsigned long fires;
     unsigned long last_tick_ms;
+    int last_getter_state; // -1 unknown, 0 false, 1 true — for drift log
 };
 
 static struct hook g_hooks[] = {
-    { "pro",            "get_HasPro",               "UnlockPro",              NULL, NULL, 0, 0 },
-    { "agent",          "get_HasAgent",             "UnlockAgent",            NULL, NULL, 0, 0 },
-    { "triple_tickets", "get_HasTripleTicketBoost", "UnlockTripleTicketBoost",NULL, NULL, 0, 0 },
-    { "cap_increase",   "get_HasCapIncrease",       "UnlockCapIncrease",      NULL, NULL, 0, 0 },
+    { "pro",            "get_HasPro",               "UnlockPro",              NULL, NULL, 0, 0, -1 },
+    { "agent",          "get_HasAgent",             "UnlockAgent",            NULL, NULL, 0, 0, -1 },
+    { "triple_tickets", "get_HasTripleTicketBoost", "UnlockTripleTicketBoost",NULL, NULL, 0, 0, -1 },
+    { "cap_increase",   "get_HasCapIncrease",       "UnlockCapIncrease",      NULL, NULL, 0, 0, -1 },
 };
 static const int NUM_HOOKS = sizeof(g_hooks) / sizeof(g_hooks[0]);
 
@@ -304,22 +336,29 @@ static void tick_once(void) {
         return;
     }
 
+    int invoke_fail_this_tick = 0;
     for (int i = 0; i < NUM_HOOKS; i++) {
         if (!cfg_flag_for(g_hooks[i].key)) continue;
-        if (!g_hooks[i].s_mi) continue;  // no setter — can't help
+        if (!g_hooks[i].s_mi) continue;
 
-        // If a getter exists, call it; only Unlock on false. If no getter
-        // (unlikely for Unlock* pattern), call setter each tick throttled
-        // to once per 60s so we don't spam.
         int should_set = 1;
+        int prev_state = g_hooks[i].last_getter_state;
         if (g_hooks[i].g_mi) {
             int ok = 1;
             Il2CppObject *r = pfp_il2cpp_invoke0(g_hooks[i].g_mi, inst, &ok);
             if (!ok) {
                 pfp_log("tick: %s getter threw — skipping this tick", g_hooks[i].key);
+                invoke_fail_this_tick++;
                 continue;
             }
             int cur = pfp_unbox_bool(r);
+            // Drift detection (per plan: MultiplayerProfileSaveManager server sync
+            // can overwrite our flags). Log transitions 1 → 0 as evidence.
+            if (prev_state == 1 && cur == 0) {
+                pfp_log("drift: %s server-overwrote (fires=%lu) — re-asserting",
+                        g_hooks[i].key, g_hooks[i].fires);
+            }
+            g_hooks[i].last_getter_state = cur;
             should_set = !cur;
         } else {
             unsigned long t = now_ms();
@@ -334,6 +373,7 @@ static void tick_once(void) {
         pfp_il2cpp_invoke0(g_hooks[i].s_mi, inst, &ok);
         if (!ok) {
             pfp_log("tick: %s %s threw", g_hooks[i].key, g_hooks[i].setter);
+            invoke_fail_this_tick++;
             continue;
         }
         g_hooks[i].fires++;
@@ -342,6 +382,17 @@ static void tick_once(void) {
             pfp_log("fire: %s (%s) · fires=%lu", g_hooks[i].key,
                     g_hooks[i].setter, g_hooks[i].fires);
         }
+    }
+
+    // Staleness guard: if EVERY enabled hook that tried to invoke failed, the
+    // cached PremiumCurrency instance is likely dangling (scene teardown,
+    // save-slot switch, GC collected). Clear it and let the next tick
+    // re-walk. Only trigger when >= 2 failures so we don't thrash on a
+    // transient managed exception from a single getter.
+    if (invoke_fail_this_tick >= 2 && g_premium_instance) {
+        pfp_log("inst: >=2 invoke failures — dropping cached instance %p, will re-walk",
+                g_premium_instance);
+        g_premium_instance = NULL;
     }
 }
 
