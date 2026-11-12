@@ -77,12 +77,10 @@ jobs:
           TITLE="PFPlus.dylib · ${GITHUB_SHA::7}"
           BODY=$(printf 'PFPlus arm64 iOS dylib built from %s on %s.\n\nSize: %s bytes.\nIntegrity: %s\n\nUsage: python tools/inject_polyfootball.py <Poly.ipa> PFPlus <out.ipa>; sign with TrollStore/AltStore/SideStore/dev-signed; install.' \
             "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(stat -f%z PFPlus)" "$(shasum -a 256 PFPlus | awk '{print $1}')")
-          # Create or move the tag
-          git tag -f "$TAG" "$GITHUB_SHA"
-          git push -f origin "$TAG"
-          # Delete the previous release (if any), then re-create it with this asset
+          # Delete the previous release+tag (if any), then re-create both.
+          # NOTE: --cleanup-tag removes the local tag too, so tag AFTER delete.
           gh release delete "$TAG" -y --cleanup-tag 2>/dev/null || true
-          # cleanup-tag deletes the tag we just pushed — push it again
+          git tag -f "$TAG" "$GITHUB_SHA"
           git push -f origin "$TAG"
           gh release create "$TAG" PFPlus \
             --title "$TITLE" \
