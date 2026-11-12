@@ -45,6 +45,10 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
+// -------- forward decls --------
+
+static unsigned long now_ms(void);
+
 // -------- logging --------
 
 static FILE *g_logf = NULL;
@@ -235,11 +239,17 @@ static void        *g_premium_instance = NULL;
 
 // Find an instance of PremiumCurrency via heap walk. Cached after first
 // success. Called on a worker thread, never during the init constructor.
-// If PremiumCurrency is used in multiple slots (unlikely — it's a save-data
-// singleton pattern in most Unity games) we take the first one.
+// Heap walk is expensive (stop-the-world over the managed heap), so we
+// throttle attempts to once every 2 seconds until an instance is found.
+// The game instantiates PremiumCurrency when the main menu's save-slot
+// view appears — can be many seconds post-launch.
 static void *resolve_premium_instance(void) {
     if (g_premium_instance) return g_premium_instance;
     if (!g_premium_class) return NULL;
+    static unsigned long last_walk_ms = 0;
+    unsigned long t = now_ms();
+    if (last_walk_ms && (t - last_walk_ms) < 2000UL) return NULL;
+    last_walk_ms = t;
     void *found[8] = { 0 };
     int n = pfp_il2cpp_find_instances(g_premium_class, found, 8);
     if (n <= 0) return NULL;

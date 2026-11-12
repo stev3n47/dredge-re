@@ -220,23 +220,40 @@ int pfp_il2cpp_count_methods(Il2CppClass *klass) {
 }
 
 // --- instance discovery via heap walk ------------------------------------
+//
+// SAFETY: v1a shipped a walk_cb that called is_assignable_from on class
+// pointers derived from the heap walk. That SIGSEGV'd at offset 0x135
+// deep inside the il2cpp type-hierarchy traversal (crash sig in
+// debug/crashes/pfplus-v1a-PolyFootball-2026-11-12-175228.ips). Same
+// bug class as SPPlus v32: gc_foreach_heap surfaces some non-managed
+// allocations whose klass field is garbage, and any il2cpp runtime call
+// through a garbage class pointer walks into bad memory.
+//
+// Fix (SPPlus v33 pattern, see spooferpro/il2cpp_bridge.c:685): inside
+// the stop-the-world callback ONLY read obj->klass (one field load) and
+// do POINTER-EQUALITY compares against the caller's pre-resolved valid
+// class pointer. No is_assignable_from, no class_get_name, no gc_disable
+// wrap (gc_foreach_heap manages its own stop-the-world — nesting
+// disables was likely harmless but is unneeded and SPPlus doesn't).
 
 struct walk_ctx {
-    Il2CppClass *target;
+    Il2CppClass *target;  // pre-resolved from image metadata — always safe
     void **out;
     int cap;
     int n;
+    long scanned;
 };
 
 static void walk_cb(void *obj, void *user) {
     struct walk_ctx *c = (struct walk_ctx *)user;
+    c->scanned++;
     if (!obj || c->n >= c->cap) return;
-    Il2CppClass *k = pfp_il2cpp_object_get_class(obj);
+    Il2CppClass *k = pfp_il2cpp_object_get_class(obj);  // obj->klass; cheap
     if (!k) return;
-    // Exact match first (fast); then assignable (covers subclasses).
-    if (k == c->target ||
-        (pfp_il2cpp_class_is_assignable_from &&
-         pfp_il2cpp_class_is_assignable_from(c->target, k))) {
+    // Pointer-equality only. No calls through k (is_assignable_from,
+    // class_get_name, etc.) because k may be a garbage pointer for
+    // non-managed-object heap allocations.
+    if (k == c->target) {
         c->out[c->n++] = obj;
     }
 }
@@ -244,10 +261,10 @@ static void walk_cb(void *obj, void *user) {
 int pfp_il2cpp_find_instances(Il2CppClass *klass, void **out, int cap) {
     if (!g_ready || !klass || !out || cap <= 0) return 0;
     if (!pfp_il2cpp_gc_foreach_heap || !pfp_il2cpp_object_get_class) return 0;
-    struct walk_ctx c = { klass, out, cap, 0 };
-    if (pfp_il2cpp_gc_disable) pfp_il2cpp_gc_disable();
+    struct walk_ctx c = { klass, out, cap, 0, 0 };
+    // No gc_disable wrap — gc_foreach_heap handles its own stop-the-world.
     pfp_il2cpp_gc_foreach_heap(walk_cb, &c);
-    if (pfp_il2cpp_gc_enable) pfp_il2cpp_gc_enable();
+    pfp_log("heap: walk scanned %ld objects, matched %d of class %p", c.scanned, c.n, (void *)klass);
     return c.n;
 }
 
