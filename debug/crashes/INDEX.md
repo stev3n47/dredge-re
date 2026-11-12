@@ -95,3 +95,36 @@ can be 0 with no name = anonymous page.
 - NSThread/NSOperationQueue for the watch (v19 silent-fail risk) — use pthread
 - Eager `DiContainer.Resolve` during launch (v20)
 - Searching binaries for a `0xd4201000` constant (none exists)
+
+## PolyFootball / PFPlus matrix (separate project — com.Miceli.Poly 4.5.3)
+
+| ver | changes | result | crash signature | notes |
+|-----|---------|--------|-----------------|-------|
+| v1a | first build — PremiumCurrency poll-and-invoke unlocks (pro/agent/triple/cap), 10 Hz tick, GC heap walk for instance, `il2cpp_runtime_invoke` getters/setters | crash | `SIGSEGV` KERN_INVALID_ADDRESS at `0x135` — near-null field read | faulting thread = our tick pthread: `PFPlus+0x5608` → `PFPlus+0x46ec` → `Unity+0x700b24` → `+0x6e06fc` → **`Unity+0x71d9b4`** (frame 0). `pfplus-v1a-PolyFootball-2026-11-12-175228.ips` |
+
+### v1a diagnosis (disasm of PFPlus+0x5608/+0x46ec)
+
+Frame 4 `PFPlus+0x46e8` = `bl 0x4e34` — the per-feature poll fn.
+Frame 3 `PFPlus+0x5604` = `blr x8` where `x8=[x23+0x2f0]` — an **il2cpp
+export-table call** (the fn at 0x5400-0x5608 is the bridge's symbol resolver:
+stores resolved `il2cpp_*` pointers into the `0xd000` globals, then calls one).
+So the crash is inside whichever il2cpp export got called — 3 Unity frames deep
+→ SIGSEGV at `0x135` (member read off a null/bad pointer).
+
+**This is the PoGo v32 bug repeated.** `walk_cb` in `il2cpp_bridge.c:231`
+calls `il2cpp_object_get_class(obj)` **and**
+`il2cpp_class_is_assignable_from(target, k)` **inside** the
+`il2cpp_gc_foreach_heap` stop-the-world callback — and v1a also wraps the walk
+in `gc_disable`/`gc_enable` (bridge.c:248-250), which PoGo v31 removed because
+it destabilized the runtime (v29's N2 crash chain). PoGo v32's .ips was the
+same signature: SIGSEGV walking a garbage class hierarchy inside the callback —
+`foreach_heap` surfaces non-managed allocations whose `klass` field isn't a
+real `Il2CppClass`, and `is_assignable_from` dereferences parent chains on it.
+
+**v1b fix (proven on PoGo v33/v34):** callback only reads `obj->klass` (first
+qword, bounds-checked), collects candidate object ptrs; do ALL class work —
+`object_get_class`, name compare — AFTER `foreach_heap` returns and the world
+has resumed. Drop `gc_disable`/`gc_enable`. Also note
+`find_method` calls `runtime_class_init` per lookup (bridge.c:210) — static
+ctors run managed code; keep, but know it's an invoke-adjacent surface if
+further crashes stack here.
