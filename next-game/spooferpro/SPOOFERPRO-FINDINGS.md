@@ -1319,3 +1319,52 @@ per-scene `SceneContext` (a child container) rather than the root
 ProjectContext container, the root `_providers` won't hold it and v38 must
 follow the container hierarchy (or find the active SceneContext) instead. The
 provider-dict entry count in the log will tell us which.
+
+### v37 result — the probe worked, zero crash, full layout captured
+
+No `.ips`. The data-read chain reached everything:
+
+```
+ProjectContext._instance @ 0x136eabf50 (Zenject.ProjectContext)   # non-null
+DiContainer            @ 0x1338384d0 (Zenject.DiContainer)
+  _providers @ +0x18 : Dictionary<BindingId, List<DiContainer.ProviderInfo>>
+_providers dict @ 0x136e8f720 (stock .NET-Core Dictionary`2):
+  _buckets @ +0x10 ; _entries @ +0x18 ; _count @ +0x20 (= 269) ; _comparer @ +0x30
+ProviderInfo: Container@+0x10  NonLazy@+0x18  Provider@+0x20  Condition@+0x28
+BindingId:    _type@+0x10 (System.Type)   _identifier@+0x18
+```
+
+So the bag binding lives in the ROOT container (269 bindings) — no SceneContext
+chase needed.
+
+### v38 — provider-dictionary walk (data reads) to the live instance
+
+`zj_find_bag_instance(container)` (Strategy F in `get_pokemon_bag`) scans the
+269 entries:
+
+```
+entries = *(container + 0x18 [_providers] + 0x18 [_entries])   # Entry[]
+Entry stride 0x20: hashCode@0, next@4, key(BindingId)@8, value(List)@0x18
+  key._type (System.Type obj)   @ entry+0x08
+  value (List<ProviderInfo>)    @ entry+0x18
+for each entry with non-null key:
+  Il2CppType* = *(key._type + 0x10 [Il2CppReflectionType.type])
+  class = il2cpp_class_from_type(type)         # metadata, safe
+  if class name contains "PokemonBag":
+     List<ProviderInfo> -> _items[j].Provider (ref-type) -> cached instance
+```
+
+Instance is pulled from the provider by scanning its fields for one named
+`*instance*`/`*cached*` (CachedProvider caches `_instances` : List<object>;
+dereference element 0), one level of `_creator` recursion for the wrapper.
+
+Crash-safety: a one-time **set of every registered il2cpp class** is built, and
+every class derived from a walked pointer is trusted only if (a) the pointer is
+in the heap range and (b) it is in that set — otherwise skipped. This is the
+v34/v35 lesson applied rigorously: no `class_get_name`/`class_get_fields` ever
+runs on an unvalidated pointer, so a wrong layout guess (e.g. if `ProviderInfo`
+turns out to be a value type) just misses — it cannot SIGSEGV. On a miss the
+items array is hex-dumped once so a struct layout can be finalized in v39
+without another blind guess. Once the instance is cached, `bag_inspect` reads
+`get_Count()` / `get_AllPokemon()` (safe AOT getters) to confirm and map the
+enumeration API for the keep-rule release.

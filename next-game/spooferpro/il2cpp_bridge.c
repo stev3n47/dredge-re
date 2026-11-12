@@ -384,6 +384,239 @@ static void *read_named_ptr(void *obj, Il2CppClass *cls, const char *fname) {
     return read_ptr_field(obj, off);
 }
 
+// --- v38: Zenject provider-dictionary walk -> live bag instance ----------
+//
+// Layout confirmed by the v37 probe on 0.743 (all offsets are the .NET-Core
+// Dictionary + Zenject shapes the log dumped):
+//   il2cpp array:  header 0x10 + bounds 8 + length 8  => data at +0x20
+//   DiContainer._providers                               @ +0x18
+//   Dictionary._entries                                 @ +0x18  (Entry[])
+//   Dictionary._count                                   @ +0x20  (int, =269)
+//   Entry{ uint hashCode@0; int next@4; BindingId key@8; TValue value@0x18 }
+//     BindingId inline{ Type _type@0x00; object _identifier@0x08 }  (size 16)
+//     => key _type ptr at entry+0x08 ; value (List<ProviderInfo>) at entry+0x18
+//   Il2CppReflectionType.type (Il2CppType*)             @ +0x10
+//   List<T>._items (T[])                                @ +0x10 ; _size @ +0x18
+//   ProviderInfo.Provider (IProvider)                   @ +0x20
+// Every access is guarded; no managed code runs during the search.
+#define ZJ_ARR_DATA     0x20
+#define ZJ_PROVIDERS    0x18
+#define ZJ_ENTRIES      0x18
+#define ZJ_COUNT        0x20
+#define ZJ_ENTRY_STRIDE 0x20
+#define ZJ_ENTRY_NEXT   0x04
+#define ZJ_ENTRY_KEYTY  0x08
+#define ZJ_ENTRY_VALUE  0x18
+#define ZJ_REFTYPE_TYPE 0x10
+#define ZJ_LIST_ITEMS   0x10
+#define ZJ_LIST_SIZE    0x18
+#define ZJ_PROVIDERINFO_PROVIDER 0x20
+
+// Read il2cpp array length (max_length at header+0x18) with a sanity cap.
+static int zj_array_len(void *arr) {
+    uintptr_t p = (uintptr_t)arr;
+    if (!arr || (p & 7)) return 0;
+    uintptr_t n = *(uintptr_t *)((uint8_t *)arr + 0x18);
+    return (n > 0 && n < 0x100000) ? (int)n : 0;
+}
+// Element i of a reference-type array (array of pointers), bounded by the
+// array's own max_length so a wrong element-type guess can't read past it.
+static void *zj_array_ref(void *arr, int i) {
+    if (!arr || i < 0) return NULL;
+    int len = zj_array_len(arr);
+    if (len == 0 || i >= len) return NULL;
+    return *(void **)((uint8_t *)arr + ZJ_ARR_DATA + (size_t)i * sizeof(void *));
+}
+
+// --- validated class set -------------------------------------------------
+// Walking data structures can derive a pointer that is NOT a real managed
+// object (a wrong layout guess, a struct field read as a reference). Calling
+// class_get_name/class_get_fields on a garbage class pointer is exactly what
+// SIGSEGV'd v32/v33. Fix: build the set of every registered il2cpp class once,
+// and trust a walked object's class only if (a) the object is in the heap
+// address range and (b) its class pointer is in the set. Everything else is
+// skipped. This makes the whole walk crash-safe regardless of layout guesses.
+static uintptr_t *g_zj_clsset; static int g_zj_clsset_n;
+static int zj_cmp_uptr(const void *a, const void *b) {
+    uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b;
+    return (x < y) ? -1 : (x > y ? 1 : 0);
+}
+static void zj_classset_build(void) {
+    if (g_zj_clsset) return;
+    Il2CppDomain *dom = spp_il2cpp_domain_get();
+    size_t na = 0;
+    const Il2CppAssembly **asms = spp_il2cpp_domain_get_assemblies(dom, &na);
+    long cap = 0;
+    for (size_t ai = 0; ai < na; ai++) {
+        const Il2CppImage *img = spp_il2cpp_assembly_get_image(asms[ai]);
+        if (img) cap += (long)spp_il2cpp_image_get_class_count(img);
+    }
+    if (cap <= 0 || cap > 4000000) return;
+    g_zj_clsset = (uintptr_t *)malloc((size_t)cap * sizeof(uintptr_t));
+    if (!g_zj_clsset) return;
+    int n = 0;
+    for (size_t ai = 0; ai < na; ai++) {
+        const Il2CppImage *img = spp_il2cpp_assembly_get_image(asms[ai]);
+        if (!img) continue;
+        size_t nc = spp_il2cpp_image_get_class_count(img);
+        for (size_t ci = 0; ci < nc && n < cap; ci++) {
+            Il2CppClass *k = spp_il2cpp_image_get_class(img, ci);
+            if (k) g_zj_clsset[n++] = (uintptr_t)k;
+        }
+    }
+    g_zj_clsset_n = n;
+    qsort(g_zj_clsset, (size_t)n, sizeof(uintptr_t), zj_cmp_uptr);
+    ipalog("[SP+] bag-walk: class set = %d registered classes", n);
+}
+static int zj_classset_has(void *p) {
+    if (!g_zj_clsset || !p) return 0;
+    uintptr_t key = (uintptr_t)p;
+    int lo = 0, hi = g_zj_clsset_n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        if (g_zj_clsset[mid] == key) return 1;
+        if (g_zj_clsset[mid] < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+// Object's class, but only when the object is a plausible heap pointer AND its
+// class is registered. NULL => caller must skip (never deref further).
+static Il2CppClass *zj_obj_class(void *o) {
+    uintptr_t p = (uintptr_t)o;
+    if (!o || (p & 7) || p < 0x100000000ULL || p > 0x1000000000ULL) return NULL;
+    Il2CppClass *k = spp_il2cpp_object_get_class(o);
+    return zj_classset_has(k) ? k : NULL;
+}
+
+// Hex-dump up to `n` element words of a managed array (bounded + class-checked)
+// — diagnostic for disambiguating ref vs struct element layout without risk.
+static void zj_hexdump_arr(void *arr, const char *tag, int n) {
+    int len = zj_array_len(arr);
+    if (len <= 0) { ipalog("[SP+] bag-walk:   %s empty/null", tag); return; }
+    if (n > len) n = len;
+    if (n > 8) n = 8;
+    for (int i = 0; i < n; i++) {
+        void *w = *(void **)((uint8_t *)arr + ZJ_ARR_DATA + (size_t)i * sizeof(void *));
+        Il2CppClass *wc = zj_obj_class(w);
+        ipalog("[SP+] bag-walk:   %s[%d]=%p (%s)", tag, i, w,
+               wc ? (spp_il2cpp_class_get_name(wc) ?: "?") : "-");
+    }
+}
+
+// True if class name mentions the pokemon bag.
+static int zj_is_bagname(const char *nm) {
+    return nm && (strstr(nm, "PokemonBag") != NULL);
+}
+
+// Given a bound provider object, try to pull out the cached singleton it holds.
+// Zenject's AsSingle() wraps the creator in a CachedProvider that stores the
+// built object in a `_instances` List<object>; FromInstance uses `_instance`.
+// We look for any field whose name contains "instance", read it, deref a
+// List/array to element 0 if needed, and accept the first object whose class
+// name mentions the bag. One level of `_creator` recursion covers the wrapper.
+// All reads guarded; the only calls are metadata (object_get_class/name).
+static Il2CppObject *zj_provider_instance(void *provider, int depth) {
+    if (depth < 0) return NULL;
+    Il2CppClass *pcls = zj_obj_class(provider);     // validated or NULL
+    if (!pcls) return NULL;
+    ipalog("[SP+] bag-walk: provider %s @ %p",
+           spp_il2cpp_class_get_name(pcls) ?: "?", provider);
+    void *recurse = NULL;
+    void *iter = NULL;
+    for (int n = 0; n < 24; n++) {
+        void *f = spp_il2cpp_class_get_fields(pcls, &iter);
+        if (!f) break;
+        const char *fn = spp_il2cpp_field_get_name(f);
+        if (!fn) continue;
+        int32_t off = field_offset_of(f);
+        if (off < (int32_t)sizeof(void *) || off > 0x8000) continue;
+        // candidate instance holders: _instance / _instances / cached
+        if (strstr(fn, "instance") || strstr(fn, "Instance") ||
+            strstr(fn, "cached")   || strstr(fn, "Cached")) {
+            void *v = read_ptr_field(provider, off);
+            if (!v) continue;
+            // The object directly, or a List<>/array of them.
+            Il2CppObject *cand = v;
+            Il2CppClass *vc = zj_obj_class(v);
+            const char *vn = vc ? spp_il2cpp_class_get_name(vc) : NULL;
+            if (!zj_is_bagname(vn)) {
+                void *items = read_ptr_field(v, ZJ_LIST_ITEMS);  // List<object>._items
+                void *e0 = zj_array_ref(items, 0);
+                if (!e0) e0 = zj_array_ref(v, 0);                // or a bare array
+                Il2CppClass *ec = zj_obj_class(e0);
+                if (ec) { cand = e0; vc = ec; vn = spp_il2cpp_class_get_name(ec); }
+            }
+            ipalog("[SP+] bag-walk:   field %s -> %s", fn, vn ?: "?");
+            if (zj_is_bagname(vn)) return cand;
+        }
+        if (!recurse && (strstr(fn, "_creator") || strstr(fn, "Creator") ||
+                         strstr(fn, "_provider") || strstr(fn, "SubProvider") ||
+                         strstr(fn, "subProvider")))
+            recurse = read_ptr_field(provider, off);
+    }
+    if (recurse) return zj_provider_instance(recurse, depth - 1);
+    return NULL;
+}
+
+// Walk DiContainer._providers for a binding keyed on a *PokemonBag* Type and
+// return its live instance. Pure data reads + metadata calls — cannot trip the
+// code-signature page that killed v36.
+static Il2CppObject *zj_find_bag_instance(void *container) {
+    Il2CppClass *dc = zj_obj_class(container);
+    if (!dc) { ipalog("[SP+] bag-walk: container not a valid object"); return NULL; }
+    zj_classset_build();
+    void *dict = read_named_ptr(container, dc, "_providers");
+    if (!dict) { ipalog("[SP+] bag-walk: _providers null"); return NULL; }
+    void *entries = read_ptr_field(dict, ZJ_ENTRIES);
+    int count = 0;
+    if (!read_int_field(dict, ZJ_COUNT, &count) || count <= 0 || !entries) {
+        ipalog("[SP+] bag-walk: entries/count unreadable"); return NULL;
+    }
+    int cap = zj_array_len(entries);
+    if (cap && count > cap) count = cap;          // never read past the array
+    if (count > 0x20000) count = 0x20000;
+    ipalog("[SP+] bag-walk: scanning %d provider entries", count);
+
+    int matches = 0, miss_dumped = 0;
+    for (int i = 0; i < count; i++) {
+        uint8_t *e = (uint8_t *)entries + ZJ_ARR_DATA + (size_t)i * ZJ_ENTRY_STRIDE;
+        void *key_type = *(void **)(e + ZJ_ENTRY_KEYTY);   // BindingId._type (System.Type)
+        if (!key_type) continue;                           // free/empty slot
+        void *il2type = read_ptr_field(key_type, ZJ_REFTYPE_TYPE);  // Il2CppType*
+        if (!il2type) continue;
+        Il2CppClass *kc = spp_il2cpp_class_from_type(il2type);      // metadata — safe
+        if (!zj_classset_has(kc)) continue;                        // only registered classes
+        const char *kn = spp_il2cpp_class_get_name(kc);
+        if (!zj_is_bagname(kn)) continue;
+        matches++;
+        void *list = *(void **)(e + ZJ_ENTRY_VALUE);       // List<ProviderInfo>
+        ipalog("[SP+] bag-walk: entry[%d] key %s -> providers %p", i, kn ?: "?", list);
+        void *items = read_ptr_field(list, ZJ_LIST_ITEMS);
+        int sz = 0; read_int_field(list, ZJ_LIST_SIZE, &sz);
+        if (sz < 0) sz = 0; if (sz > 64) sz = 64;
+        for (int j = 0; j < sz; j++) {
+            // ProviderInfo assumed reference type: _items is a pointer array,
+            // Provider at pinfo+0x20. Every derived class is validated by
+            // zj_obj_class, so a struct layout just misses (no crash).
+            void *pinfo = zj_array_ref(items, j);
+            void *provider = pinfo ? read_ptr_field(pinfo, ZJ_PROVIDERINFO_PROVIDER) : NULL;
+            Il2CppObject *inst = zj_provider_instance(provider, 2);
+            if (inst) {
+                Il2CppClass *ic = zj_obj_class(inst);
+                ipalog("[SP+] bag-walk: FOUND bag instance @ %p (%s)",
+                       inst, ic ? (spp_il2cpp_class_get_name(ic) ?: "?") : "?");
+                return inst;
+            }
+        }
+        // Ref-type assumption didn't reach the instance — dump the items array
+        // once so a struct ProviderInfo can be finalized without guessing.
+        if (!miss_dumped) { miss_dumped = 1; zj_hexdump_arr(items, "items", 6); }
+    }
+    ipalog("[SP+] bag-walk: %d *PokemonBag* bindings, no cached instance reached",
+           matches);
+    return NULL;
+}
+
 // --- resolve IPokemonBag ---------------------------------------------------
 //
 // Four strategies, tried in order. Each step is logged so a failure on a
@@ -618,6 +851,36 @@ Il2CppObject *spp_il2cpp_get_pokemon_bag(void) {
         ipalog("[SP+] bag-resolve: get_Instance() returned null");
     } else {
         ipalog("[SP+] bag-resolve: no get_Instance method");
+    }
+
+    // Strategy F (v38) — Zenject DiContainer._providers walk by DATA READS.
+    // Reaches ProjectContext._instance -> _container, then scans the provider
+    // dictionary (269 entries on 0.743) for the binding keyed on a *PokemonBag*
+    // Type and reads its cached singleton out of the provider. No managed
+    // dispatch, so it cannot trip the CODESIGNING page that killed the v36
+    // Resolve invoke. This is now the primary instance-acquisition path.
+    {
+        Il2CppClass *pc = spp_il2cpp_find_class("Assembly-CSharp.dll", "Zenject", "ProjectContext");
+        if (!pc) pc = spp_il2cpp_find_class(NULL, "Zenject", "ProjectContext");
+        if (!pc) pc = spp_il2cpp_find_class(NULL, NULL, "ProjectContext");
+        Il2CppObject *pcinst = pc ? spp_il2cpp_static_field_object(pc, "_instance") : NULL;
+        if (pcinst) {
+            Il2CppClass *pcc = spp_il2cpp_object_get_class(pcinst);
+            void *container = read_named_ptr(pcinst, pcc, "_container");
+            if (!container) container = read_named_ptr(pcinst, pcc, "Container");
+            if (container) {
+                Il2CppObject *inst = zj_find_bag_instance(container);
+                if (inst) {
+                    ipalog("[SP+] bag-resolve: provider walk hit");
+                    g_cached_bag = inst;
+                    return inst;
+                }
+            } else {
+                ipalog("[SP+] bag-resolve: _container unreachable for walk");
+            }
+        } else {
+            ipalog("[SP+] bag-resolve: ProjectContext._instance null for walk");
+        }
     }
 
     // Strategy C — Zenject ProjectContext._instance.Container.Resolve(type).
@@ -920,20 +1183,21 @@ int spp_il2cpp_bag_inspect(int enum_probe) {
                "(set bag_enum_probe=1 in sppro_plus.json to run it)");
         return 0;
     }
-    // v37: crash-safe Zenject chain probe (DATA READS ONLY). This REPLACES
-    // the v36 Resolve invoke that SIGKILL'd us (CODESIGNING invalid page).
-    // It maps the DiContainer layout so the provider walk can be finished
-    // from real offsets. Zenject Resolve stays DISABLED.
-    ipalog("[SP+] bag-enum: Zenject chain probe (data reads)");
-    spp_il2cpp_zenject_probe();
-    // Instance acquisition via the SAFE strategies only (A/B/D; Zenject
-    // Resolve off). Returns null today — enumeration below is kept ready for
-    // when the provider walk yields the live bag.
+    // v38: acquire the live instance via Strategy F — the DATA-READ provider
+    // walk inside get_pokemon_bag (ProjectContext._instance -> _container ->
+    // _providers scan). No Resolve invoke, so no CODESIGNING page. The layout
+    // was mapped in v37; this build USES it.
+    ipalog("[SP+] bag-enum: resolving live instance (provider walk)");
     Il2CppObject *bag = spp_il2cpp_get_pokemon_bag();
-    if (!bag) { ipalog("[SP+] bag-enum: no live bag instance (safe strategies)"); return 0; }
-    ipalog("[SP+] bag-enum: bag @ %p", (void *)bag);
+    if (!bag) { ipalog("[SP+] bag-enum: no live bag instance"); return 0; }
+    // Look methods up on the instance's CONCRETE class (PokemonBagImpl), not
+    // the interface — interface MethodInfos don't dispatch through invoke.
+    Il2CppClass *inst_cls = spp_il2cpp_object_get_class(bag);
+    if (!inst_cls) inst_cls = bag_class;
+    ipalog("[SP+] bag-enum: bag @ %p (%s)", (void *)bag,
+           spp_il2cpp_class_get_name(inst_cls) ?: "?");
 
-    const MethodInfo *m_count = spp_il2cpp_find_method(bag_class, "get_Count", 0);
+    const MethodInfo *m_count = spp_il2cpp_find_method(inst_cls, "get_Count", 0);
     if (m_count) {
         Il2CppObject *boxed = spp_il2cpp_invoke_0(m_count, bag);
         // get_Count returns int; il2cpp boxes it — the value sits just past
@@ -944,7 +1208,7 @@ int spp_il2cpp_bag_inspect(int enum_probe) {
         }
     }
 
-    const MethodInfo *m_all = spp_il2cpp_find_method(bag_class, "get_AllPokemon", 0);
+    const MethodInfo *m_all = spp_il2cpp_find_method(inst_cls, "get_AllPokemon", 0);
     if (!m_all) { ipalog("[SP+] bag-enum: no get_AllPokemon"); return 0; }
     Il2CppObject *coll = spp_il2cpp_invoke_0(m_all, bag);
     if (!coll) { ipalog("[SP+] bag-enum: get_AllPokemon() returned null"); return 0; }
