@@ -562,9 +562,9 @@ static Il2CppObject *zj_provider_instance(void *provider, int depth) {
 // return its live instance. Pure data reads + metadata calls — cannot trip the
 // code-signature page that killed v36.
 static Il2CppObject *zj_find_bag_instance(void *container) {
+    zj_classset_build();   // MUST precede any zj_obj_class() — it gates on this set
     Il2CppClass *dc = zj_obj_class(container);
     if (!dc) { ipalog("[SP+] bag-walk: container not a valid object"); return NULL; }
-    zj_classset_build();
     void *dict = read_named_ptr(container, dc, "_providers");
     if (!dict) { ipalog("[SP+] bag-walk: _providers null"); return NULL; }
     void *entries = read_ptr_field(dict, ZJ_ENTRIES);
