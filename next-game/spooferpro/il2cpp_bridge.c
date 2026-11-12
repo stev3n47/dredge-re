@@ -413,18 +413,34 @@ static int collect_bag_classes(Il2CppClass **out, int cap) {
     return n;
 }
 
+#define BAG_MAXCLS 4096
 struct bag_search {
-    long scanned; Il2CppClass **set; int nset; Il2CppObject *found;
+    long scanned;
+    Il2CppClass **set; int nset; Il2CppObject *found;  // whitelist exact match
+    uintptr_t lo, hi;                                   // valid metadata range
+    Il2CppClass *cls[BAG_MAXCLS]; Il2CppObject *samp[BAG_MAXCLS]; int ncls;
+    Il2CppClass *last;
 };
 
 static void bag_heap_cb(void *obj, void *user) {
     struct bag_search *s = (struct bag_search *)user;
     s->scanned++;
-    if (s->found || !obj) return;
+    if (!obj) return;
     Il2CppClass *k = spp_il2cpp_object_get_class((Il2CppObject *)obj); // obj->klass; cheap
     if (!k) return;
-    for (int i = 0; i < s->nset; i++)
-        if (s->set[i] == k) { s->found = (Il2CppObject *)obj; return; }
+    // Exact whitelist match (the candidate PokemonBag* classes).
+    if (!s->found)
+        for (int i = 0; i < s->nset; i++)
+            if (s->set[i] == k) { s->found = (Il2CppObject *)obj; break; }
+    // Collect distinct klass pointers that fall in the valid metadata range,
+    // so post-walk class_get_name is safe (garbage non-object klass pointers
+    // land outside this range and are skipped).
+    if (k == s->last) return;
+    s->last = k;
+    uintptr_t kp = (uintptr_t)k;
+    if (kp < s->lo || kp > s->hi) return;
+    for (int i = 0; i < s->ncls; i++) if (s->cls[i] == k) return;
+    if (s->ncls < BAG_MAXCLS) { s->cls[s->ncls] = k; s->samp[s->ncls] = (Il2CppObject *)obj; s->ncls++; }
 }
 
 static Il2CppObject *heap_walk_find(Il2CppClass *target) {
@@ -438,12 +454,34 @@ static Il2CppObject *heap_walk_find(Il2CppClass *target) {
     ipalog("[SP+] bag-resolve: %d *PokemonBag* candidate classes", nset);
     if (nset == 0) return NULL;
 
-    // Do NOT touch gc_disable/gc_enable (v29 N2 BRK). Callback only compares
-    // obj->klass against the whitelist — no il2cpp calls on heap pointers.
-    struct bag_search s; memset(&s, 0, sizeof s); s.set = set; s.nset = nset;
+    // Metadata region bounds from the candidate pointers (+/- 64MB margin):
+    // real class pointers cluster here; garbage klass pointers from non-object
+    // GC allocations fall outside and get skipped so get_name stays safe.
+    uintptr_t lo = (uintptr_t)-1, hi = 0;
+    for (int i = 0; i < nset; i++) {
+        uintptr_t p = (uintptr_t)set[i];
+        if (p < lo) lo = p; if (p > hi) hi = p;
+    }
+    lo = (lo > 0x4000000) ? lo - 0x4000000 : 0;
+    hi = hi + 0x4000000;
+
+    struct bag_search s; memset(&s, 0, sizeof s);
+    s.set = set; s.nset = nset; s.lo = lo; s.hi = hi;
     spp_il2cpp_gc_foreach_heap(bag_heap_cb, &s);
-    ipalog("[SP+] bag-resolve: heap walk scanned %ld objects, %s",
-           s.scanned, s.found ? "FOUND bag" : "no instance of any candidate");
+    ipalog("[SP+] bag-resolve: heap walk scanned %ld objects, %d in-range classes, %s",
+           s.scanned, s.ncls, s.found ? "FOUND bag (exact)" : "no exact candidate");
+
+    // Post-walk: safe name resolution on in-range classes. Log every class
+    // with a live instance whose name mentions Bag/Pokemon — reveals the real
+    // runtime bag type if the exact candidate match missed it.
+    for (int i = 0; i < s.ncls; i++) {
+        const char *nm = spp_il2cpp_class_get_name(s.cls[i]);
+        if (nm && (strstr(nm, "Bag") || strstr(nm, "PokemonBag")))
+            ipalog("[SP+] bag-resolve:   LIVE *Bag* instance: %s @ class %p",
+                   nm, (void *)s.cls[i]);
+    }
+    if (!s.found && s.ncls == 0)
+        ipalog("[SP+] bag-resolve:   (0 in-range classes — foreach_heap may be partial)");
     return s.found;
 }
 
