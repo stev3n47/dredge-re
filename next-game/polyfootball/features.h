@@ -45,6 +45,13 @@ typedef struct {
     int init_failed;               // set if init returned non-zero
     unsigned long fires;            // dispatcher bumps if tick returns 1
     unsigned long last_tick_ms;     // dispatcher updates on each tick
+    // v2.1 — periodic rewalk: init-time heap walks miss instances that only
+    // materialise during gameplay (e.g. ThrowController spawns per play).
+    // Features with heap walks set `rewalk` to a function that re-scans every
+    // ~60s. rewalk should return 1 when it found something new (triggers a
+    // one-shot log), 0 otherwise. NULL rewalk means "no rewalk needed".
+    int (*rewalk)(void);
+    unsigned long last_rewalk_ms;
 } PfpFeature;
 
 // Features declared here, defined in feature_<name>.c.
@@ -80,6 +87,18 @@ int pfp_diag_log_live_instances(const char *prefix,
 // Pre-filtered by containing one of `name_substrs` (NULL/0 = all).
 void pfp_diag_log_methods(const char *prefix, Il2CppClass *klass,
                           const char **name_substrs, int substr_count);
+
+// v2.1 — periodic rewalk registry. Features whose init-time heap walks
+// turned up 0 live instances register their target classes here. The
+// dispatcher re-walks the heap every ~60s against the combined whitelist.
+// When any registered target gets a live hit, it's logged once (with the
+// original feature prefix) and marked done so we don't re-log forever.
+//
+// Call this ONCE per class, inside the feature's `init()`, AFTER you've
+// resolved the class pointer from image metadata. Safe to pass NULL —
+// a NULL class is silently ignored (it's probably one that didn't
+// resolve on this build).
+void pfp_register_rewalk(const char *prefix, Il2CppClass *klass);
 
 #ifdef __cplusplus
 }

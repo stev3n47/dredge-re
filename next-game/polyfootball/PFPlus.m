@@ -516,6 +516,108 @@ void pfp_diag_log_methods(const char *prefix, Il2CppClass *klass,
     }
 }
 
+// ---------------- Periodic rewalk registry (v2.1) -------------------------
+//
+// Features whose init-time heap walk turned up 0 live instances (common
+// for match-only objects like ThrowController) register their target
+// class here. Every ~60s we do ONE heap walk against the combined set
+// and log any first-time hits per feature prefix.
+
+#define PFP_MAX_REWALK_TARGETS 64
+struct pfp_rewalk_entry {
+    const char *prefix;
+    Il2CppClass *klass;
+    int done;
+};
+static struct pfp_rewalk_entry g_rewalk[PFP_MAX_REWALK_TARGETS];
+static int g_rewalk_count = 0;
+static unsigned long g_last_rewalk_ms = 0;
+
+void pfp_register_rewalk(const char *prefix, Il2CppClass *klass) {
+    if (!prefix || !klass) return;
+    if (g_rewalk_count >= PFP_MAX_REWALK_TARGETS) {
+        pfp_log("rewalk: registry full at %d — dropping %s target",
+                PFP_MAX_REWALK_TARGETS, prefix);
+        return;
+    }
+    // Dedup: don't register the same (prefix,class) twice.
+    for (int i = 0; i < g_rewalk_count; i++) {
+        if (g_rewalk[i].klass == klass && g_rewalk[i].prefix == prefix) return;
+    }
+    g_rewalk[g_rewalk_count].prefix = prefix;
+    g_rewalk[g_rewalk_count].klass = klass;
+    g_rewalk[g_rewalk_count].done = 0;
+    g_rewalk_count++;
+}
+
+struct pfp_rewalk_ctx {
+    void *found_obj[PFP_MAX_REWALK_TARGETS];
+    Il2CppClass *found_klass[PFP_MAX_REWALK_TARGETS];
+    int n_found;
+    long scanned;
+};
+
+static void pfp_rewalk_cb(void *obj, void *user) {
+    struct pfp_rewalk_ctx *c = (struct pfp_rewalk_ctx *)user;
+    c->scanned++;
+    if (!obj || c->n_found >= PFP_MAX_REWALK_TARGETS) return;
+    Il2CppClass *k = pfp_il2cpp_object_get_class(obj);
+    if (!k) return;
+    // SPPlus v33 rule: only pointer-equality against pre-resolved whitelist.
+    for (int i = 0; i < g_rewalk_count; i++) {
+        if (g_rewalk[i].done) continue;
+        if (g_rewalk[i].klass == k) {
+            // Dedup within this walk — one hit per (class) is enough.
+            for (int j = 0; j < c->n_found; j++) {
+                if (c->found_klass[j] == k) return;
+            }
+            c->found_obj[c->n_found] = obj;
+            c->found_klass[c->n_found] = k;
+            c->n_found++;
+            return;
+        }
+    }
+}
+
+static void pfp_periodic_rewalk(void) {
+    if (g_rewalk_count == 0) return;
+    if (!pfp_il2cpp_ready() || !pfp_il2cpp_gc_foreach_heap ||
+        !pfp_il2cpp_object_get_class) return;
+
+    unsigned long t = now_ms();
+    // First call: skip the immediate rewalk (init-time walk just happened).
+    // After that: every 60s.
+    if (!g_last_rewalk_ms) { g_last_rewalk_ms = t; return; }
+    if ((t - g_last_rewalk_ms) < 60000UL) return;
+    g_last_rewalk_ms = t;
+
+    // Count how many classes still need finding.
+    int pending = 0;
+    for (int i = 0; i < g_rewalk_count; i++) if (!g_rewalk[i].done) pending++;
+    if (pending == 0) return;
+
+    struct pfp_rewalk_ctx ctx = { {0}, {0}, 0, 0 };
+    pfp_il2cpp_gc_foreach_heap(pfp_rewalk_cb, &ctx);
+
+    if (ctx.n_found == 0) {
+        pfp_log("rewalk: scanned %ld objects, %d class(es) still unfound",
+                ctx.scanned, pending);
+        return;
+    }
+    // Post-walk, log and mark done.
+    for (int i = 0; i < ctx.n_found; i++) {
+        for (int j = 0; j < g_rewalk_count; j++) {
+            if (g_rewalk[j].klass == ctx.found_klass[i] && !g_rewalk[j].done) {
+                const char *kn = pfp_il2cpp_class_get_name(g_rewalk[j].klass);
+                pfp_log("%s: rewalk found live %s @ %p (scanned=%ld)",
+                        g_rewalk[j].prefix, kn ? kn : "?", ctx.found_obj[i],
+                        ctx.scanned);
+                g_rewalk[j].done = 1;
+            }
+        }
+    }
+}
+
 // ---------------- Feature registry ----------------------------------------
 
 static PfpFeature *g_feature_registry[] = {
@@ -555,7 +657,18 @@ static void run_features_tick(void) {
                 f->last_tick_ms = now_ms();
             }
         }
+        // Per-feature rewalk callback (optional; currently unused — the
+        // global pfp_periodic_rewalk below handles all registered classes).
+        if (f->rewalk) {
+            unsigned long t = now_ms();
+            if (!f->last_rewalk_ms || (t - f->last_rewalk_ms) >= 60000UL) {
+                f->rewalk();
+                f->last_rewalk_ms = t;
+            }
+        }
     }
+    // v2.1: global periodic rewalk across all registered classes.
+    pfp_periodic_rewalk();
 }
 
 // -------- PremiumCurrency resolution --------
@@ -815,7 +928,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v2.0-pre up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.1 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 

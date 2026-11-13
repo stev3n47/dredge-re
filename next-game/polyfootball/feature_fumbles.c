@@ -50,6 +50,10 @@ static int init(void) {
     if (n_classes > 0) {
         (void)pfp_diag_log_live_instances("fumbles", classes, n_classes);
     }
+    // v2.1: register for periodic rewalk — SO-backed rules usually load
+    // when a match starts, not at app boot.
+    pfp_register_rewalk("fumbles", g_rules);
+    pfp_register_rewalk("fumbles", g_sim);
     return 0;
 }
 

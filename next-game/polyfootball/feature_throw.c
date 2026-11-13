@@ -54,6 +54,9 @@ static int init(void) {
         pfp_log("throw: no live ThrowController on heap (expected when no match is active)");
     }
 
+    // v2.1: ThrowController spawns per play — register for periodic rewalk
+    // so we catch it the moment a career match starts.
+    pfp_register_rewalk("throw", g_throw_class);
     return 0;
 }
 

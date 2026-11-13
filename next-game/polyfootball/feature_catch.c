@@ -49,6 +49,10 @@ static int init(void) {
         pfp_log("catch: no target classes resolved — nothing to walk");
     }
 
+    // v2.1: register resolved catch classes for periodic rewalk.
+    pfp_register_rewalk("catch", g_reach);
+    pfp_register_rewalk("catch", g_style);
+    pfp_register_rewalk("catch", g_rules);
     // Diagnostic succeeded regardless of partial misses — still useful.
     return 0;
 }

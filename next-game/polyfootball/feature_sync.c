@@ -64,6 +64,11 @@ static int init(void) {
         pfp_diag_log_live_instances("sync", targets, n);
     }
 
+    // v2.1: register for periodic rewalk — sync manager spawns at first
+    // multiplayer login/sign-in, often minutes after boot.
+    pfp_register_rewalk("sync", g_manager_class);
+    pfp_register_rewalk("sync", g_envelope_class);
+    pfp_register_rewalk("sync", g_savedata_class);
     return 0;  // diagnostic feature — missing class is not an init failure
 }
 

@@ -76,6 +76,8 @@ static int init(void) {
     // pointers from image metadata, not heap-derived klass pointers).
     pfp_diag_log_live_instances("injuries", resolved, resolved_n);
 
+    // v2.1: register all resolved injury classes for periodic rewalk.
+    for (int i = 0; i < resolved_n; i++) pfp_register_rewalk("injuries", resolved[i]);
     return 0;
 }
 
