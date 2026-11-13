@@ -35,6 +35,17 @@ int  pfp_pac_hook_install(const MethodInfo *mi, void *trampoline, const char *ta
 int  pfp_pac_hook_install_save(const MethodInfo *mi, void *trampoline,
                                 void **out_original, const char *tag);
 
+// Shared stub trampolines. These ignore every arg and just set the
+// return register. arm64 AAPCS puts integer/pointer returns in x0 and
+// float returns in s0, independently — so these work for any arity of
+// the real method as long as we never read the args and the real
+// return type matches. Signatures declared as `(void)` so the compiler
+// emits "mov x0, #0; ret" or "fmov s0, wzr; ret" with no frame access.
+float   pfp_tramp_zero_float(void);
+float   pfp_tramp_one_float(void);
+int64_t pfp_tramp_zero_int(void);
+int64_t pfp_tramp_one_int(void);
+
 #ifdef __cplusplus
 }
 #endif

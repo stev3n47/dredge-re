@@ -184,6 +184,9 @@ struct cfg {
     int pac;                // v2.2: PAC probe feature on/off (default on for phase 1)
     int pac_probe;          // v2.2: 0=phase 1 only (safe), 1=phase 2 swap (opt-in)
     int fumbles_force;      // v2.2.1: install fumble-chance hooks (static methods -> 0)
+    int injuries_force;     // v2.2.1: AggravationChance/StaysDown hooks
+    int tackle_force;       // v2.2.1: BreakChance/ShoveChance/SpinEscape/AnkleBreak -> 1
+    int catch_force;        // v2.2.1: Confidence -> 1.0
     int iap_force;          // v2.2.1: reserved for v2.2.2 AppleReceiptParser hook
     // Housekeeping
     int log_each_fire;
@@ -199,7 +202,7 @@ static struct cfg g_cfg = {
     .fumbles = 1, .injuries = 1, .tackle = 1, .catch_hands = 1,
     .throw_cannon = 1, .speed = 1,
     .pac = 1, .pac_probe = 0,  // phase 1 always; phase 2 opt-in
-    .fumbles_force = 0, .iap_force = 0,
+    .fumbles_force = 0, .injuries_force = 0, .tackle_force = 0, .catch_force = 0, .iap_force = 0,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
 };
 
@@ -267,10 +270,15 @@ static int pfp_cfg_reload_if_changed(void) {
                     "pac=1\n"
                     "pac_probe=0\n"
                     "# v2.2.1 methodPointer swap hooks (opt-in, requires PAC success).\n"
-                    "# fumbles_force=1 → FootballFumbleRules.Chance/.PunchTryChance/.ExpectedPerTackle\n"
-                    "# and FootballFumbleSim.DriveChance/.PerTackle return 0.0 → no fumbles.\n"
+                    "# fumbles_force=1 → fumble chances → 0 (no fumbles)\n"
+                    "# injuries_force=1 → aggravation chance → 0, StaysDown → false\n"
+                    "# tackle_force=1 → BreakChance/ShoveChance/SpinEscape → 1.0 (unstoppable carrier)\n"
+                    "# catch_force=1 → FootballCatchReach.Confidence → 1.0 (magnet hands)\n"
                     "# iap_force=1 reserved for v2.2.2 AppleReceiptParser hook (not yet active).\n"
                     "fumbles_force=0\n"
+                    "injuries_force=0\n"
+                    "tackle_force=0\n"
+                    "catch_force=0\n"
                     "iap_force=0\n"
                     "log_each_fire=0\n"
                     "tick_hz=10\n";
@@ -329,6 +337,9 @@ static int pfp_cfg_reload_if_changed(void) {
         else if (!strcmp(k, "pac"))                   next.pac = parse_bool_or_int(v, next.pac);
         else if (!strcmp(k, "pac_probe"))             next.pac_probe = parse_bool_or_int(v, next.pac_probe);
         else if (!strcmp(k, "fumbles_force"))         next.fumbles_force = parse_bool_or_int(v, next.fumbles_force);
+        else if (!strcmp(k, "injuries_force"))        next.injuries_force = parse_bool_or_int(v, next.injuries_force);
+        else if (!strcmp(k, "tackle_force"))          next.tackle_force = parse_bool_or_int(v, next.tackle_force);
+        else if (!strcmp(k, "catch_force"))           next.catch_force = parse_bool_or_int(v, next.catch_force);
         else if (!strcmp(k, "iap_force"))             next.iap_force = parse_bool_or_int(v, next.iap_force);
         else if (!strcmp(k, "log_each_fire"))         next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
         else if (!strcmp(k, "tick_hz")) {
@@ -424,6 +435,9 @@ int pfp_cfg_bool(const char *key, int defval) {
     else if (!strcmp(key, "pac"))            v = g_cfg.pac;
     else if (!strcmp(key, "pac_probe"))      v = g_cfg.pac_probe;
     else if (!strcmp(key, "fumbles_force"))  v = g_cfg.fumbles_force;
+    else if (!strcmp(key, "injuries_force")) v = g_cfg.injuries_force;
+    else if (!strcmp(key, "tackle_force"))   v = g_cfg.tackle_force;
+    else if (!strcmp(key, "catch_force"))    v = g_cfg.catch_force;
     else if (!strcmp(key, "iap_force"))      v = g_cfg.iap_force;
     pthread_mutex_unlock(&g_cfg_mtx);
     return v;

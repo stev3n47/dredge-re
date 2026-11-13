@@ -21,9 +21,11 @@
 // types whose rolls happen on stack-allocated structs).
 
 #include "features.h"
+#include "pac_swap.h"
 
 #include <stddef.h>
 
+static int g_tackle_hooks_installed = 0;
 static const char *k_image = "Assembly-CSharp.dll";
 
 // Classes we try to resolve. NULLs tolerated — init logs each miss and
@@ -82,9 +84,37 @@ static int init(void) {
 }
 
 static int tick(void) {
-    // Pure diagnostic — nothing happens per tick in v2a. v2b will swap
-    // methodPointer on selected targets after the PAC probe passes.
-    return 0;
+    if (g_tackle_hooks_installed) return 0;
+    if (!pfp_cfg_bool("tackle_force", 0)) return 0;
+    int installed = 0;
+    void *tof = (void *)pfp_tramp_one_float;
+    const char *img = "Assembly-CSharp.dll";
+
+    // FootballCarrierMoveRules: BreakChance/ShoveChance/SpinEscapeChance/
+    // AnkleBreakChance all return float — higher = carrier breaks free
+    // more often. Maxing them to 1.0 makes the carrier practically
+    // untackleable. Overloads (argc=1 AND argc=3 for BreakChance; argc=3
+    // AND argc=4 for ShoveChance) get hooked separately.
+    Il2CppClass *k = pfp_il2cpp_find_class(img, NULL, "FootballCarrierMoveRules");
+    if (k) {
+        const MethodInfo *m;
+        m = pfp_il2cpp_find_method(k, "BreakChance", 1);
+        if (m && pfp_pac_hook_install(m, tof, "tackle.BreakChance[1]")) installed++;
+        m = pfp_il2cpp_find_method(k, "BreakChance", 3);
+        if (m && pfp_pac_hook_install(m, tof, "tackle.BreakChance[3]")) installed++;
+        m = pfp_il2cpp_find_method(k, "ShoveChance", 3);
+        if (m && pfp_pac_hook_install(m, tof, "tackle.ShoveChance[3]")) installed++;
+        m = pfp_il2cpp_find_method(k, "ShoveChance", 4);
+        if (m && pfp_pac_hook_install(m, tof, "tackle.ShoveChance[4]")) installed++;
+        m = pfp_il2cpp_find_method(k, "SpinEscapeChance", 3);
+        if (m && pfp_pac_hook_install(m, tof, "tackle.SpinEscapeChance")) installed++;
+        m = pfp_il2cpp_find_method(k, "AnkleBreakChance", 6);
+        if (m && pfp_pac_hook_install(m, tof, "tackle.AnkleBreakChance")) installed++;
+    }
+
+    g_tackle_hooks_installed = 1;
+    pfp_log("tackle: installed %d methodPointer hook(s) — carrier break/shove/spin/ankle-break chances maxed to 1.0", installed);
+    return installed > 0 ? 1 : 0;
 }
 
 PfpFeature pfp_feature_tackle = { "tackle", init, tick, 0, 0, 0, 0 };

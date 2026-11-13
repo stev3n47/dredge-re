@@ -22,3 +22,18 @@ int pfp_pac_hook_install_save(const MethodInfo *mi, void *trampoline,
 int pfp_pac_hook_install(const MethodInfo *mi, void *trampoline, const char *tag) {
     return pfp_pac_hook_install_save(mi, trampoline, NULL, tag);
 }
+
+// Shared trampolines. Declared `(void)` so the compiler doesn't touch
+// the stack. `no_sanitize("address")` just in case a future ASan build
+// probes the frame.
+__attribute__((no_sanitize("address")))
+float pfp_tramp_zero_float(void) { return 0.0f; }
+
+__attribute__((no_sanitize("address")))
+float pfp_tramp_one_float(void) { return 1.0f; }
+
+__attribute__((no_sanitize("address")))
+int64_t pfp_tramp_zero_int(void) { return 0; }
+
+__attribute__((no_sanitize("address")))
+int64_t pfp_tramp_one_int(void) { return 1; }
