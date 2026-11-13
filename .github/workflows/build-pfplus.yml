@@ -9,6 +9,8 @@ on:
       - 'next-game/polyfootball/il2cpp_*.c'
       - 'next-game/polyfootball/feature_*.c'
       - 'next-game/polyfootball/features.h'
+      - 'next-game/polyfootball/pac_swap.c'
+      - 'next-game/polyfootball/pac_swap.h'
       - '.github/workflows/build-pfplus.yml'
 
 permissions:
@@ -45,6 +47,7 @@ jobs:
             -o PFPlus \
               next-game/polyfootball/PFPlus.m \
               next-game/polyfootball/il2cpp_bridge.c \
+              next-game/polyfootball/pac_swap.c \
               next-game/polyfootball/feature_*.c
           strip -x PFPlus || true
           file PFPlus

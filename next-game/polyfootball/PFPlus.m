@@ -183,6 +183,8 @@ struct cfg {
     int speed;              // v2a diagnostic
     int pac;                // v2.2: PAC probe feature on/off (default on for phase 1)
     int pac_probe;          // v2.2: 0=phase 1 only (safe), 1=phase 2 swap (opt-in)
+    int fumbles_force;      // v2.2.1: install fumble-chance hooks (static methods -> 0)
+    int iap_force;          // v2.2.1: reserved for v2.2.2 AppleReceiptParser hook
     // Housekeeping
     int log_each_fire;
     int tick_hz;
@@ -197,6 +199,7 @@ static struct cfg g_cfg = {
     .fumbles = 1, .injuries = 1, .tackle = 1, .catch_hands = 1,
     .throw_cannon = 1, .speed = 1,
     .pac = 1, .pac_probe = 0,  // phase 1 always; phase 2 opt-in
+    .fumbles_force = 0, .iap_force = 0,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
 };
 
@@ -263,6 +266,12 @@ static int pfp_cfg_reload_if_changed(void) {
                     "# Phase 2 may crash the process once; read the device log + .ips.\n"
                     "pac=1\n"
                     "pac_probe=0\n"
+                    "# v2.2.1 methodPointer swap hooks (opt-in, requires PAC success).\n"
+                    "# fumbles_force=1 → FootballFumbleRules.Chance/.PunchTryChance/.ExpectedPerTackle\n"
+                    "# and FootballFumbleSim.DriveChance/.PerTackle return 0.0 → no fumbles.\n"
+                    "# iap_force=1 reserved for v2.2.2 AppleReceiptParser hook (not yet active).\n"
+                    "fumbles_force=0\n"
+                    "iap_force=0\n"
                     "log_each_fire=0\n"
                     "tick_hz=10\n";
                 (void)write(fd, defaults, strlen(defaults));
@@ -319,6 +328,8 @@ static int pfp_cfg_reload_if_changed(void) {
         else if (!strcmp(k, "speed"))                 next.speed = parse_bool_or_int(v, next.speed);
         else if (!strcmp(k, "pac"))                   next.pac = parse_bool_or_int(v, next.pac);
         else if (!strcmp(k, "pac_probe"))             next.pac_probe = parse_bool_or_int(v, next.pac_probe);
+        else if (!strcmp(k, "fumbles_force"))         next.fumbles_force = parse_bool_or_int(v, next.fumbles_force);
+        else if (!strcmp(k, "iap_force"))             next.iap_force = parse_bool_or_int(v, next.iap_force);
         else if (!strcmp(k, "log_each_fire"))         next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
         else if (!strcmp(k, "tick_hz")) {
             int hz = atoi(v);
@@ -412,6 +423,8 @@ int pfp_cfg_bool(const char *key, int defval) {
     else if (!strcmp(key, "speed"))          v = g_cfg.speed;
     else if (!strcmp(key, "pac"))            v = g_cfg.pac;
     else if (!strcmp(key, "pac_probe"))      v = g_cfg.pac_probe;
+    else if (!strcmp(key, "fumbles_force"))  v = g_cfg.fumbles_force;
+    else if (!strcmp(key, "iap_force"))      v = g_cfg.iap_force;
     pthread_mutex_unlock(&g_cfg_mtx);
     return v;
 }
@@ -1011,7 +1024,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v2.2 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.2.1 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 

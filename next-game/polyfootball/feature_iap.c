@@ -135,12 +135,30 @@ static int init(void) {
 
     pfp_log("iap: discovery complete — images=%d classes=%d (v1.5.1 will hook based on this)",
             g_iap_images_seen, g_iap_classes_logged);
+
+    // v2.2.1: deep dump on AppleReceiptParser specifically — the primary
+    // hook target per the Nov 13 device log (12 methods in
+    // Unity.Purchasing.Security.dll). We enumerate every method name +
+    // argc + static-bit so v2.2.2 can pick the right one to swap.
+    Il2CppClass *parser =
+        pfp_il2cpp_find_class("Unity.Purchasing.Security.dll", NULL, "AppleReceiptParser");
+    if (!parser) {
+        parser = pfp_il2cpp_find_class(NULL, "UnityEngine.Purchasing.Security", "AppleReceiptParser");
+    }
+    if (parser) {
+        int n = pfp_il2cpp_count_methods(parser);
+        pfp_log("iap: AppleReceiptParser class=%p method_count=%d — full method dump below",
+                (void *)parser, n);
+        pfp_diag_log_methods("iap-parser", parser, NULL, 0);  // no filter, all methods
+    } else {
+        pfp_log("iap: AppleReceiptParser class lookup FAILED in both image variants");
+    }
     return 0;
 }
 
 static int tick(void) {
-    // v1.5 is discovery-only. No per-tick work; v1.5.1 adds the actual
-    // Validate hook once we've seen the real on-device class/method names.
+    // v1.5 is discovery-only. v2.2.1 defers actual hook to v2.2.2
+    // after the method inventory from the deep dump is reviewed.
     return 0;
 }
 
