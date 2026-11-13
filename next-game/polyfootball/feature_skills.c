@@ -50,33 +50,70 @@ static int init(void) {
     }
     pfp_log("skills: CareerSkillCosts class=%p (expect 5 methods per catalog m9231)", (void *)g_klass);
 
-    // v2.7 — hunt the balance class directly (iOSGods-style setter path).
-    // v2.5.3 scan found 43 class name matches but only 9 methods matched
-    // the inner filter, hiding most classes. Now: log every matched
-    // class NAME (so we see all 43), then dump ALL methods on each
-    // (NULL filter). High log volume but gives us the full picture
-    // for v2.8 hook targeting.
-    {
-        static const char *scan_subs[] = {
-            "Skill",      "Upgrade",    "Token",      "Credit",
-            "Attribute",  "Ability",    "Perk",       "Boost",
-            "Advance",    "Progress",   "Tree",       "Pool",
-            "Level",      "Point",      "Ledger",     "Bank",
-            "Balance",    "Spend",      "Xp",
+    // v2.8 — the v2.7 class-name scan missed the skill-point ledger
+    // (43 class hits but no obvious balance/grant class). Scan by
+    // METHOD name instead: enumerate every class in Assembly-CSharp
+    // and log any whose methods contain SkillPoint/DevelopmentPoint/
+    // AttributePoint/UpgradePoint/ApplyUpgrade patterns. This pierces
+    // the "less-obvious class name" blocker.
+    if (pfp_il2cpp_ready() &&
+        pfp_il2cpp_domain_get &&
+        pfp_il2cpp_domain_get_assemblies &&
+        pfp_il2cpp_assembly_get_image &&
+        pfp_il2cpp_image_get_name &&
+        pfp_il2cpp_image_get_class &&
+        pfp_il2cpp_image_get_class_count &&
+        pfp_il2cpp_class_get_name &&
+        pfp_il2cpp_class_get_methods &&
+        pfp_il2cpp_method_get_name) {
+        pfp_log("skills: v2.8 method-name hunt — scanning Assembly-CSharp for Skill/Development/Attribute-Point methods");
+        static const char *needles[] = {
+            "SkillPoint", "DevelopmentPoint", "AttributePoint",
+            "UpgradePoint", "AbilityPoint", "ApplyUpgrade",
+            "SpendPoint", "AddSkill", "AddAttribute", "RedeemPoint",
         };
-        const int nsubs = (int)(sizeof(scan_subs) / sizeof(scan_subs[0]));
-        Il2CppClass *hits[64];
-        int n = pfp_find_classes_by_name(scan_subs, nsubs, hits, 64);
-        pfp_log("skills: v2.7-scan — %d class(es) match wide ledger patterns", n);
-        for (int i = 0; i < n; i++) {
-            const char *kn = pfp_il2cpp_class_get_name
-                ? pfp_il2cpp_class_get_name(hits[i]) : NULL;
-            int mc = pfp_il2cpp_count_methods(hits[i]);
-            pfp_log("skills-scan: [%2d] class=%s @ %p methods=%d",
-                    i, kn ? kn : "?", (void *)hits[i], mc);
-            // Dump every method (NULL/0 = all). Hits max 64 and most
-            // classes have < 20 methods, so bounded output.
-            pfp_diag_log_methods("skills-scan", hits[i], NULL, 0);
+        const int nn = (int)(sizeof(needles) / sizeof(needles[0]));
+        Il2CppDomain *dom = pfp_il2cpp_domain_get();
+        size_t na = 0;
+        const Il2CppAssembly **asms = pfp_il2cpp_domain_get_assemblies(dom, &na);
+        int hits_total = 0;
+        for (size_t ai = 0; ai < na && hits_total < 128; ai++) {
+            const Il2CppImage *img = pfp_il2cpp_assembly_get_image(asms[ai]);
+            if (!img) continue;
+            const char *in = pfp_il2cpp_image_get_name(img);
+            if (!in || strcmp(in, "Assembly-CSharp.dll") != 0) continue;
+            size_t nc = pfp_il2cpp_image_get_class_count(img);
+            for (size_t ci = 0; ci < nc && hits_total < 128; ci++) {
+                Il2CppClass *k = pfp_il2cpp_image_get_class(img, ci);
+                if (!k) continue;
+                void *iter = NULL;
+                const MethodInfo *m;
+                while ((m = pfp_il2cpp_class_get_methods(k, &iter)) != NULL) {
+                    const char *mn = pfp_il2cpp_method_get_name(m);
+                    if (!mn) continue;
+                    for (int ni = 0; ni < nn; ni++) {
+                        if (strstr(mn, needles[ni])) {
+                            const char *kn = pfp_il2cpp_class_get_name(k);
+                            uint32_t iflags = 0;
+                            uint32_t f = pfp_il2cpp_method_get_flags ?
+                                pfp_il2cpp_method_get_flags(m, &iflags) : 0;
+                            int is_static = (f & 0x10) ? 1 : 0;
+                            int argc = pfp_il2cpp_method_get_param_count ?
+                                (int)pfp_il2cpp_method_get_param_count(m) : -1;
+                            pfp_log("skills-hunt: %s.%s argc=%d%s",
+                                    kn ? kn : "?", mn, argc,
+                                    is_static ? " [static]" : "");
+                            hits_total++;
+                            break;
+                        }
+                    }
+                    if (hits_total >= 128) break;
+                }
+            }
+        }
+        pfp_log("skills: v2.8 method-name hunt — %d hit(s)", hits_total);
+        if (hits_total == 0) {
+            pfp_log("skills: no SkillPoint-like method names found — ledger class/method uses different vocabulary");
         }
     }
 
