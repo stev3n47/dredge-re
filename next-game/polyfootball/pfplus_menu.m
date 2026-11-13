@@ -1,10 +1,14 @@
-// pfplus_menu.m — v2.4 in-game UIKit overlay menu (premium polish).
+// pfplus_menu.m — v2.4.1 in-game UIKit overlay menu (premium polish).
 //
 // Replaces hand-editing Documents/pfplus.json with a floating panel of
 // UISwitches. Reveal via tap on a floating "PF+" orb pinned to the
 // top-right of the screen. Toggles write directly to the in-memory
 // config (pfp_cfg_set_bool) so the next tick picks them up — no file
 // reload, no app relaunch.
+//
+// v2.4.1: orb is now draggable too. Pan handler moved to gesture.view
+// so it reuses between orb + panel. Added a visible drag handle (grab
+// bar) at the top of the panel so users can see where to drag.
 //
 // Approach: pure ObjC-runtime via objc_msgSend. No SDK headers needed —
 // we forward-declare the ObjC runtime API, then build a dynamic
@@ -227,17 +231,23 @@ static void handler_dumpLog(id self, SEL _cmd, id sender) {
 
 static void handler_pan(id self, SEL _cmd, id gesture) {
     (void)self; (void)_cmd;
-    if (!g_panel || !gesture) return;
-    // CGPoint t = [gesture translationInView:panel.superview];
+    if (!gesture) return;
+    // Use the gesture's own view so one handler drags whatever it's on:
+    // the panel OR the floating orb. This lets us reuse the same handler
+    // for both — no duplicated geometry code.
+    id view = msg0(gesture, S("view"));
+    if (!view) return;
+    id parent = msg0(view, S("superview"));
+    if (!parent) return;
+
     CGPoint t = ((CGPoint (*)(id, SEL, id))objc_msgSend)
-        (gesture, S("translationInView:"), msg0(g_panel, S("superview")));
-    // Add translation to panel.center and zero the gesture.
-    CGPoint c = ((CGPoint (*)(id, SEL))objc_msgSend)(g_panel, S("center"));
+        (gesture, S("translationInView:"), parent);
+    CGPoint c = ((CGPoint (*)(id, SEL))objc_msgSend)(view, S("center"));
     c.x += t.x; c.y += t.y;
-    ((void (*)(id, SEL, CGPoint))objc_msgSend)(g_panel, S("setCenter:"), c);
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(view, S("setCenter:"), c);
     CGPoint zero = {0, 0};
     ((void (*)(id, SEL, CGPoint, id))objc_msgSend)
-        (gesture, S("setTranslation:inView:"), zero, msg0(g_panel, S("superview")));
+        (gesture, S("setTranslation:inView:"), zero, parent);
 }
 
 // --- Panel builder ---------------------------------------------------------
@@ -376,20 +386,32 @@ static void build_panel(id host) {
     id content = msg0(g_panel, S("contentView"));
 
     // --- Header ---
+    // Drag handle "grab bar" — a short pale pill centered at the very
+    // top of the header. Purely visual: hints to the user that the panel
+    // is draggable. The pan gesture is attached to the whole panel below,
+    // so dragging anywhere empty on the header actually moves it.
+    id grab = msg0(msg0((id)C("UIView"), S("alloc")), S("init"));
+    msg_setFrame(grab, (CGRect){{(panel_w - 40) / 2.0, 6}, {40, 4}});
+    msg1(grab, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.35));
+    id grab_layer = msg0(grab, S("layer"));
+    ((void (*)(id, SEL, double))objc_msgSend)(grab_layer, S("setCornerRadius:"), 2.0);
+    msg_setBool(grab_layer, S("setMasksToBounds:"), YES);
+    msg1(content, S("addSubview:"), (void *)grab);
+
     // Bold "PFPlus" wordmark.
-    id wordmark = build_label("PFPlus", (CGRect){{side_pad, 14}, {120, 26}},
+    id wordmark = build_label("PFPlus", (CGRect){{side_pad, 16}, {120, 26}},
                               1, 22.0, 1, 1, 1);
     msg1(content, S("addSubview:"), (void *)wordmark);
 
-    // "v2.4" version pill — small amber chip to the right of the wordmark.
-    id ver_pill = build_tier_chip("v2.4", 0.91, 0.64, 0.24,
-                                  (CGRect){{side_pad + 92, 22}, {44, 18}});
+    // "v2.4.1" version pill — small amber chip to the right of the wordmark.
+    id ver_pill = build_tier_chip("v2.4.1", 0.91, 0.64, 0.24,
+                                  (CGRect){{side_pad + 92, 24}, {50, 18}});
     msg1(content, S("addSubview:"), (void *)ver_pill);
 
     // "×" close button — top-right of the header.
     id close_btn = ((id (*)(Class, SEL, long))objc_msgSend)
         ((id)C("UIButton"), S("buttonWithType:"), 0L);  // Custom
-    msg_setFrame(close_btn, (CGRect){{panel_w - 44, 12}, {32, 32}});
+    msg_setFrame(close_btn, (CGRect){{panel_w - 44, 14}, {32, 32}});
     ((void (*)(id, SEL, void *, long))objc_msgSend)(close_btn, S("setTitle:forState:"),
                                                      (void *)msg_string("×"), 0L);
     ((void (*)(id, SEL, void *, long))objc_msgSend)(close_btn, S("setTitleColor:forState:"),
@@ -518,6 +540,17 @@ static void build_orb(id host) {
     ((void (*)(id, SEL, void *))objc_msgSend)(layer, S("setBorderColor:"), (void *)cg_border);
 
     msg_addTarget(g_orb, g_controller, S("orbTap:"), EV_TOUCH_UP);
+
+    // v2.4.1 — orb is now draggable too. Attach the same pan handler;
+    // the handler uses gesture.view so it drags the orb directly.
+    // Short taps still fire orbTap: because the pan gesture only triggers
+    // once the finger moves far enough — iOS cancels the button's touch
+    // at that moment.
+    id orb_pan = ((id (*)(id, SEL, id, SEL))objc_msgSend)
+        (msg0((id)C("UIPanGestureRecognizer"), S("alloc")),
+         S("initWithTarget:action:"), g_controller, S("pan:"));
+    msg1(g_orb, S("addGestureRecognizer:"), (void *)orb_pan);
+
     msg1(host, S("addSubview:"), (void *)g_orb);
 }
 
