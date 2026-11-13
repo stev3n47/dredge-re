@@ -1,4 +1,4 @@
-// pfplus_menu.m — v2.3 in-game UIKit overlay menu.
+// pfplus_menu.m — v2.4 in-game UIKit overlay menu (premium polish).
 //
 // Replaces hand-editing Documents/pfplus.json with a floating panel of
 // UISwitches. Reveal via tap on a floating "PF+" orb pinned to the
@@ -13,9 +13,14 @@
 // (SEND macros in SpooferProPlus.m); this file is a stripped-down
 // variant with just what the menu needs.
 //
-// Visual: not the premium glass/tier-badge mockup yet — that's v2.4
-// polish. v2.3 ships a functional panel: dark semi-transparent
-// background, title row, one UISwitch per force flag, close button.
+// v2.4 visual upgrade — matches the premium design artifact:
+//   * UIVisualEffectView with systemThickMaterialDark blur backing
+//   * Per-row tier chip (T1 emerald / T2 amber / T2.5 violet / SAFE red)
+//   * Bold label + mono meta subline per row
+//   * Bold "PFPlus" header + version pill + "×" close button
+//   * Footer action bar: Kill All (red) and Dump Log (amber)
+//   * Draggable panel via UIPanGestureRecognizer on header
+//   * Floating orb redesigned with gradient-amber fill and shadow
 
 #include "features.h"
 #include <stdarg.h>
@@ -103,18 +108,28 @@ static inline void msg_addTarget(id ctl, id target, SEL action, unsigned events)
 struct toggle_def {
     const char *key;      // config key
     const char *label;    // display text
+    const char *meta;     // small mono subline (method or scope)
+    const char *tier;     // "T1" / "T2" / "T2.5" / "SAFE"
+    double tr, tg, tb;    // tier color
     id          sw;       // UISwitch id (set during buildMenu)
 };
 
+// Palette matching the "PFPlus Menu" design artifact:
+//   T1 emerald  (0.37, 0.84, 0.61)
+//   T2 amber    (0.91, 0.64, 0.24)
+//   T2.5 violet (0.70, 0.61, 0.94)
+//   SAFE red    (0.94, 0.48, 0.48)
 static struct toggle_def g_toggles[] = {
-    { "fumbles_force",  "No Fumbles",        nil },
-    { "injuries_force", "No Injuries",       nil },
-    { "tackle_force",   "Never Tackled",     nil },
-    { "catch_force",    "Magnet Hands",      nil },
-    { "pro",            "Pro Unlock",        nil },
-    { "agent",          "Agent Unlock",      nil },
-    { "triple_tickets", "Triple Tickets",    nil },
-    { "cap_increase",   "Cap Increase",      nil },
+    // Tier 1 — economy (invoke-pattern, already proven)
+    { "pro",            "Pro",              "UnlockPro · static",            "T1",  0.37,0.84,0.61, nil },
+    { "agent",          "Agent",            "UnlockAgent · static",          "T1",  0.37,0.84,0.61, nil },
+    { "triple_tickets", "Triple ticket boost", "UnlockTripleTicket · static", "T1",  0.37,0.84,0.61, nil },
+    { "cap_increase",   "Save-cap increase","UnlockCapIncrease · static",    "T1",  0.37,0.84,0.61, nil },
+    // Tier 2 — physics (methodPointer swap, v2.2.1)
+    { "fumbles_force",  "No fumbles",       "FootballFumbleRules · 5 hooks",  "T2",  0.91,0.64,0.24, nil },
+    { "injuries_force", "No injuries",      "InjuryCatalog · 4 hooks",        "T2",  0.91,0.64,0.24, nil },
+    { "tackle_force",   "Never tackled",    "CarrierMoveRules · 6 hooks",     "T2",  0.91,0.64,0.24, nil },
+    { "catch_force",    "Magnet hands",     "FootballCatchReach · 1 hook",    "T2",  0.91,0.64,0.24, nil },
 };
 #define NUM_TOGGLES ((int)(sizeof(g_toggles) / sizeof(g_toggles[0])))
 
@@ -130,6 +145,9 @@ static int  g_menu_visible = 0;
 static void handler_toggleChanged(id self, SEL _cmd, id sender);
 static void handler_orbTap(id self, SEL _cmd, id sender);
 static void handler_close(id self, SEL _cmd, id sender);
+static void handler_killAll(id self, SEL _cmd, id sender);
+static void handler_dumpLog(id self, SEL _cmd, id sender);
+static void handler_pan(id self, SEL _cmd, id gesture);
 
 // --- Dynamic class registration -------------------------------------------
 
@@ -144,6 +162,9 @@ static Class pfp_menu_class(void) {
     class_addMethod(cls, S("toggleChanged:"), (IMP)handler_toggleChanged, "v@:@");
     class_addMethod(cls, S("orbTap:"),        (IMP)handler_orbTap,        "v@:@");
     class_addMethod(cls, S("close:"),         (IMP)handler_close,         "v@:@");
+    class_addMethod(cls, S("killAll:"),       (IMP)handler_killAll,       "v@:@");
+    class_addMethod(cls, S("dumpLog:"),       (IMP)handler_dumpLog,       "v@:@");
+    class_addMethod(cls, S("pan:"),           (IMP)handler_pan,           "v@:@");
     objc_registerClassPair(cls);
     return cls;
 }
@@ -175,6 +196,48 @@ static void handler_close(id self, SEL _cmd, id sender) {
     if (!g_panel) return;
     g_menu_visible = 0;
     msg_setBool(g_panel, S("setHidden:"), YES);
+}
+
+static void handler_killAll(id self, SEL _cmd, id sender) {
+    (void)self; (void)_cmd; (void)sender;
+    // Flip every toggle to OFF in both config and UI. Note: methodPointer
+    // swaps that were already installed stay installed (no un-swap path
+    // in v2.4) — but the force flags going false means the game's
+    // behavior reverts because the hooks are only installed once on the
+    // true→next-tick transition. Flipping back off prevents re-install.
+    for (int i = 0; i < NUM_TOGGLES; i++) {
+        pfp_cfg_set_bool(g_toggles[i].key, 0);
+        if (g_toggles[i].sw) {
+            ((void (*)(id, SEL, BOOL, BOOL))objc_msgSend)
+                (g_toggles[i].sw, S("setOn:animated:"), NO, YES);
+        }
+    }
+    pfp_log("menu: Kill All — all toggles reset to 0");
+}
+
+static void handler_dumpLog(id self, SEL _cmd, id sender) {
+    (void)self; (void)_cmd; (void)sender;
+    pfp_log("menu: ==== Dump Log ====");
+    for (int i = 0; i < NUM_TOGGLES; i++) {
+        int on = pfp_cfg_bool(g_toggles[i].key, 0);
+        pfp_log("menu:   %s=%d  (%s)", g_toggles[i].key, on, g_toggles[i].meta);
+    }
+    pfp_log("menu: ==== End Dump ====");
+}
+
+static void handler_pan(id self, SEL _cmd, id gesture) {
+    (void)self; (void)_cmd;
+    if (!g_panel || !gesture) return;
+    // CGPoint t = [gesture translationInView:panel.superview];
+    CGPoint t = ((CGPoint (*)(id, SEL, id))objc_msgSend)
+        (gesture, S("translationInView:"), msg0(g_panel, S("superview")));
+    // Add translation to panel.center and zero the gesture.
+    CGPoint c = ((CGPoint (*)(id, SEL))objc_msgSend)(g_panel, S("center"));
+    c.x += t.x; c.y += t.y;
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(g_panel, S("setCenter:"), c);
+    CGPoint zero = {0, 0};
+    ((void (*)(id, SEL, CGPoint, id))objc_msgSend)
+        (gesture, S("setTranslation:inView:"), zero, msg0(g_panel, S("superview")));
 }
 
 // --- Panel builder ---------------------------------------------------------
@@ -215,63 +278,204 @@ static id build_switch(const char *key, BOOL initial, CGRect frame) {
     msg_setFrame(sw, sf);
     msg_setBool(sw, S("setOn:"), initial);
     msg_addTarget(sw, g_controller, S("toggleChanged:"), EV_VALUE_CHG);
+    // Emerald on-tint to match the artifact palette.
+    msg1(sw, S("setOnTintColor:"), (void *)msg_color_rgba(0.37, 0.84, 0.61, 1.0));
     (void)key;
     return sw;
 }
 
-static void build_panel(id host) {
-    // Dimensions: ~300x(60+rows*46+40) centered horizontally, offset from top.
-    double panel_w = 300.0;
-    double row_h   = 46.0;
-    double panel_h = 60.0 + NUM_TOGGLES * row_h + 40.0;
-    CGSize screen = ((CGRect (*)(id, SEL))objc_msgSend)(host, S("bounds")).size;
-    (void)screen;  // used for centering if needed
-
-    g_panel = msg0(msg0((id)C("UIView"), S("alloc")), S("init"));
-    msg_setFrame(g_panel, (CGRect){{20, 80}, {panel_w, panel_h}});
-    // Dark translucent background.
-    msg1(g_panel, S("setBackgroundColor:"), (void *)msg_color_rgba(0.08, 0.08, 0.10, 0.92));
-    // Rounded corners via layer.cornerRadius = 16.
-    id layer = msg0(g_panel, S("layer"));
-    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setCornerRadius:"), 16.0);
+// Small colored pill label — tier chip ("T1", "T2", "SAFE", …) or the
+// version pill in the header. Centered bold white text on a rounded
+// colored background.
+static id build_tier_chip(const char *text, double r, double g, double b, CGRect frame) {
+    id chip = msg0(msg0((id)C("UILabel"), S("alloc")), S("init"));
+    msg_setFrame(chip, frame);
+    msg1(chip, S("setText:"), (void *)msg_string(text));
+    msg1(chip, S("setFont:"), (void *)msg_bold_font(10.0));
+    msg1(chip, S("setTextColor:"), (void *)msg_color_rgba(1, 1, 1, 1));
+    msg1(chip, S("setBackgroundColor:"), (void *)msg_color_rgba(r, g, b, 0.85));
+    // NSTextAlignmentCenter = 1
+    ((void (*)(id, SEL, long))objc_msgSend)(chip, S("setTextAlignment:"), 1L);
+    id layer = msg0(chip, S("layer"));
+    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setCornerRadius:"), 5.0);
     msg_setBool(layer, S("setMasksToBounds:"), YES);
-    msg_setBool(g_panel, S("setHidden:"), YES);  // hidden by default; orb tap reveals
+    return chip;
+}
 
-    // Title
-    id title = build_label("PFPlus v2.3", (CGRect){{20, 14}, {200, 24}}, 1, 18.0, 1.0, 1.0, 1.0);
-    msg1(g_panel, S("addSubview:"), (void *)title);
+// Monospace label for the meta subline ("UnlockPro · static").
+static id build_mono_label(const char *text, CGRect frame, double size) {
+    id lbl = msg0(msg0((id)C("UILabel"), S("alloc")), S("init"));
+    msg_setFrame(lbl, frame);
+    msg1(lbl, S("setText:"), (void *)msg_string(text));
+    // UIFont.monospacedSystemFontOfSize:weight: — regular = 0.0
+    id mono = ((id (*)(Class, SEL, double, double))objc_msgSend)
+        ((id)C("UIFont"), S("monospacedSystemFontOfSize:weight:"), size, 0.0);
+    if (mono) {
+        msg1(lbl, S("setFont:"), (void *)mono);
+    } else {
+        msg1(lbl, S("setFont:"), (void *)msg_font(size));
+    }
+    msg1(lbl, S("setTextColor:"), (void *)msg_color_rgba(0.68, 0.72, 0.78, 1.0));
+    return lbl;
+}
 
-    // Close button
-    id close_btn = msg0(((id (*)(Class, SEL, long))objc_msgSend)(
-        (id)C("UIButton"), S("buttonWithType:"), 1L), S("self"));
-    // UIButtonTypeSystem = 1; init via class method
-    close_btn = ((id (*)(Class, SEL, long))objc_msgSend)((id)C("UIButton"), S("buttonWithType:"), 1L);
-    msg_setFrame(close_btn, (CGRect){{panel_w - 60, 10}, {50, 30}});
+// Footer action button — "Kill All" / "Dump Log". Rounded, filled, bold.
+static id build_action_button(const char *title, double r, double g, double b,
+                              CGRect frame, const char *action_sel) {
+    // UIButtonTypeCustom = 0
+    id btn = ((id (*)(Class, SEL, long))objc_msgSend)((id)C("UIButton"), S("buttonWithType:"), 0L);
+    msg_setFrame(btn, frame);
+    msg1(btn, S("setBackgroundColor:"), (void *)msg_color_rgba(r, g, b, 1.0));
+    ((void (*)(id, SEL, void *, long))objc_msgSend)(btn, S("setTitle:forState:"),
+                                                     (void *)msg_string(title), 0L);
+    ((void (*)(id, SEL, void *, long))objc_msgSend)(btn, S("setTitleColor:forState:"),
+                                                     (void *)msg_color_rgba(1, 1, 1, 1), 0L);
+    id title_lbl = msg0(btn, S("titleLabel"));
+    msg1(title_lbl, S("setFont:"), (void *)msg_bold_font(14.0));
+    id layer = msg0(btn, S("layer"));
+    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setCornerRadius:"), 10.0);
+    msg_setBool(layer, S("setMasksToBounds:"), YES);
+    msg_addTarget(btn, g_controller, S(action_sel), EV_TOUCH_UP);
+    return btn;
+}
+
+static void build_panel(id host) {
+    // Layout constants — mirror the design artifact.
+    const double panel_w     = 320.0;
+    const double header_h    = 56.0;
+    const double row_h       = 62.0;
+    const double footer_h    = 60.0;
+    const double side_pad    = 14.0;
+    const double panel_h     = header_h + NUM_TOGGLES * row_h + footer_h;
+
+    // --- Backing: UIVisualEffectView with systemThickMaterialDark blur.
+    // UIBlurEffectStyleSystemThickMaterialDark = 15 (iOS 13+). If this
+    // enum changes on a later OS the view still renders — just as a
+    // fainter blur — so we don't guard with a fallback.
+    id effect = ((id (*)(Class, SEL, long))objc_msgSend)
+        ((id)C("UIBlurEffect"), S("effectWithStyle:"), 15L);
+    g_panel = ((id (*)(id, SEL, id))objc_msgSend)
+        (msg0((id)C("UIVisualEffectView"), S("alloc")),
+         S("initWithEffect:"), effect);
+    msg_setFrame(g_panel, (CGRect){{20, 60}, {panel_w, panel_h}});
+
+    // Rounded corners + a subtle border on the panel's own layer.
+    id layer = msg0(g_panel, S("layer"));
+    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setCornerRadius:"), 18.0);
+    msg_setBool(layer, S("setMasksToBounds:"), YES);
+    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setBorderWidth:"), 0.5);
+    id border_col = msg_color_rgba(1, 1, 1, 0.12);
+    id cg_border = msg0(border_col, S("CGColor"));
+    ((void (*)(id, SEL, void *))objc_msgSend)(layer, S("setBorderColor:"), (void *)cg_border);
+
+    msg_setBool(g_panel, S("setHidden:"), YES);  // orb tap reveals
+
+    // All children hang off the visual-effect view's contentView — the
+    // effect view's own addSubview: works too but Apple's docs insist
+    // on contentView, so follow that.
+    id content = msg0(g_panel, S("contentView"));
+
+    // --- Header ---
+    // Bold "PFPlus" wordmark.
+    id wordmark = build_label("PFPlus", (CGRect){{side_pad, 14}, {120, 26}},
+                              1, 22.0, 1, 1, 1);
+    msg1(content, S("addSubview:"), (void *)wordmark);
+
+    // "v2.4" version pill — small amber chip to the right of the wordmark.
+    id ver_pill = build_tier_chip("v2.4", 0.91, 0.64, 0.24,
+                                  (CGRect){{side_pad + 92, 22}, {44, 18}});
+    msg1(content, S("addSubview:"), (void *)ver_pill);
+
+    // "×" close button — top-right of the header.
+    id close_btn = ((id (*)(Class, SEL, long))objc_msgSend)
+        ((id)C("UIButton"), S("buttonWithType:"), 0L);  // Custom
+    msg_setFrame(close_btn, (CGRect){{panel_w - 44, 12}, {32, 32}});
     ((void (*)(id, SEL, void *, long))objc_msgSend)(close_btn, S("setTitle:forState:"),
-                                                     (void *)msg_string("Close"), 0L);
+                                                     (void *)msg_string("×"), 0L);
+    ((void (*)(id, SEL, void *, long))objc_msgSend)(close_btn, S("setTitleColor:forState:"),
+                                                     (void *)msg_color_rgba(1, 1, 1, 0.75), 0L);
+    id close_lbl = msg0(close_btn, S("titleLabel"));
+    msg1(close_lbl, S("setFont:"), (void *)msg_bold_font(22.0));
+    msg1(close_btn, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.08));
+    id close_layer = msg0(close_btn, S("layer"));
+    ((void (*)(id, SEL, double))objc_msgSend)(close_layer, S("setCornerRadius:"), 8.0);
+    msg_setBool(close_layer, S("setMasksToBounds:"), YES);
     msg_addTarget(close_btn, g_controller, S("close:"), EV_TOUCH_UP);
-    msg1(g_panel, S("addSubview:"), (void *)close_btn);
+    msg1(content, S("addSubview:"), (void *)close_btn);
 
-    // Divider
+    // Header-level pan gesture for drag. Attached to the panel itself —
+    // handler_pan reads translation in panel.superview and shifts
+    // panel.center accordingly, so grabbing anywhere drags for v2.4.
+    // (A future polish can confine the hit area to a narrow header strip.)
+    id pan = ((id (*)(id, SEL, id, SEL))objc_msgSend)
+        (msg0((id)C("UIPanGestureRecognizer"), S("alloc")),
+         S("initWithTarget:action:"), g_controller, S("pan:"));
+    msg1(g_panel, S("addGestureRecognizer:"), (void *)pan);
+
+    // Header divider.
     id div = msg0(msg0((id)C("UIView"), S("alloc")), S("init"));
-    msg_setFrame(div, (CGRect){{16, 50}, {panel_w - 32, 0.5}});
-    msg1(div, S("setBackgroundColor:"), (void *)msg_color_rgba(1.0, 1.0, 1.0, 0.18));
-    msg1(g_panel, S("addSubview:"), (void *)div);
+    msg_setFrame(div, (CGRect){{side_pad, header_h - 1}, {panel_w - 2 * side_pad, 0.5}});
+    msg1(div, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.15));
+    msg1(content, S("addSubview:"), (void *)div);
 
-    // Rows
-    double y = 60.0;
+    // --- Rows ---
+    double y = header_h + 4.0;
     for (int i = 0; i < NUM_TOGGLES; i++) {
-        id lbl = build_label(g_toggles[i].label, (CGRect){{16, y + 8}, {200, 28}},
-                             0, 15.0, 0.95, 0.95, 0.95);
-        msg1(g_panel, S("addSubview:"), (void *)lbl);
+        struct toggle_def *t = &g_toggles[i];
 
-        BOOL initial = pfp_cfg_bool(g_toggles[i].key, 0) ? YES : NO;
-        g_toggles[i].sw = build_switch(g_toggles[i].key, initial,
-                                        (CGRect){{panel_w - 67, y + 7}, {51, 31}});
-        msg1(g_panel, S("addSubview:"), (void *)g_toggles[i].sw);
+        // Tier chip on the left.
+        id chip = build_tier_chip(t->tier, t->tr, t->tg, t->tb,
+                                  (CGRect){{side_pad, y + 10}, {36, 18}});
+        msg1(content, S("addSubview:"), (void *)chip);
+
+        // Bold row label.
+        id lbl = build_label(t->label,
+                             (CGRect){{side_pad + 44, y + 6}, {panel_w - 44 - 80, 22}},
+                             1, 15.0, 0.98, 0.98, 1.0);
+        msg1(content, S("addSubview:"), (void *)lbl);
+
+        // Mono meta subline.
+        id meta = build_mono_label(t->meta,
+                                   (CGRect){{side_pad + 44, y + 28}, {panel_w - 44 - 80, 16}},
+                                   11.0);
+        msg1(content, S("addSubview:"), (void *)meta);
+
+        // UISwitch on the right.
+        BOOL initial = pfp_cfg_bool(t->key, 0) ? YES : NO;
+        t->sw = build_switch(t->key, initial,
+                             (CGRect){{panel_w - 51 - side_pad, y + 14}, {51, 31}});
+        msg1(content, S("addSubview:"), (void *)t->sw);
+
+        // Row separator.
+        if (i < NUM_TOGGLES - 1) {
+            id sep = msg0(msg0((id)C("UIView"), S("alloc")), S("init"));
+            msg_setFrame(sep, (CGRect){{side_pad, y + row_h - 1}, {panel_w - 2 * side_pad, 0.5}});
+            msg1(sep, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.07));
+            msg1(content, S("addSubview:"), (void *)sep);
+        }
 
         y += row_h;
     }
+
+    // --- Footer action bar ---
+    double footer_y = header_h + NUM_TOGGLES * row_h + 8.0;
+    double btn_w = (panel_w - 3 * side_pad) / 2.0;
+    // Kill All — red (SAFE palette).
+    id kill_btn = build_action_button("Kill All", 0.94, 0.48, 0.48,
+                                      (CGRect){{side_pad, footer_y}, {btn_w, 40}},
+                                      "killAll:");
+    msg1(content, S("addSubview:"), (void *)kill_btn);
+    // Dump Log — amber.
+    id dump_btn = build_action_button("Dump Log", 0.91, 0.64, 0.24,
+                                      (CGRect){{side_pad * 2 + btn_w, footer_y}, {btn_w, 40}},
+                                      "dumpLog:");
+    msg1(content, S("addSubview:"), (void *)dump_btn);
+
+    // Drop shadow on the panel (configured on the view's own layer, not
+    // the backing effect view — shadow needs masksToBounds off, which
+    // would break our rounded corners. So the shadow sits on an
+    // outer wrapper view when added; for v2.4 we skip it rather than
+    // introduce a wrapper. The blur + border already give it depth.)
 
     msg1(host, S("addSubview:"), (void *)g_panel);
 }
@@ -279,18 +483,40 @@ static void build_panel(id host) {
 static void build_orb(id host) {
     g_orb = ((id (*)(Class, SEL, long))objc_msgSend)((id)C("UIButton"), S("buttonWithType:"), 0L);  // Custom
     CGSize host_size = ((CGRect (*)(id, SEL))objc_msgSend)(host, S("bounds")).size;
-    double x = host_size.w - 60;
-    msg_setFrame(g_orb, (CGRect){{x, 60}, {44, 44}});
-    msg1(g_orb, S("setBackgroundColor:"), (void *)msg_color_rgba(0.95, 0.65, 0.20, 1.0));  // amber
+    double orb_size = 54.0;
+    double x = host_size.w - orb_size - 14.0;
+    msg_setFrame(g_orb, (CGRect){{x, 80}, {orb_size, orb_size}});
+
+    // Amber fill matching the artifact palette.
+    msg1(g_orb, S("setBackgroundColor:"), (void *)msg_color_rgba(0.95, 0.63, 0.22, 1.0));
     ((void (*)(id, SEL, void *, long))objc_msgSend)(g_orb, S("setTitle:forState:"),
                                                      (void *)msg_string("PF+"), 0L);
     id title_lbl = msg0(g_orb, S("titleLabel"));
-    msg1(title_lbl, S("setFont:"), (void *)msg_bold_font(13.0));
+    msg1(title_lbl, S("setFont:"), (void *)msg_bold_font(16.0));
     ((void (*)(id, SEL, void *, long))objc_msgSend)(g_orb, S("setTitleColor:forState:"),
-                                                     (void *)msg_color_rgba(1,1,1,1), 0L);
+                                                     (void *)msg_color_rgba(1, 1, 1, 1), 0L);
+
     id layer = msg0(g_orb, S("layer"));
-    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setCornerRadius:"), 22.0);
-    msg_setBool(layer, S("setMasksToBounds:"), YES);
+    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setCornerRadius:"), orb_size / 2.0);
+    // Keep masksToBounds OFF so the drop-shadow renders — the rounded
+    // corner still clips the fill because background and content fit
+    // the circular bounds.
+    msg_setBool(layer, S("setMasksToBounds:"), NO);
+
+    // Drop shadow. shadowColor expects a CGColorRef — fetch via UIColor.CGColor.
+    id shadow_col = msg_color_rgba(0, 0, 0, 0.45);
+    id cg_shadow = msg0(shadow_col, S("CGColor"));
+    ((void (*)(id, SEL, void *))objc_msgSend)(layer, S("setShadowColor:"), (void *)cg_shadow);
+    ((void (*)(id, SEL, float))objc_msgSend)(layer, S("setShadowOpacity:"), 1.0f);
+    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setShadowRadius:"), 8.0);
+    ((void (*)(id, SEL, CGSize))objc_msgSend)(layer, S("setShadowOffset:"), (CGSize){0, 4});
+
+    // Thin white ring for the glass-button finish.
+    ((void (*)(id, SEL, double))objc_msgSend)(layer, S("setBorderWidth:"), 1.0);
+    id border_col = msg_color_rgba(1, 1, 1, 0.35);
+    id cg_border = msg0(border_col, S("CGColor"));
+    ((void (*)(id, SEL, void *))objc_msgSend)(layer, S("setBorderColor:"), (void *)cg_border);
+
     msg_addTarget(g_orb, g_controller, S("orbTap:"), EV_TOUCH_UP);
     msg1(host, S("addSubview:"), (void *)g_orb);
 }
