@@ -10,7 +10,10 @@
 // ticks and we don't want to re-log every frame.
 
 #include "features.h"
+#include "pac_swap.h"
 #include <stddef.h>
+
+static int g_injuries_hooks_installed = 0;
 
 // Candidate class names per PLAN.md Tier 2 injuries section. We don't
 // fail init if a sub-class is missing — any resolved class is useful
@@ -82,10 +85,42 @@ static int init(void) {
 }
 
 static int tick(void) {
-    // Diagnostic-only; no per-tick work. init() ran once and logged all
-    // findings. Returning 0 keeps the fires counter at 0 so the status
-    // line shows `injuries=0i` (initialised, no fires), which is correct.
-    return 0;
+    if (g_injuries_hooks_installed) return 0;
+    if (!pfp_cfg_bool("injuries_force", 0)) return 0;
+    int installed = 0;
+    void *tzf = (void *)pfp_tramp_zero_float;
+    void *tzi = (void *)pfp_tramp_zero_int;
+    const char *img = "Assembly-CSharp.dll";
+
+    // AggravationChance exists on multiple classes; all return float.
+    Il2CppClass *k;
+    const MethodInfo *m;
+    k = pfp_il2cpp_find_class(img, NULL, "InjuryCatalog");
+    if (k) {
+        m = pfp_il2cpp_find_method(k, "AggravationChance", 2);
+        if (m && pfp_pac_hook_install(m, tzf, "injuries.InjuryCatalog.AggravationChance")) installed++;
+    }
+    k = pfp_il2cpp_find_class(img, NULL, "FranchiseInjuryCare");
+    if (k) {
+        m = pfp_il2cpp_find_method(k, "AggravationChance", 1);
+        if (m && pfp_pac_hook_install(m, tzf, "injuries.FranchiseInjuryCare.AggravationChance")) installed++;
+    }
+    k = pfp_il2cpp_find_class(img, NULL, "CareerInjuryDecision");
+    if (k) {
+        m = pfp_il2cpp_find_method(k, "AggravationChance", 1);
+        if (m && pfp_pac_hook_install(m, tzf, "injuries.CareerInjuryDecision.AggravationChance")) installed++;
+    }
+    // StaysDown(args) → bool: return false (0 in x0) so tackled players
+    // get back up. Keeps roster healthy in-game.
+    k = pfp_il2cpp_find_class(img, NULL, "FootballTackleInjuries");
+    if (k) {
+        m = pfp_il2cpp_find_method(k, "StaysDown", 3);
+        if (m && pfp_pac_hook_install(m, tzi, "injuries.StaysDown")) installed++;
+    }
+
+    g_injuries_hooks_installed = 1;
+    pfp_log("injuries: installed %d methodPointer hook(s) — injury chances suppressed, tackled players stay up", installed);
+    return installed > 0 ? 1 : 0;
 }
 
 PfpFeature pfp_feature_injuries = { "injuries", init, tick, 0, 0, 0, 0 };

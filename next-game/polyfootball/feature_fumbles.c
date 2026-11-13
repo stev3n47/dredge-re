@@ -10,9 +10,11 @@
 // via methodPointer behind an on-device PAC probe. We just gather data.
 
 #include "features.h"
+#include "pac_swap.h"
 
 static Il2CppClass *g_rules = NULL;
 static Il2CppClass *g_sim   = NULL;
+static int g_hooks_installed = 0;
 
 static int init(void) {
     g_rules = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "FootballFumbleRules");
@@ -58,7 +60,36 @@ static int init(void) {
 }
 
 static int tick(void) {
-    return 0;  // read-only diagnostic — no per-tick work
+    // v2.2.1: if fumbles_force=1 in pfplus.json, install methodPointer
+    // trampolines on the chance/roll methods of FootballFumbleRules and
+    // FootballFumbleSim so every fumble roll returns 0.0. One-shot: once
+    // hooks install we set g_hooks_installed and the tick returns 0.
+    if (g_hooks_installed) return 0;
+    if (!pfp_cfg_bool("fumbles_force", 0)) return 0;
+    if (!g_rules && !g_sim) return 0;
+
+    int installed = 0;
+    void *tz = (void *)pfp_tramp_zero_float;
+    if (g_rules) {
+        const MethodInfo *m;
+        m = pfp_il2cpp_find_method(g_rules, "Chance", 1);
+        if (m && pfp_pac_hook_install(m, tz, "fumbles.Chance")) installed++;
+        m = pfp_il2cpp_find_method(g_rules, "PunchTryChance", 1);
+        if (m && pfp_pac_hook_install(m, tz, "fumbles.PunchTryChance")) installed++;
+        m = pfp_il2cpp_find_method(g_rules, "ExpectedPerTackle", 3);
+        if (m && pfp_pac_hook_install(m, tz, "fumbles.ExpectedPerTackle")) installed++;
+    }
+    if (g_sim) {
+        const MethodInfo *m;
+        m = pfp_il2cpp_find_method(g_sim, "DriveChance", 4);
+        if (m && pfp_pac_hook_install(m, tz, "fumbles.DriveChance")) installed++;
+        m = pfp_il2cpp_find_method(g_sim, "PerTackle", 4);
+        if (m && pfp_pac_hook_install(m, tz, "fumbles.PerTackle")) installed++;
+    }
+
+    g_hooks_installed = 1;
+    pfp_log("fumbles: installed %d methodPointer hook(s) — fumble chance should now be zero", installed);
+    return (installed > 0) ? 1 : 0;
 }
 
 PfpFeature pfp_feature_fumbles = { "fumbles", init, tick, 0, 0, 0, 0 };

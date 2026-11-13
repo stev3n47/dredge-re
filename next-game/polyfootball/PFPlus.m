@@ -183,6 +183,11 @@ struct cfg {
     int speed;              // v2a diagnostic
     int pac;                // v2.2: PAC probe feature on/off (default on for phase 1)
     int pac_probe;          // v2.2: 0=phase 1 only (safe), 1=phase 2 swap (opt-in)
+    int fumbles_force;      // v2.2.1: install fumble-chance hooks (static methods -> 0)
+    int injuries_force;     // v2.2.1: AggravationChance/StaysDown hooks
+    int tackle_force;       // v2.2.1: BreakChance/ShoveChance/SpinEscape/AnkleBreak -> 1
+    int catch_force;        // v2.2.1: Confidence -> 1.0
+    int iap_force;          // v2.2.1: reserved for v2.2.2 AppleReceiptParser hook
     // Housekeeping
     int log_each_fire;
     int tick_hz;
@@ -197,6 +202,7 @@ static struct cfg g_cfg = {
     .fumbles = 1, .injuries = 1, .tackle = 1, .catch_hands = 1,
     .throw_cannon = 1, .speed = 1,
     .pac = 1, .pac_probe = 0,  // phase 1 always; phase 2 opt-in
+    .fumbles_force = 0, .injuries_force = 0, .tackle_force = 0, .catch_force = 0, .iap_force = 0,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
 };
 
@@ -263,6 +269,17 @@ static int pfp_cfg_reload_if_changed(void) {
                     "# Phase 2 may crash the process once; read the device log + .ips.\n"
                     "pac=1\n"
                     "pac_probe=0\n"
+                    "# v2.2.1 methodPointer swap hooks (opt-in, requires PAC success).\n"
+                    "# fumbles_force=1 → fumble chances → 0 (no fumbles)\n"
+                    "# injuries_force=1 → aggravation chance → 0, StaysDown → false\n"
+                    "# tackle_force=1 → BreakChance/ShoveChance/SpinEscape → 1.0 (unstoppable carrier)\n"
+                    "# catch_force=1 → FootballCatchReach.Confidence → 1.0 (magnet hands)\n"
+                    "# iap_force=1 reserved for v2.2.2 AppleReceiptParser hook (not yet active).\n"
+                    "fumbles_force=0\n"
+                    "injuries_force=0\n"
+                    "tackle_force=0\n"
+                    "catch_force=0\n"
+                    "iap_force=0\n"
                     "log_each_fire=0\n"
                     "tick_hz=10\n";
                 (void)write(fd, defaults, strlen(defaults));
@@ -319,6 +336,11 @@ static int pfp_cfg_reload_if_changed(void) {
         else if (!strcmp(k, "speed"))                 next.speed = parse_bool_or_int(v, next.speed);
         else if (!strcmp(k, "pac"))                   next.pac = parse_bool_or_int(v, next.pac);
         else if (!strcmp(k, "pac_probe"))             next.pac_probe = parse_bool_or_int(v, next.pac_probe);
+        else if (!strcmp(k, "fumbles_force"))         next.fumbles_force = parse_bool_or_int(v, next.fumbles_force);
+        else if (!strcmp(k, "injuries_force"))        next.injuries_force = parse_bool_or_int(v, next.injuries_force);
+        else if (!strcmp(k, "tackle_force"))          next.tackle_force = parse_bool_or_int(v, next.tackle_force);
+        else if (!strcmp(k, "catch_force"))           next.catch_force = parse_bool_or_int(v, next.catch_force);
+        else if (!strcmp(k, "iap_force"))             next.iap_force = parse_bool_or_int(v, next.iap_force);
         else if (!strcmp(k, "log_each_fire"))         next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
         else if (!strcmp(k, "tick_hz")) {
             int hz = atoi(v);
@@ -412,6 +434,11 @@ int pfp_cfg_bool(const char *key, int defval) {
     else if (!strcmp(key, "speed"))          v = g_cfg.speed;
     else if (!strcmp(key, "pac"))            v = g_cfg.pac;
     else if (!strcmp(key, "pac_probe"))      v = g_cfg.pac_probe;
+    else if (!strcmp(key, "fumbles_force"))  v = g_cfg.fumbles_force;
+    else if (!strcmp(key, "injuries_force")) v = g_cfg.injuries_force;
+    else if (!strcmp(key, "tackle_force"))   v = g_cfg.tackle_force;
+    else if (!strcmp(key, "catch_force"))    v = g_cfg.catch_force;
+    else if (!strcmp(key, "iap_force"))      v = g_cfg.iap_force;
     pthread_mutex_unlock(&g_cfg_mtx);
     return v;
 }
@@ -419,6 +446,38 @@ int pfp_cfg_bool(const char *key, int defval) {
 int pfp_cfg_int(const char *key, int defval) {
     // Future: expose tick_hz etc. For now, same as bool.
     return pfp_cfg_bool(key, defval);
+}
+
+// v2.3 — in-memory config write path used by the UIKit menu so toggles
+// take effect immediately without an mtime-based file reload. Uses the
+// same string→field dispatch as pfp_cfg_bool, mutating g_cfg under the
+// mutex. Unknown keys are silently ignored (same as the file parser).
+void pfp_cfg_set_bool(const char *key, int value) {
+    int v = value ? 1 : 0;
+    pthread_mutex_lock(&g_cfg_mtx);
+    if      (!strcmp(key, "pro"))            g_cfg.pro = v;
+    else if (!strcmp(key, "agent"))          g_cfg.agent = v;
+    else if (!strcmp(key, "triple_tickets")) g_cfg.triple_tickets = v;
+    else if (!strcmp(key, "cap_increase"))   g_cfg.cap_increase = v;
+    else if (!strcmp(key, "money"))          g_cfg.money = v;
+    else if (!strcmp(key, "skills"))         g_cfg.skills = v;
+    else if (!strcmp(key, "skills_force"))   g_cfg.skills_force = v;
+    else if (!strcmp(key, "iap"))            g_cfg.iap = v;
+    else if (!strcmp(key, "sync"))           g_cfg.sync = v;
+    else if (!strcmp(key, "fumbles"))        g_cfg.fumbles = v;
+    else if (!strcmp(key, "injuries"))       g_cfg.injuries = v;
+    else if (!strcmp(key, "tackle"))         g_cfg.tackle = v;
+    else if (!strcmp(key, "catch"))          g_cfg.catch_hands = v;
+    else if (!strcmp(key, "throw"))          g_cfg.throw_cannon = v;
+    else if (!strcmp(key, "speed"))          g_cfg.speed = v;
+    else if (!strcmp(key, "pac"))            g_cfg.pac = v;
+    else if (!strcmp(key, "pac_probe"))      g_cfg.pac_probe = v;
+    else if (!strcmp(key, "fumbles_force"))  g_cfg.fumbles_force = v;
+    else if (!strcmp(key, "injuries_force")) g_cfg.injuries_force = v;
+    else if (!strcmp(key, "tackle_force"))   g_cfg.tackle_force = v;
+    else if (!strcmp(key, "catch_force"))    g_cfg.catch_force = v;
+    else if (!strcmp(key, "iap_force"))      g_cfg.iap_force = v;
+    pthread_mutex_unlock(&g_cfg_mtx);
 }
 
 // ---------------- Diagnostic helpers (features.h) -------------------------
@@ -932,6 +991,12 @@ static void tick_once(void) {
 
     // Run registered v1b–v2 features after Tier 1 unlocks.
     run_features_tick();
+
+    // v2.3 — install the in-game menu once UIKit's key window exists.
+    // pfp_menu_install() is idempotent + returns early if the host
+    // window isn't available yet, so we can call it every tick cheaply
+    // until the install succeeds.
+    pfp_menu_install();
 }
 
 // Status dump — every 30s log the state so the log is useful without
@@ -1011,7 +1076,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v2.2 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.4 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 
