@@ -46,6 +46,7 @@ void                 (*pfp_il2cpp_gc_enable)(void);
 int32_t              (*pfp_il2cpp_class_is_assignable_from)(Il2CppClass *to, Il2CppClass *from);
 const MethodInfo    *(*pfp_il2cpp_class_get_methods)(Il2CppClass *, void **iter);
 const char          *(*pfp_il2cpp_method_get_name)(const MethodInfo *);
+uint32_t             (*pfp_il2cpp_method_get_flags)(const MethodInfo *, uint32_t *iflags);
 
 static int g_ready = 0;
 
@@ -126,6 +127,7 @@ int pfp_il2cpp_init(char *errbuf, size_t errbuflen) {
     TRY(il2cpp_class_is_assignable_from);
     TRY(il2cpp_class_get_methods);
     TRY(il2cpp_method_get_name);
+    TRY(il2cpp_method_get_flags);
 #undef TRY
     (void)PFP_HAVE_OFFSETS;  // reserved for an offset-header fallback (unused in v1a)
 
