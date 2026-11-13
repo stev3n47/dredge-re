@@ -45,11 +45,17 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
-// CoreFoundation forward decls. Resolved at load time via
-// `-Wl,-undefined,dynamic_lookup` — these symbols are all plain C exports
-// of CoreFoundation.framework (unlike dispatch_get_main_queue which was
-// flat-namespace-broken on SPPlus's rig). We create our own CFString for
-// kCFRunLoopCommonModes at runtime rather than extern'ing the global.
+// CoreFoundation forward decls. CF is linked with -framework CoreFoundation
+// (v1a.4) so symbols are explicit load commands rather than flat-namespace
+// dynamic-lookup.
+//
+// v1a.3 created its own CFString with content "kCFRunLoopCommonModes" and
+// passed it to CFRunLoopAddTimer. That silently failed because CoreFoundation
+// compares modes by **pointer** (modeName == kCFRunLoopCommonModes) not by
+// content — see CFRunLoop.c in Apple's open source. Our custom string had a
+// different pointer, so the timer was added to a mode named literally
+// "kCFRunLoopCommonModes" that no runloop services. v1a.4 externs the real
+// kCFRunLoopCommonModes global so the pointer check hits.
 typedef struct __CFRunLoop *CFRunLoopRef;
 typedef struct __CFRunLoopTimer *CFRunLoopTimerRef;
 typedef const struct __CFString *CFStringRef;
@@ -58,8 +64,6 @@ typedef double CFAbsoluteTime;
 typedef void *CFAllocatorRef;
 typedef long CFIndex;
 typedef unsigned long CFOptionFlags;
-typedef unsigned CFStringEncoding;
-#define kCFStringEncodingUTF8 0x08000100
 typedef struct {
     CFIndex version;
     void *info;
@@ -73,7 +77,8 @@ extern CFRunLoopTimerRef CFRunLoopTimerCreate(
     void (*)(CFRunLoopTimerRef, void *), CFRunLoopTimerContext *);
 extern void CFRunLoopAddTimer(CFRunLoopRef, CFRunLoopTimerRef, CFStringRef);
 extern CFAbsoluteTime CFAbsoluteTimeGetCurrent(void);
-extern CFStringRef CFStringCreateWithCString(CFAllocatorRef, const char *, CFStringEncoding);
+extern const CFStringRef kCFRunLoopCommonModes;
+extern const CFStringRef kCFRunLoopDefaultMode;
 
 // -------- forward decls --------
 
@@ -490,14 +495,15 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v1a.3 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v1a.4 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 
-    CFStringRef mode = CFStringCreateWithCString(NULL, "kCFRunLoopCommonModes", kCFStringEncodingUTF8);
     CFRunLoopRef rl = CFRunLoopGetMain();
-    if (!rl || !mode) {
-        pfp_log("boot: CoreFoundation unavailable (rl=%p mode=%p) — PFPlus disabled", (void *)rl, (void *)mode);
+    pfp_log("boot: CFRunLoopGetMain=%p kCFRunLoopCommonModes=%p kCFRunLoopDefaultMode=%p",
+            (void *)rl, (void *)kCFRunLoopCommonModes, (void *)kCFRunLoopDefaultMode);
+    if (!rl) {
+        pfp_log("boot: CFRunLoopGetMain returned NULL — PFPlus disabled");
         return;
     }
     g_timer = CFRunLoopTimerCreate(
@@ -511,6 +517,11 @@ static void pfp_ctor(void) {
         pfp_log("boot: CFRunLoopTimerCreate failed — PFPlus disabled");
         return;
     }
-    CFRunLoopAddTimer(rl, g_timer, mode);
-    pfp_log("boot: main-runloop timer armed (first fire +500ms, interval 100ms)");
+    // Use the REAL kCFRunLoopCommonModes global. CoreFoundation's
+    // CFRunLoopAddTimer special-cases this mode via POINTER equality, not
+    // CFEqual (see Apple's CFRunLoop.c). v1a.3 used a runtime-created
+    // content-equal CFString here, failed the pointer check, and the timer
+    // was added to a never-serviced mode name — callback never fired.
+    CFRunLoopAddTimer(rl, g_timer, kCFRunLoopCommonModes);
+    pfp_log("boot: main-runloop timer armed in kCFRunLoopCommonModes (first fire +500ms, 100ms interval)");
 }

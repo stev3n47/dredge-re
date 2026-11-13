@@ -24,12 +24,20 @@ jobs:
           # scans for il2cpp_* symbol names (SPPlus had to strip those to
           # survive). We still hide local symbols for cleanliness but no
           # post-build grep gate.
+          # v1a.4: add -framework CoreFoundation so kCFRunLoopCommonModes
+          # resolves as an explicit load-command symbol. v1a.3 relied on
+          # flat-namespace dynamic-lookup for the CF globals and hit a subtle
+          # pointer-equality bug: our runtime-created CFString with the same
+          # content as kCFRunLoopCommonModes failed CFRunLoopAddTimer's
+          # pointer check (the compare is literally `modeName == kCF...`),
+          # so the timer was added to a never-serviced mode name.
           clang -arch arm64 -dynamiclib \
             -isysroot "$SDK" \
             -miphoneos-version-min=13.0 \
             -fno-objc-arc -fblocks -O2 -fno-objc-exceptions \
             -fvisibility=hidden \
             -Wl,-undefined,dynamic_lookup -lSystem \
+            -framework CoreFoundation \
             -Wl,-x -Wl,-unexported_symbol,'*' \
             -install_name '@executable_path/Frameworks/PFPlus.framework/PFPlus' \
             -o PFPlus \
