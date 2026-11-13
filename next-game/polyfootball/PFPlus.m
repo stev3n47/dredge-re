@@ -550,32 +550,54 @@ void pfp_register_rewalk(const char *prefix, Il2CppClass *klass) {
     g_rewalk_count++;
 }
 
+#define PFP_KLASS_SAMPLE_CAP 16
 struct pfp_rewalk_ctx {
     void *found_obj[PFP_MAX_REWALK_TARGETS];
     Il2CppClass *found_klass[PFP_MAX_REWALK_TARGETS];
     int n_found;
     long scanned;
+    // v2.1.1 klass-sampling diagnostic (SPPlus v35 pattern):
+    // collect distinct obj->klass pointers seen during the walk so we can
+    // verify gc_foreach_heap is handing us real metadata-comparable klass
+    // pointers. If NONE of these match our resolved metadata class pointers
+    // we know gc_foreach_heap is useless for instance discovery on this
+    // build and v2.2 needs a different path (Zenject-provider walk, etc).
+    Il2CppClass *sampled_klass[PFP_KLASS_SAMPLE_CAP];
+    int n_sampled;
+    int do_sample;
 };
 
 static void pfp_rewalk_cb(void *obj, void *user) {
     struct pfp_rewalk_ctx *c = (struct pfp_rewalk_ctx *)user;
     c->scanned++;
-    if (!obj || c->n_found >= PFP_MAX_REWALK_TARGETS) return;
+    if (!obj) return;
     Il2CppClass *k = pfp_il2cpp_object_get_class(obj);
     if (!k) return;
-    // SPPlus v33 rule: only pointer-equality against pre-resolved whitelist.
+
+    // Pointer-equality check against the whitelist (SPPlus v33 rule).
     for (int i = 0; i < g_rewalk_count; i++) {
         if (g_rewalk[i].done) continue;
         if (g_rewalk[i].klass == k) {
-            // Dedup within this walk — one hit per (class) is enough.
-            for (int j = 0; j < c->n_found; j++) {
-                if (c->found_klass[j] == k) return;
+            if (c->n_found < PFP_MAX_REWALK_TARGETS) {
+                // Dedup within this walk — one hit per class is enough.
+                for (int j = 0; j < c->n_found; j++) {
+                    if (c->found_klass[j] == k) return;
+                }
+                c->found_obj[c->n_found] = obj;
+                c->found_klass[c->n_found] = k;
+                c->n_found++;
             }
-            c->found_obj[c->n_found] = obj;
-            c->found_klass[c->n_found] = k;
-            c->n_found++;
             return;
         }
+    }
+
+    // Diagnostic klass sampling — collect first N distinct klass pointers
+    // that did NOT match the whitelist. One probe only (first rewalk).
+    if (c->do_sample && c->n_sampled < PFP_KLASS_SAMPLE_CAP) {
+        for (int j = 0; j < c->n_sampled; j++) {
+            if (c->sampled_klass[j] == k) return;
+        }
+        c->sampled_klass[c->n_sampled++] = k;
     }
 }
 
@@ -596,15 +618,63 @@ static void pfp_periodic_rewalk(void) {
     for (int i = 0; i < g_rewalk_count; i++) if (!g_rewalk[i].done) pending++;
     if (pending == 0) return;
 
-    struct pfp_rewalk_ctx ctx = { {0}, {0}, 0, 0 };
+    // v2.1.1: enable klass-sampling on the FIRST rewalk only (one-shot).
+    static int sample_done = 0;
+    struct pfp_rewalk_ctx ctx = { {0}, {0}, 0, 0, {0}, 0, !sample_done };
     pfp_il2cpp_gc_foreach_heap(pfp_rewalk_cb, &ctx);
+
+    // Post-walk klass-sampling diagnostic (SPPlus v35 pattern). Determine
+    // whether gc_foreach_heap is handing us klass pointers that COULD match
+    // our resolved metadata classes. If every sampled klass falls far
+    // outside the metadata range of our resolved classes, the heap walk
+    // is useless for instance discovery on this build.
+    if (ctx.do_sample && ctx.n_sampled > 0 && !sample_done) {
+        sample_done = 1;
+        // Compute the metadata range of our resolved classes +/- 64MB margin.
+        uintptr_t lo = (uintptr_t)-1, hi = 0;
+        for (int i = 0; i < g_rewalk_count; i++) {
+            uintptr_t p = (uintptr_t)g_rewalk[i].klass;
+            if (!p) continue;
+            if (p < lo) lo = p;
+            if (p > hi) hi = p;
+        }
+        uintptr_t safe_lo = (lo > 0x4000000) ? lo - 0x4000000 : 0;
+        uintptr_t safe_hi = hi + 0x4000000;
+        pfp_log("rewalk-sample: %d distinct klass ptrs sampled; "
+                "metadata range of our %d resolved targets: [0x%lx..0x%lx]",
+                ctx.n_sampled, g_rewalk_count, (long)lo, (long)hi);
+        int in_range = 0;
+        for (int i = 0; i < ctx.n_sampled; i++) {
+            uintptr_t p = (uintptr_t)ctx.sampled_klass[i];
+            int ok = (p >= safe_lo && p <= safe_hi);
+            if (ok) {
+                const char *kn = pfp_il2cpp_class_get_name(ctx.sampled_klass[i]);
+                pfp_log("rewalk-sample: [%2d] klass=%p IN-RANGE name=%s",
+                        i, (void *)ctx.sampled_klass[i], kn ? kn : "?");
+                in_range++;
+            } else {
+                pfp_log("rewalk-sample: [%2d] klass=%p OUT-OF-RANGE",
+                        i, (void *)ctx.sampled_klass[i]);
+            }
+        }
+        if (in_range == 0) {
+            pfp_log("rewalk-sample: ZERO in-range klass pointers — "
+                    "gc_foreach_heap matches SPPlus v35 pattern (walked objs "
+                    "don't carry real metadata klass ptrs). "
+                    "Instance discovery needs a different path (v2.2).");
+        } else {
+            pfp_log("rewalk-sample: %d/%d klass pointers in metadata range — "
+                    "heap walk is usable; target classes just aren't live yet",
+                    in_range, ctx.n_sampled);
+        }
+    }
 
     if (ctx.n_found == 0) {
         pfp_log("rewalk: scanned %ld objects, %d class(es) still unfound",
                 ctx.scanned, pending);
         return;
     }
-    // Post-walk, log and mark done.
+    // Post-walk, log hits and mark done.
     for (int i = 0; i < ctx.n_found; i++) {
         for (int j = 0; j < g_rewalk_count; j++) {
             if (g_rewalk[j].klass == ctx.found_klass[i] && !g_rewalk[j].done) {
@@ -928,7 +998,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v2.1 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.1.1 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 
