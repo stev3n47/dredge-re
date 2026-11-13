@@ -182,7 +182,8 @@ struct ccache {
 static struct ccache g_class_cache[CACHE_SZ];
 static int g_class_cache_n = 0;
 
-    if (!g_ready || !stp_il2cpp_domain_get || !stp_il2cpp_domain_get_assemblies ||
+Il2CppClass *stp_il2cpp_find_class(const char *image_name, const char *ns, const char *cls) {
+    if (!g_ready || !stp_il2cpp_domain_get || !stp_il2cpp_domain_get_assemblies ||
         !stp_il2cpp_assembly_get_image || !stp_il2cpp_image_get_name ||
         !stp_il2cpp_image_get_class_count || !stp_il2cpp_image_get_class ||
         !stp_il2cpp_class_get_namespace || !stp_il2cpp_class_get_name) return NULL;
@@ -226,7 +227,8 @@ static int g_class_cache_n = 0;
     return NULL;
 }
 
-    if (!klass || !name || !stp_il2cpp_class_get_method_from_name) return NULL;
+const MethodInfo *stp_il2cpp_find_method(Il2CppClass *klass, const char *name, int argc) {
+    if (!klass || !name || !stp_il2cpp_class_get_method_from_name) return NULL;
     if (!g_ready || !klass || !name) return NULL;
     if (stp_il2cpp_runtime_class_init) stp_il2cpp_runtime_class_init(klass);
     return stp_il2cpp_class_get_method_from_name(klass, name, argc);

@@ -405,7 +405,7 @@ void stp_cfg_set_bool(const char *key, int value) {
 // `substrs`. Returns count written to out_classes.
 int stp_find_classes_by_name(const char **substrs, int substr_count,
                              Il2CppClass **out_classes, int cap) {
-    if (!out_classes || cap <= 0 ||
+    if (!out_classes || cap <= 0 || !stp_il2cpp_domain_get ||
         !stp_il2cpp_domain_get_assemblies || !stp_il2cpp_assembly_get_image ||
         !stp_il2cpp_image_get_name || !stp_il2cpp_image_get_class_count ||
         !stp_il2cpp_image_get_class || !stp_il2cpp_class_get_name) return 0;
