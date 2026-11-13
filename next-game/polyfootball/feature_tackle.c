@@ -75,6 +75,9 @@ static int init(void) {
 
     pfp_diag_log_live_instances("tackle", resolved, nr);
     pfp_log("tackle: diagnostic complete (%d/%d classes resolved)", nr, NUM_CLASSES);
+
+    // v2.1: register resolved classes for periodic rewalk during gameplay.
+    for (int i = 0; i < nr; i++) pfp_register_rewalk("tackle", resolved[i]);
     return 0;
 }
 

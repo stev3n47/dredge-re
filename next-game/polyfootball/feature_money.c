@@ -91,23 +91,27 @@ static int init(void) {
 static int tick(void) {
     tick_count++;
 
-    // One-shot summary on first tick.
+    // v2.1 one-shot summary of what the Nov 13 device log revealed:
+    // CareerTeamBudget has 5 methods. Cap is a static getter (argc=0),
+    // not a setter. Fits/get_Cap/set_Cap don't exist by those names on
+    // this build. So there's no safe invoke path — overriding the cap
+    // requires methodPointer swap on Cap() to force its return. Deferred
+    // to v2.2 (PAC probe + static-method pointer swap infrastructure).
     if (!logged_once) {
-        if (g_fits_mi) {
-            pfp_log("money: Fits(%d-arg, %s) is a predicate — force-true needs methodPointer swap, deferred to v2b+",
-                    g_fits_argc, g_fits_static ? "static" : "instance");
+        if (g_cap_mi && g_cap_static && g_cap_argc == 0) {
+            pfp_log("money: Cap is a static getter (argc=0) — "
+                    "force-huge needs methodPointer swap, deferred to v2.2");
+        } else if (!g_cap_mi && !g_set_cap_mi && !g_fits_mi) {
+            pfp_log("money: no recognisable setter/getter — scope deferred");
         }
         logged_once = 1;
     }
 
-    // Safe setter path: if set_Cap is confirmed static with exactly 1 arg,
-    // invoke with a huge value. Throttled to every 600 ticks (~60s at 10Hz).
+    // v2.1: if the fixed-ABI set_Cap branch ever resolves on a future build,
+    // invoke it throttled to 60s. On current build this is dormant.
     if (g_set_cap_mi && g_set_cap_static && g_set_cap_argc == 1) {
         if (tick_count == 1 || (tick_count % 600) == 0) {
-            // IL2CPP runtime_invoke expects args[i] = POINTER to the value
-            // for primitive/value types. Critic 2+10: passing
-            // (void*)(intptr_t)huge would have derefed near-NULL on invoke.
-            int64_t huge = 1000000000LL;  // 1B
+            int64_t huge = 1000000000LL;
             int ok = 1;
             pfp_il2cpp_invoke1(g_set_cap_mi, NULL, &huge, &ok);
             if (ok) {

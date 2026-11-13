@@ -116,6 +116,11 @@ static int init(void) {
         pfp_diag_log_live_instances("speed", targets, tcount);
     }
 
+    // v2.1: register locomotion classes for periodic rewalk (match-time spawn).
+    pfp_register_rewalk("speed", g_carrier_move_controls);
+    pfp_register_rewalk("speed", g_joystick_locomotion);
+    pfp_register_rewalk("speed", g_defense_speeds);
+
     // Critic 6: distinguish "working" from "completely missed all targets"
     // in the status log. Return -1 on total miss so init_failed shows 'x'.
     if (total_hits == 0) {
