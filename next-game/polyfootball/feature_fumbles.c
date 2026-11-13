@@ -66,6 +66,11 @@ static int tick(void) {
     // hooks install we set g_hooks_installed and the tick returns 0.
     if (g_hooks_installed) return 0;
     if (!pfp_cfg_bool("fumbles_force", 0)) return 0;
+    if (pfp_cfg_bool("mp_safe", 0)) {
+        static int warned = 0;
+        if (!warned) { pfp_log("fumbles: mp_safe=1 — install gated"); warned = 1; }
+        return 0;
+    }
     if (!g_rules && !g_sim) return 0;
 
     int installed = 0;

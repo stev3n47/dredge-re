@@ -124,6 +124,11 @@ struct toggle_def {
 //   T2.5 violet (0.70, 0.61, 0.94)
 //   SAFE red    (0.94, 0.48, 0.48)
 static struct toggle_def g_toggles[] = {
+    // Safety — flip ON before joining multiplayer. Blocks installation
+    // of all physics/offense hooks (tackle/fumbles/injuries/catch/throw/
+    // accuracy). Already-installed hooks from a prior session persist
+    // until next cold boot, so set this before you first enable them.
+    { "mp_safe",        "MP safe mode",     "gates offense hooks for MP",     "SAFE", 0.94,0.48,0.48, nil },
     // Tier 1 — economy (invoke-pattern, already proven)
     { "pro",            "Pro",              "UnlockPro · static",            "T1",  0.37,0.84,0.61, nil },
     { "agent",          "Agent",            "UnlockAgent · static",          "T1",  0.37,0.84,0.61, nil },
@@ -356,14 +361,21 @@ static id build_action_button(const char *title, double r, double g, double b,
 
 static void build_panel(id host) {
     // Layout constants — mirror the design artifact.
-    // v2.5: shrank row_h from 62→50 so 12 toggles fit on standard phones
-    // (iPhone 15/16 ≈ 874pt tall). 56 + 12*50 + 60 = 716pt panel.
+    // v2.5.1: rows live in a UIScrollView so the panel fits on smaller
+    // phones (iPhone SE ≈ 667pt). Panel height is capped at the host
+    // window's bounds minus 100pt safe margin; the scroll view takes
+    // whatever's between header and footer.
     const double panel_w     = 320.0;
     const double header_h    = 56.0;
     const double row_h       = 50.0;
     const double footer_h    = 60.0;
     const double side_pad    = 14.0;
-    const double panel_h     = header_h + NUM_TOGGLES * row_h + footer_h;
+    const double desired_h   = header_h + NUM_TOGGLES * row_h + footer_h + 8.0;
+    CGSize host_size_tmp = ((CGRect (*)(id, SEL))objc_msgSend)(host, S("bounds")).size;
+    const double max_h       = host_size_tmp.h - 100.0;
+    const double panel_h     = desired_h < max_h ? desired_h : max_h;
+    const double scroll_h    = panel_h - header_h - footer_h - 8.0;
+    const double scroll_content_h = NUM_TOGGLES * row_h;
 
     // --- Backing: UIVisualEffectView with systemThickMaterialDark blur.
     // UIBlurEffectStyleSystemThickMaterialDark = 15 (iOS 13+). If this
@@ -410,9 +422,9 @@ static void build_panel(id host) {
                               1, 22.0, 1, 1, 1);
     msg1(content, S("addSubview:"), (void *)wordmark);
 
-    // "v2.5" version pill — small amber chip to the right of the wordmark.
-    id ver_pill = build_tier_chip("v2.5", 0.91, 0.64, 0.24,
-                                  (CGRect){{side_pad + 92, 24}, {44, 18}});
+    // "v2.5.1" version pill — small amber chip to the right of the wordmark.
+    id ver_pill = build_tier_chip("v2.5.1", 0.91, 0.64, 0.24,
+                                  (CGRect){{side_pad + 92, 24}, {50, 18}});
     msg1(content, S("addSubview:"), (void *)ver_pill);
 
     // "×" close button — top-right of the header.
@@ -447,47 +459,62 @@ static void build_panel(id host) {
     msg1(div, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.15));
     msg1(content, S("addSubview:"), (void *)div);
 
-    // --- Rows ---
-    double y = header_h + 4.0;
+    // --- Scrollable rows container ---
+    // v2.5.1 — a UIScrollView between header and footer holds every
+    // toggle row, so the panel fits SE-sized screens.
+    id scroll = msg0(msg0((id)C("UIScrollView"), S("alloc")), S("init"));
+    msg_setFrame(scroll, (CGRect){{0, header_h}, {panel_w, scroll_h}});
+    ((void (*)(id, SEL, CGSize))objc_msgSend)
+        (scroll, S("setContentSize:"), (CGSize){panel_w, scroll_content_h});
+    msg_setBool(scroll, S("setShowsVerticalScrollIndicator:"), YES);
+    msg_setBool(scroll, S("setBounces:"), YES);
+    // Let the panel's own pan gesture work even when the touch starts
+    // on the scroll view — the recognizer will fail if the user is
+    // flicking the scroll content, so both gestures coexist naturally.
+    msg1(content, S("addSubview:"), (void *)scroll);
+
+    // --- Rows (into the scroll view, origin starts at 4) ---
+    double y = 4.0;
     for (int i = 0; i < NUM_TOGGLES; i++) {
         struct toggle_def *t = &g_toggles[i];
 
         // Tier chip on the left.
         id chip = build_tier_chip(t->tier, t->tr, t->tg, t->tb,
                                   (CGRect){{side_pad, y + 8}, {36, 16}});
-        msg1(content, S("addSubview:"), (void *)chip);
+        msg1(scroll, S("addSubview:"), (void *)chip);
 
         // Bold row label.
         id lbl = build_label(t->label,
                              (CGRect){{side_pad + 44, y + 4}, {panel_w - 44 - 80, 20}},
                              1, 14.0, 0.98, 0.98, 1.0);
-        msg1(content, S("addSubview:"), (void *)lbl);
+        msg1(scroll, S("addSubview:"), (void *)lbl);
 
         // Mono meta subline.
         id meta = build_mono_label(t->meta,
                                    (CGRect){{side_pad + 44, y + 24}, {panel_w - 44 - 80, 14}},
                                    10.0);
-        msg1(content, S("addSubview:"), (void *)meta);
+        msg1(scroll, S("addSubview:"), (void *)meta);
 
         // UISwitch on the right.
         BOOL initial = pfp_cfg_bool(t->key, 0) ? YES : NO;
         t->sw = build_switch(t->key, initial,
                              (CGRect){{panel_w - 51 - side_pad, y + 9}, {51, 31}});
-        msg1(content, S("addSubview:"), (void *)t->sw);
+        msg1(scroll, S("addSubview:"), (void *)t->sw);
 
         // Row separator.
         if (i < NUM_TOGGLES - 1) {
             id sep = msg0(msg0((id)C("UIView"), S("alloc")), S("init"));
             msg_setFrame(sep, (CGRect){{side_pad, y + row_h - 1}, {panel_w - 2 * side_pad, 0.5}});
             msg1(sep, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.07));
-            msg1(content, S("addSubview:"), (void *)sep);
+            msg1(scroll, S("addSubview:"), (void *)sep);
         }
 
         y += row_h;
     }
 
     // --- Footer action bar ---
-    double footer_y = header_h + NUM_TOGGLES * row_h + 8.0;
+    // v2.5.1 — pinned to the panel's bottom, outside the scroll view.
+    double footer_y = panel_h - footer_h + 8.0;
     double btn_w = (panel_w - 3 * side_pad) / 2.0;
     // Kill All — red (SAFE palette).
     id kill_btn = build_action_button("Kill All", 0.94, 0.48, 0.48,

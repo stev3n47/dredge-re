@@ -17,6 +17,14 @@ on:
 permissions:
   contents: write
 
+# v2.5.1 — one publish at a time. Two pushes within ~30s used to race
+# the delete+recreate release flow below and could leave the download
+# URL 404ing. Cancel in-flight runs when a newer commit lands; the
+# newer one does the publish.
+concurrency:
+  group: pfplus-release
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest
@@ -93,12 +101,24 @@ jobs:
           TITLE="PFPlus.dylib · ${GITHUB_SHA::7}"
           BODY=$(printf 'PFPlus arm64 iOS dylib built from %s on %s.\n\nSize: %s bytes.\nIntegrity: %s\n\nUsage: python tools/inject_polyfootball.py <Poly.ipa> PFPlus <out.ipa>; sign with TrollStore/AltStore/SideStore/dev-signed; install.' \
             "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(stat -f%z PFPlus)" "$(shasum -a 256 PFPlus | awk '{print $1}')")
-          # Delete the previous release+tag (if any), then re-create both.
-          # NOTE: --cleanup-tag removes the local tag too, so tag AFTER delete.
-          gh release delete "$TAG" -y --cleanup-tag 2>/dev/null || true
+          # v2.5.1 — atomic swap. The old flow did delete→tag→create,
+          # which 404'd the download URL for ~30-60s. Instead:
+          #  1. Move the tag to the new SHA (force-push).
+          #  2. If a release already exists, update metadata + upload
+          #     the asset with --clobber so there's never a gap where
+          #     the asset is missing.
+          #  3. If no release exists (first run), create it.
           git tag -f "$TAG" "$GITHUB_SHA"
           git push -f origin "$TAG"
-          gh release create "$TAG" PFPlus \
-            --title "$TITLE" \
-            --notes "$BODY" \
-            --target "$GITHUB_SHA"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "$TITLE" \
+              --notes "$BODY" \
+              --target "$GITHUB_SHA"
+            gh release upload "$TAG" PFPlus --clobber
+          else
+            gh release create "$TAG" PFPlus \
+              --title "$TITLE" \
+              --notes "$BODY" \
+              --target "$GITHUB_SHA"
+          fi

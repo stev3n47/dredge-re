@@ -62,6 +62,11 @@ static int init(void) {
 static int tick(void) {
     if (g_catch_hooks_installed) return 0;
     if (!pfp_cfg_bool("catch_force", 0)) return 0;
+    if (pfp_cfg_bool("mp_safe", 0)) {
+        static int warned = 0;
+        if (!warned) { pfp_log("catch: mp_safe=1 — install gated"); warned = 1; }
+        return 0;
+    }
     int installed = 0;
     void *tof = (void *)pfp_tramp_one_float;
     const char *img = "Assembly-CSharp.dll";

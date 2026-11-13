@@ -66,12 +66,14 @@ static int init(void) {
 static int tick(void) {
     if (!g_throw_class) return 0;
     int fired = 0;
+    int mp_safe = pfp_cfg_bool("mp_safe", 0);
 
     // v2.5 — Cannon Arm: hook get_PassIsBullet to always return true.
     // Every throw gets flagged as a bullet pass, so the game's velocity
     // math picks the max-velocity ballistic path. Avoids needing a
     // Vector3-sret trampoline for CalculateBulletVelocity.
-    if (!g_cannon_installed && pfp_cfg_bool("throw_force", 0)) {
+    // v2.5.1 — gated on mp_safe to avoid MP desync.
+    if (!g_cannon_installed && pfp_cfg_bool("throw_force", 0) && !mp_safe) {
         int n = 0;
         const MethodInfo *m = pfp_il2cpp_find_method(g_throw_class, "get_PassIsBullet", 0);
         if (m && pfp_pac_hook_install(m, (void *)pfp_tramp_one_int, "throw.get_PassIsBullet")) n++;
@@ -82,9 +84,8 @@ static int tick(void) {
 
     // v2.5 — Perfect Pass Accuracy: hook get_ThrowSpreadOnTheRun → 0.0.
     // Kills the roll-out spread penalty so throws on the move hit their
-    // target. (Stationary spread would need additional properties we
-    // haven't dumped yet.)
-    if (!g_accuracy_installed && pfp_cfg_bool("accuracy_force", 0)) {
+    // target. v2.5.1 — gated on mp_safe.
+    if (!g_accuracy_installed && pfp_cfg_bool("accuracy_force", 0) && !mp_safe) {
         int n = 0;
         const MethodInfo *m = pfp_il2cpp_find_method(g_throw_class, "get_ThrowSpreadOnTheRun", 0);
         if (m && pfp_pac_hook_install(m, (void *)pfp_tramp_zero_float, "throw.get_ThrowSpreadOnTheRun")) n++;
@@ -93,6 +94,10 @@ static int tick(void) {
         fired = fired || (n > 0);
     }
 
+    if (mp_safe && (pfp_cfg_bool("throw_force", 0) || pfp_cfg_bool("accuracy_force", 0))) {
+        static int warned = 0;
+        if (!warned) { pfp_log("throw: mp_safe=1 — install gated"); warned = 1; }
+    }
     return fired ? 1 : 0;
 }
 
