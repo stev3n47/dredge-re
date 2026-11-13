@@ -18,6 +18,7 @@
 // invoke in ok-check. No methodPointer swap. No instance discovery.
 
 #include "features.h"
+#include "pac_swap.h"
 #include <string.h>
 
 static Il2CppClass      *g_klass = NULL;
@@ -88,19 +89,34 @@ static int init(void) {
     return 0;
 }
 
+static int g_cap_hook_installed = 0;
+
 static int tick(void) {
     tick_count++;
+
+    // v2.5 — install Cap methodPointer hook when cap_force=1. Returns
+    // 999,999,999 so every budget-affordability check sees a huge cap
+    // and Fits(cost) effectively always succeeds without needing to
+    // hook Fits itself (we don't know its return conventions for sure).
+    if (!g_cap_hook_installed
+        && g_cap_mi && g_cap_static && g_cap_argc == 0
+        && pfp_cfg_bool("cap_force", 0)) {
+        int n = pfp_pac_hook_install(g_cap_mi,
+                                     (void *)pfp_tramp_huge_int,
+                                     "money.Cap");
+        g_cap_hook_installed = 1;
+        pfp_log("money: installed %d methodPointer hook(s) — Cap pinned to 999,999,999 (infinite save-cap)", n);
+        if (n > 0) return 1;
+    }
 
     // v2.1 one-shot summary of what the Nov 13 device log revealed:
     // CareerTeamBudget has 5 methods. Cap is a static getter (argc=0),
     // not a setter. Fits/get_Cap/set_Cap don't exist by those names on
-    // this build. So there's no safe invoke path — overriding the cap
-    // requires methodPointer swap on Cap() to force its return. Deferred
-    // to v2.2 (PAC probe + static-method pointer swap infrastructure).
+    // this build. v2.5 unblocks this via methodPointer swap above.
     if (!logged_once) {
         if (g_cap_mi && g_cap_static && g_cap_argc == 0) {
             pfp_log("money: Cap is a static getter (argc=0) — "
-                    "force-huge needs methodPointer swap, deferred to v2.2");
+                    "set cap_force=1 to install methodPointer hook");
         } else if (!g_cap_mi && !g_set_cap_mi && !g_fits_mi) {
             pfp_log("money: no recognisable setter/getter — scope deferred");
         }

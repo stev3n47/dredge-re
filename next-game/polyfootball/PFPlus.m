@@ -186,8 +186,11 @@ struct cfg {
     int fumbles_force;      // v2.2.1: install fumble-chance hooks (static methods -> 0)
     int injuries_force;     // v2.2.1: AggravationChance/StaysDown hooks
     int tackle_force;       // v2.2.1: BreakChance/ShoveChance/SpinEscape/AnkleBreak -> 1
-    int catch_force;        // v2.2.1: Confidence -> 1.0
+    int catch_force;        // v2.2.1: Confidence -> 1.0, v2.4.1: + InFront -> true
     int iap_force;          // v2.2.1: reserved for v2.2.2 AppleReceiptParser hook
+    int cap_force;          // v2.5: CareerTeamBudget.Cap -> 999,999,999
+    int throw_force;        // v2.5: ThrowController.get_PassIsBullet -> true (cannon arm)
+    int accuracy_force;     // v2.5: ThrowController.get_ThrowSpreadOnTheRun -> 0
     // Housekeeping
     int log_each_fire;
     int tick_hz;
@@ -203,6 +206,7 @@ static struct cfg g_cfg = {
     .throw_cannon = 1, .speed = 1,
     .pac = 1, .pac_probe = 0,  // phase 1 always; phase 2 opt-in
     .fumbles_force = 0, .injuries_force = 0, .tackle_force = 0, .catch_force = 0, .iap_force = 0,
+    .cap_force = 0, .throw_force = 0, .accuracy_force = 0,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
 };
 
@@ -280,6 +284,13 @@ static int pfp_cfg_reload_if_changed(void) {
                     "tackle_force=0\n"
                     "catch_force=0\n"
                     "iap_force=0\n"
+                    "# v2.5 methodPointer swap hooks (opt-in).\n"
+                    "# cap_force=1 → CareerTeamBudget.Cap → 999,999,999 (infinite save-cap)\n"
+                    "# throw_force=1 → ThrowController.get_PassIsBullet → true (cannon arm)\n"
+                    "# accuracy_force=1 → get_ThrowSpreadOnTheRun → 0 (perfect run-throws)\n"
+                    "cap_force=0\n"
+                    "throw_force=0\n"
+                    "accuracy_force=0\n"
                     "log_each_fire=0\n"
                     "tick_hz=10\n";
                 (void)write(fd, defaults, strlen(defaults));
@@ -341,6 +352,9 @@ static int pfp_cfg_reload_if_changed(void) {
         else if (!strcmp(k, "tackle_force"))          next.tackle_force = parse_bool_or_int(v, next.tackle_force);
         else if (!strcmp(k, "catch_force"))           next.catch_force = parse_bool_or_int(v, next.catch_force);
         else if (!strcmp(k, "iap_force"))             next.iap_force = parse_bool_or_int(v, next.iap_force);
+        else if (!strcmp(k, "cap_force"))             next.cap_force = parse_bool_or_int(v, next.cap_force);
+        else if (!strcmp(k, "throw_force"))           next.throw_force = parse_bool_or_int(v, next.throw_force);
+        else if (!strcmp(k, "accuracy_force"))        next.accuracy_force = parse_bool_or_int(v, next.accuracy_force);
         else if (!strcmp(k, "log_each_fire"))         next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
         else if (!strcmp(k, "tick_hz")) {
             int hz = atoi(v);
@@ -439,6 +453,9 @@ int pfp_cfg_bool(const char *key, int defval) {
     else if (!strcmp(key, "tackle_force"))   v = g_cfg.tackle_force;
     else if (!strcmp(key, "catch_force"))    v = g_cfg.catch_force;
     else if (!strcmp(key, "iap_force"))      v = g_cfg.iap_force;
+    else if (!strcmp(key, "cap_force"))      v = g_cfg.cap_force;
+    else if (!strcmp(key, "throw_force"))    v = g_cfg.throw_force;
+    else if (!strcmp(key, "accuracy_force")) v = g_cfg.accuracy_force;
     pthread_mutex_unlock(&g_cfg_mtx);
     return v;
 }
@@ -477,6 +494,9 @@ void pfp_cfg_set_bool(const char *key, int value) {
     else if (!strcmp(key, "tackle_force"))   g_cfg.tackle_force = v;
     else if (!strcmp(key, "catch_force"))    g_cfg.catch_force = v;
     else if (!strcmp(key, "iap_force"))      g_cfg.iap_force = v;
+    else if (!strcmp(key, "cap_force"))      g_cfg.cap_force = v;
+    else if (!strcmp(key, "throw_force"))    g_cfg.throw_force = v;
+    else if (!strcmp(key, "accuracy_force")) g_cfg.accuracy_force = v;
     pthread_mutex_unlock(&g_cfg_mtx);
 }
 
@@ -1076,7 +1096,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v2.4.1 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.5 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 

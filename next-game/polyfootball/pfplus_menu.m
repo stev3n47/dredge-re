@@ -133,7 +133,12 @@ static struct toggle_def g_toggles[] = {
     { "fumbles_force",  "No fumbles",       "FootballFumbleRules · 5 hooks",  "T2",  0.91,0.64,0.24, nil },
     { "injuries_force", "No injuries",      "InjuryCatalog · 4 hooks",        "T2",  0.91,0.64,0.24, nil },
     { "tackle_force",   "Never tackled",    "CarrierMoveRules · 6 hooks",     "T2",  0.91,0.64,0.24, nil },
-    { "catch_force",    "Magnet hands",     "FootballCatchReach · 1 hook",    "T2",  0.91,0.64,0.24, nil },
+    { "catch_force",    "Magnet hands",     "FootballCatchReach · 2 hooks",   "T2",  0.91,0.64,0.24, nil },
+    // Tier 2 — economy/offense (methodPointer swap, v2.5)
+    { "skills_force",   "Free skill points","CareerSkillCosts · Cost+Spent=0","T2",  0.91,0.64,0.24, nil },
+    { "cap_force",      "Infinite save-cap","CareerTeamBudget.Cap · huge int","T2",  0.91,0.64,0.24, nil },
+    { "throw_force",    "Cannon arm",       "ThrowController · PassIsBullet", "T2",  0.91,0.64,0.24, nil },
+    { "accuracy_force", "Perfect accuracy", "ThrowController · spread=0",     "T2",  0.91,0.64,0.24, nil },
 };
 #define NUM_TOGGLES ((int)(sizeof(g_toggles) / sizeof(g_toggles[0])))
 
@@ -351,9 +356,11 @@ static id build_action_button(const char *title, double r, double g, double b,
 
 static void build_panel(id host) {
     // Layout constants — mirror the design artifact.
+    // v2.5: shrank row_h from 62→50 so 12 toggles fit on standard phones
+    // (iPhone 15/16 ≈ 874pt tall). 56 + 12*50 + 60 = 716pt panel.
     const double panel_w     = 320.0;
     const double header_h    = 56.0;
-    const double row_h       = 62.0;
+    const double row_h       = 50.0;
     const double footer_h    = 60.0;
     const double side_pad    = 14.0;
     const double panel_h     = header_h + NUM_TOGGLES * row_h + footer_h;
@@ -403,9 +410,9 @@ static void build_panel(id host) {
                               1, 22.0, 1, 1, 1);
     msg1(content, S("addSubview:"), (void *)wordmark);
 
-    // "v2.4.1" version pill — small amber chip to the right of the wordmark.
-    id ver_pill = build_tier_chip("v2.4.1", 0.91, 0.64, 0.24,
-                                  (CGRect){{side_pad + 92, 24}, {50, 18}});
+    // "v2.5" version pill — small amber chip to the right of the wordmark.
+    id ver_pill = build_tier_chip("v2.5", 0.91, 0.64, 0.24,
+                                  (CGRect){{side_pad + 92, 24}, {44, 18}});
     msg1(content, S("addSubview:"), (void *)ver_pill);
 
     // "×" close button — top-right of the header.
@@ -447,25 +454,25 @@ static void build_panel(id host) {
 
         // Tier chip on the left.
         id chip = build_tier_chip(t->tier, t->tr, t->tg, t->tb,
-                                  (CGRect){{side_pad, y + 10}, {36, 18}});
+                                  (CGRect){{side_pad, y + 8}, {36, 16}});
         msg1(content, S("addSubview:"), (void *)chip);
 
         // Bold row label.
         id lbl = build_label(t->label,
-                             (CGRect){{side_pad + 44, y + 6}, {panel_w - 44 - 80, 22}},
-                             1, 15.0, 0.98, 0.98, 1.0);
+                             (CGRect){{side_pad + 44, y + 4}, {panel_w - 44 - 80, 20}},
+                             1, 14.0, 0.98, 0.98, 1.0);
         msg1(content, S("addSubview:"), (void *)lbl);
 
         // Mono meta subline.
         id meta = build_mono_label(t->meta,
-                                   (CGRect){{side_pad + 44, y + 28}, {panel_w - 44 - 80, 16}},
-                                   11.0);
+                                   (CGRect){{side_pad + 44, y + 24}, {panel_w - 44 - 80, 14}},
+                                   10.0);
         msg1(content, S("addSubview:"), (void *)meta);
 
         // UISwitch on the right.
         BOOL initial = pfp_cfg_bool(t->key, 0) ? YES : NO;
         t->sw = build_switch(t->key, initial,
-                             (CGRect){{panel_w - 51 - side_pad, y + 14}, {51, 31}});
+                             (CGRect){{panel_w - 51 - side_pad, y + 9}, {51, 31}});
         msg1(content, S("addSubview:"), (void *)t->sw);
 
         // Row separator.
