@@ -7,6 +7,8 @@ on:
       - 'next-game/polyfootball/PFPlus.m'
       - 'next-game/polyfootball/il2cpp_*.h'
       - 'next-game/polyfootball/il2cpp_*.c'
+      - 'next-game/polyfootball/feature_*.c'
+      - 'next-game/polyfootball/features.h'
       - '.github/workflows/build-pfplus.yml'
 
 permissions:
@@ -42,7 +44,8 @@ jobs:
             -install_name '@executable_path/Frameworks/PFPlus.framework/PFPlus' \
             -o PFPlus \
               next-game/polyfootball/PFPlus.m \
-              next-game/polyfootball/il2cpp_bridge.c
+              next-game/polyfootball/il2cpp_bridge.c \
+              next-game/polyfootball/feature_*.c
           strip -x PFPlus || true
           file PFPlus
           otool -L PFPlus

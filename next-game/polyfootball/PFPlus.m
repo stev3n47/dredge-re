@@ -30,6 +30,7 @@
 // toggle features live with the Files app.
 
 #include "il2cpp_bridge.h"
+#include "features.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,18 +157,30 @@ void pfp_log(const char *fmt, ...) {
 // -------- config --------
 
 struct cfg {
+    // v1a Tier 1 unlocks (static invoke)
     int pro;
     int agent;
     int triple_tickets;
     int cap_increase;
     // *_force: skip the getter check, re-invoke the setter every second.
-    // Useful when a getter lies (returns "already true" for a reason other
-    // than the user owning it — e.g. capability-exposed flag vs purchased
-    // flag). Setter invocations are static and cheap.
     int pro_force;
     int agent_force;
     int triple_tickets_force;
     int cap_increase_force;
+    // v1b–v2 features. Default-on except the diagnostic probes which are
+    // default-on but perform read-only logging only — they cost one heap
+    // walk + metadata enumeration per init, nothing per tick thereafter.
+    int money;              // v1b
+    int skills;             // v1b
+    int iap;                // v1.5
+    int sync;               // v1e
+    int fumbles;            // v2a diagnostic
+    int injuries;           // v2a diagnostic
+    int tackle;             // v2a diagnostic
+    int catch_hands;        // v2a diagnostic  (config key = "catch")
+    int throw_cannon;       // v2a diagnostic  (config key = "throw")
+    int speed;              // v2a diagnostic
+    // Housekeeping
     int log_each_fire;
     int tick_hz;
     time_t mtime;
@@ -177,6 +190,9 @@ struct cfg {
 static struct cfg g_cfg = {
     .pro = 1, .agent = 1, .triple_tickets = 1, .cap_increase = 1,
     .pro_force = 0, .agent_force = 0, .triple_tickets_force = 0, .cap_increase_force = 0,
+    .money = 1, .skills = 1, .iap = 1, .sync = 1,
+    .fumbles = 1, .injuries = 1, .tackle = 1, .catch_hands = 1,
+    .throw_cannon = 1, .speed = 1,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
 };
 
@@ -224,6 +240,17 @@ static int pfp_cfg_reload_if_changed(void) {
                     "agent_force=0\n"
                     "triple_tickets_force=0\n"
                     "cap_increase_force=0\n"
+                    "# v1b–v2 features (set to 0 to disable)\n"
+                    "money=1\n"
+                    "skills=1\n"
+                    "iap=1\n"
+                    "sync=1\n"
+                    "fumbles=1\n"
+                    "injuries=1\n"
+                    "tackle=1\n"
+                    "catch=1\n"
+                    "throw=1\n"
+                    "speed=1\n"
                     "log_each_fire=0\n"
                     "tick_hz=10\n";
                 (void)write(fd, defaults, strlen(defaults));
@@ -267,6 +294,16 @@ static int pfp_cfg_reload_if_changed(void) {
         else if (!strcmp(k, "agent_force"))           next.agent_force = parse_bool_or_int(v, next.agent_force);
         else if (!strcmp(k, "triple_tickets_force")) next.triple_tickets_force = parse_bool_or_int(v, next.triple_tickets_force);
         else if (!strcmp(k, "cap_increase_force"))   next.cap_increase_force = parse_bool_or_int(v, next.cap_increase_force);
+        else if (!strcmp(k, "money"))                 next.money = parse_bool_or_int(v, next.money);
+        else if (!strcmp(k, "skills"))                next.skills = parse_bool_or_int(v, next.skills);
+        else if (!strcmp(k, "iap"))                   next.iap = parse_bool_or_int(v, next.iap);
+        else if (!strcmp(k, "sync"))                  next.sync = parse_bool_or_int(v, next.sync);
+        else if (!strcmp(k, "fumbles"))               next.fumbles = parse_bool_or_int(v, next.fumbles);
+        else if (!strcmp(k, "injuries"))              next.injuries = parse_bool_or_int(v, next.injuries);
+        else if (!strcmp(k, "tackle"))                next.tackle = parse_bool_or_int(v, next.tackle);
+        else if (!strcmp(k, "catch"))                 next.catch_hands = parse_bool_or_int(v, next.catch_hands);
+        else if (!strcmp(k, "throw"))                 next.throw_cannon = parse_bool_or_int(v, next.throw_cannon);
+        else if (!strcmp(k, "speed"))                 next.speed = parse_bool_or_int(v, next.speed);
         else if (!strcmp(k, "log_each_fire"))         next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
         else if (!strcmp(k, "tick_hz")) {
             int hz = atoi(v);
@@ -335,6 +372,184 @@ static int cfg_force_for(const char *key) {
     else if (!strcmp(key, "cap_increase"))   v = g_cfg.cap_increase_force;
     pthread_mutex_unlock(&g_cfg_mtx);
     return v;
+}
+
+// Public helpers for feature modules (features.h). Linear-dispatch on the
+// known keys registered above. defval returned when the key is unknown
+// (should never happen in practice — all features' keys are compile-time).
+int pfp_cfg_bool(const char *key, int defval) {
+    pthread_mutex_lock(&g_cfg_mtx);
+    int v = defval;
+    if      (!strcmp(key, "pro"))            v = g_cfg.pro;
+    else if (!strcmp(key, "agent"))          v = g_cfg.agent;
+    else if (!strcmp(key, "triple_tickets")) v = g_cfg.triple_tickets;
+    else if (!strcmp(key, "cap_increase"))   v = g_cfg.cap_increase;
+    else if (!strcmp(key, "money"))          v = g_cfg.money;
+    else if (!strcmp(key, "skills"))         v = g_cfg.skills;
+    else if (!strcmp(key, "iap"))            v = g_cfg.iap;
+    else if (!strcmp(key, "sync"))           v = g_cfg.sync;
+    else if (!strcmp(key, "fumbles"))        v = g_cfg.fumbles;
+    else if (!strcmp(key, "injuries"))       v = g_cfg.injuries;
+    else if (!strcmp(key, "tackle"))         v = g_cfg.tackle;
+    else if (!strcmp(key, "catch"))          v = g_cfg.catch_hands;
+    else if (!strcmp(key, "throw"))          v = g_cfg.throw_cannon;
+    else if (!strcmp(key, "speed"))          v = g_cfg.speed;
+    pthread_mutex_unlock(&g_cfg_mtx);
+    return v;
+}
+
+int pfp_cfg_int(const char *key, int defval) {
+    // Future: expose tick_hz etc. For now, same as bool.
+    return pfp_cfg_bool(key, defval);
+}
+
+// ---------------- Diagnostic helpers (features.h) -------------------------
+
+// Enumerate every class in Assembly-CSharp whose name contains any of the
+// `substrs`. Returns count written to out_classes.
+int pfp_find_classes_by_name(const char **substrs, int substr_count,
+                             Il2CppClass **out_classes, int cap) {
+    if (!pfp_il2cpp_ready() || !substrs || substr_count <= 0) return 0;
+    int n = 0;
+    Il2CppDomain *dom = pfp_il2cpp_domain_get();
+    if (!dom) return 0;
+    size_t na = 0;
+    const Il2CppAssembly **asms = pfp_il2cpp_domain_get_assemblies(dom, &na);
+    for (size_t ai = 0; ai < na; ai++) {
+        const Il2CppImage *img = pfp_il2cpp_assembly_get_image(asms[ai]);
+        if (!img) continue;
+        const char *in = pfp_il2cpp_image_get_name(img);
+        if (!in || strcmp(in, "Assembly-CSharp.dll") != 0) continue;
+        size_t nc = pfp_il2cpp_image_get_class_count(img);
+        for (size_t ci = 0; ci < nc; ci++) {
+            Il2CppClass *k = pfp_il2cpp_image_get_class(img, ci);
+            if (!k) continue;
+            const char *kn = pfp_il2cpp_class_get_name(k);
+            if (!kn) continue;
+            for (int i = 0; i < substr_count; i++) {
+                if (substrs[i] && strstr(kn, substrs[i])) {
+                    if (n < cap) out_classes[n++] = k;
+                    break;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+// Shared context for diag heap walk. walk_cb collects obj + obj->klass
+// pointers that match the whitelist; post-walk resolution of class names
+// happens on the pre-resolved whitelist pointers (always safe).
+struct diag_walk {
+    Il2CppClass * const *whitelist;
+    int whitelist_n;
+    void *hits_obj[64];
+    Il2CppClass *hits_klass[64];
+    int n;
+    long scanned;
+};
+
+static void diag_walk_cb(void *obj, void *user) {
+    struct diag_walk *w = (struct diag_walk *)user;
+    w->scanned++;
+    if (!obj || w->n >= 64) return;
+    Il2CppClass *k = pfp_il2cpp_object_get_class(obj);
+    if (!k) return;
+    for (int i = 0; i < w->whitelist_n; i++) {
+        if (w->whitelist[i] == k) {
+            w->hits_obj[w->n] = obj;
+            w->hits_klass[w->n] = k;
+            w->n++;
+            return;
+        }
+    }
+}
+
+int pfp_diag_log_live_instances(const char *prefix,
+                                Il2CppClass * const *target_classes,
+                                int target_count) {
+    if (!pfp_il2cpp_ready() || !target_classes || target_count <= 0) return 0;
+    if (!pfp_il2cpp_gc_foreach_heap || !pfp_il2cpp_object_get_class) return 0;
+    struct diag_walk w = { target_classes, target_count, {0}, {0}, 0, 0 };
+    pfp_il2cpp_gc_foreach_heap(diag_walk_cb, &w);
+    pfp_log("%s: heap walk scanned %ld objects, %d live instance(s) of %d target class(es)",
+            prefix, w.scanned, w.n, target_count);
+    // Post-walk: safe to resolve class names on target_classes (pre-resolved
+    // from image metadata, not from the heap).
+    for (int i = 0; i < w.n; i++) {
+        const char *nm = pfp_il2cpp_class_get_name(w.hits_klass[i]);
+        pfp_log("%s:   live %s @ %p", prefix, nm ? nm : "?", w.hits_obj[i]);
+    }
+    return w.n;
+}
+
+void pfp_diag_log_methods(const char *prefix, Il2CppClass *klass,
+                          const char **name_substrs, int substr_count) {
+    if (!pfp_il2cpp_ready() || !klass || !pfp_il2cpp_class_get_methods) return;
+    const char *kn = pfp_il2cpp_class_get_name(klass);
+    void *iter = NULL;
+    int logged = 0;
+    const MethodInfo *m;
+    while ((m = pfp_il2cpp_class_get_methods(klass, &iter)) != NULL) {
+        const char *mn = pfp_il2cpp_method_get_name(m);
+        if (!mn) continue;
+        if (substr_count > 0 && name_substrs) {
+            int match = 0;
+            for (int i = 0; i < substr_count; i++) {
+                if (name_substrs[i] && strstr(mn, name_substrs[i])) { match = 1; break; }
+            }
+            if (!match) continue;
+        }
+        uint32_t iflags = 0;
+        uint32_t f = pfp_il2cpp_method_get_flags ? pfp_il2cpp_method_get_flags(m, &iflags) : 0;
+        int is_static = (f & 0x10) ? 1 : 0;
+        int argc = pfp_il2cpp_method_get_param_count ? (int)pfp_il2cpp_method_get_param_count(m) : -1;
+        pfp_log("%s: method %s.%s argc=%d%s", prefix, kn ? kn : "?", mn, argc,
+                is_static ? " [static]" : "");
+        if (++logged >= 32) { pfp_log("%s: (methods truncated at 32)", prefix); break; }
+    }
+}
+
+// ---------------- Feature registry ----------------------------------------
+
+static PfpFeature *g_feature_registry[] = {
+    &pfp_feature_money,
+    &pfp_feature_skills,
+    &pfp_feature_iap,
+    &pfp_feature_sync,
+    &pfp_feature_fumbles,
+    &pfp_feature_injuries,
+    &pfp_feature_tackle,
+    &pfp_feature_catch,
+    &pfp_feature_throw,
+    &pfp_feature_speed,
+};
+static const int NUM_FEATURES = sizeof(g_feature_registry) / sizeof(g_feature_registry[0]);
+
+static void run_features_tick(void) {
+    for (int i = 0; i < NUM_FEATURES; i++) {
+        PfpFeature *f = g_feature_registry[i];
+        if (!f || f->init_failed) continue;
+        if (!pfp_cfg_bool(f->key, 1)) continue;
+        if (!f->initialised) {
+            if (!f->init) { f->init_failed = 1; continue; }
+            int rc = f->init();
+            if (rc != 0) {
+                pfp_log("feature: %s init failed (rc=%d) — disabled for session", f->key, rc);
+                f->init_failed = 1;
+                continue;
+            }
+            f->initialised = 1;
+            pfp_log("feature: %s init ok", f->key);
+        }
+        if (f->tick) {
+            int did = f->tick();
+            if (did > 0) {
+                f->fires++;
+                f->last_tick_ms = now_ms();
+            }
+        }
+    }
 }
 
 // -------- PremiumCurrency resolution --------
@@ -512,19 +727,31 @@ static void tick_once(void) {
                 g_premium_instance);
         g_premium_instance = NULL;
     }
+
+    // Run registered v1b–v2 features after Tier 1 unlocks.
+    run_features_tick();
 }
 
 // Status dump — every 30s log the state so the log is useful without
 // log_each_fire=1. Format: `<key>=<fires>/<last_getter_state>` where
 // last_getter_state is T (true), F (false), or ? (never observed).
 static void status_dump(void) {
-    char line[512];
+    char line[1024];
     int w = snprintf(line, sizeof line, "status:");
     for (int i = 0; i < NUM_HOOKS; i++) {
         char g = (g_hooks[i].last_getter_state == 1) ? 'T' :
                  (g_hooks[i].last_getter_state == 0) ? 'F' : '?';
         int n = snprintf(line + w, sizeof(line) - w, " %s=%lu/%c",
                          g_hooks[i].key, g_hooks[i].fires, g);
+        if (n < 0 || (size_t)n >= sizeof(line) - w) break;
+        w += n;
+    }
+    for (int i = 0; i < NUM_FEATURES; i++) {
+        PfpFeature *f = g_feature_registry[i];
+        if (!f) continue;
+        const char *tag = f->init_failed ? "x" : (f->initialised ? "i" : "-");
+        int n = snprintf(line + w, sizeof(line) - w, " %s=%lu%s",
+                         f->key, f->fires, tag);
         if (n < 0 || (size_t)n >= sizeof(line) - w) break;
         w += n;
     }
@@ -582,7 +809,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v1a.6 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.0-pre up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 
