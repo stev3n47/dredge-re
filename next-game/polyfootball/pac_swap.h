@@ -50,6 +50,9 @@ int64_t pfp_tramp_one_int(void);
 // hooked method's return type. Picked under INT32_MAX so callers that
 // multiply / add won't overflow into negative.
 int64_t pfp_tramp_huge_int(void);
+// v2.6 — constant 2.0 for Super Speed scalar hooks. Used where a
+// multiplier method ordinarily returns ~1.0 and we want to double it.
+float   pfp_tramp_two_float(void);
 
 #ifdef __cplusplus
 }

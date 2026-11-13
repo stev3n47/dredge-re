@@ -40,3 +40,6 @@ int64_t pfp_tramp_one_int(void) { return 1; }
 
 __attribute__((no_sanitize("address")))
 int64_t pfp_tramp_huge_int(void) { return 999999999LL; }
+
+__attribute__((no_sanitize("address")))
+float pfp_tramp_two_float(void) { return 2.0f; }
