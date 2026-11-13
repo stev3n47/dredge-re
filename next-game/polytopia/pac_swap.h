@@ -58,6 +58,13 @@ int64_t stp_tramp_huge_int(void);
 // multiplier method ordinarily returns ~1.0 and we want to double it.
 float   stp_tramp_two_float(void);
 
+// v1.0.2 — instrumented "return 1" trampoline. Same ABI/return as
+// stp_tramp_one_int but increments stp_tramp_true_hits on each call, so
+// callers can prove (or disprove) that the hooked path actually fires.
+#include <stdatomic.h>
+extern _Atomic unsigned long stp_tramp_true_hits;
+int64_t stp_tramp_one_int_counted(void);
+
 #ifdef __cplusplus
 }
 #endif

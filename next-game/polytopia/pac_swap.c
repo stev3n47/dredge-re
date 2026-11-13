@@ -3,6 +3,8 @@
 #include "pac_swap.h"
 #include "features.h"
 
+#include <stdatomic.h>
+
 int stp_pac_hook_install_save(const MethodInfo *mi, void *trampoline,
                                void **out_original, const char *tag) {
     if (!mi || !trampoline) {
@@ -55,6 +57,21 @@ int64_t stp_tramp_one_int(void) { return 1; }
 
 __attribute__((no_sanitize("address")))
 int64_t stp_tramp_huge_int(void) { return 999999999LL; }
+
+// v1.0.2 — instrumented variants. Identical return behaviour to the plain
+// stubs above, but bump an atomic counter so STPlus.m's status line can
+// show whether the hooked path is EVER exercised by the game. The hot path
+// is lock-free and stdio-free by design (SPPlus v23 watchdog lesson): just
+// one relaxed atomic add, no stp_log / no cfg read inside the trampoline.
+// A counter that stays 0 during gameplay is proof the methodPointer swap
+// doesn't reach the game's direct `bl` call sites (see STPLUS-REVIEW.md).
+_Atomic unsigned long stp_tramp_true_hits = 0;
+
+__attribute__((no_sanitize("address")))
+int64_t stp_tramp_one_int_counted(void) {
+    atomic_fetch_add_explicit(&stp_tramp_true_hits, 1, memory_order_relaxed);
+    return 1;
+}
 
 __attribute__((no_sanitize("address")))
 float stp_tramp_two_float(void) { return 2.0f; }

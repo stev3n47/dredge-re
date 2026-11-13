@@ -320,12 +320,22 @@ struct hook {
     unsigned long fires;      // install count
 };
 
+// v1.0.2 — see STPLUS-REVIEW.md. Three changes vs v1.0.1:
+//   1. Dropped the two UnityPlatformPurchaseManager.Is*Unlocked rows: that
+//      class has NO such methods (its iface method is IsProductUnlocked), so
+//      they never resolved — they were the permanent `tribes=? skins=?` in
+//      the status line. Re-add as IsProductUnlocked only once a detour makes
+//      methodPointer swaps actually reach direct call sites.
+//   2. Dropped the stars/get_Currency row entirely: get_Currency is a
+//      direct-call instance getter read for EVERY player (AI too) and a
+//      getter swap never changes the stored balance. Stars moves to an
+//      invoke-based feature_stars.c (set_Currency on the local player) —
+//      pending the GameManager/GameState accessor dump added to feature_diag.
+//   3. Remaining rows use the counted trampoline so the status line can show
+//      whether the hooked path ever fires.
 static struct hook g_hooks[] = {
-    { "tribes", "PolytopiaAssembly.dll", "PurchaseManager",               "IsTribeUnlocked", -1, (void *)stp_tramp_one_int, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
-    { "tribes", "PolytopiaAssembly.dll", "UnityPlatformPurchaseManager",  "IsTribeUnlocked", -1, (void *)stp_tramp_one_int, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
-    { "skins",  "PolytopiaAssembly.dll", "PurchaseManager",               "IsSkinUnlocked",  -1, (void *)stp_tramp_one_int, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
-    { "skins",  "PolytopiaAssembly.dll", "UnityPlatformPurchaseManager",  "IsSkinUnlocked",  -1, (void *)stp_tramp_one_int, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
-    { "stars",  "GameLogicAssembly.dll", "PlayerState",                   "get_Currency",     0, (void *)stp_tramp_huge_int, 1, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
+    { "tribes", "PolytopiaAssembly.dll", "PurchaseManager", "IsTribeUnlocked", -1, (void *)stp_tramp_one_int_counted, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
+    { "skins",  "PolytopiaAssembly.dll", "PurchaseManager", "IsSkinUnlocked",  -1, (void *)stp_tramp_one_int_counted, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
 };
 
 static const int NUM_HOOKS = sizeof(g_hooks) / sizeof(g_hooks[0]);
@@ -930,6 +940,16 @@ static void status_dump(void) {
                          f->key, f->fires, tag);
         if (n < 0 || (size_t)n >= sizeof(line) - w) break;
         w += n;
+    }
+    // v1.0.2 — true intercept count. `on` above means "methodPointer written";
+    // this is the only number that proves the trampoline is actually CALLED.
+    // If this stays 0 while tribes=on/skins=on across real gameplay, the swap
+    // isn't reaching the game's direct call sites (see STPLUS-REVIEW.md).
+    {
+        unsigned long hits = atomic_load_explicit(&stp_tramp_true_hits,
+                                                  memory_order_relaxed);
+        int n = snprintf(line + w, sizeof(line) - w, " intercepts: true=%lu", hits);
+        if (n > 0 && (size_t)n < sizeof(line) - w) w += n;
     }
     stp_log("%s", line);
 }
