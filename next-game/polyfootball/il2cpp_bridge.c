@@ -137,18 +137,32 @@ int pfp_il2cpp_init(char *errbuf, size_t errbuflen) {
         return -2;
     }
 
+    // Pre-call instrumentation. v1a.2 crash had NO log between "resolved 20
+    // symbols" and the SIGSEGV — Steve's diagnosis was SP-relative deref
+    // inside the first export call, likely domain_get on an un-GC-attached
+    // pthread. These per-call log lines pin the exact crash site next time.
+    pfp_log("bridge: calling domain_get @ %p ...", (void *)pfp_il2cpp_domain_get);
     Il2CppDomain *dom = pfp_il2cpp_domain_get();
+    pfp_log("bridge: domain_get returned %p", dom);
     if (!dom) {
         if (errbuf) snprintf(errbuf, errbuflen,
                              "il2cpp_domain_get returned NULL (runtime not initialized yet?)");
         return -3;
     }
-    if (pfp_il2cpp_thread_current && pfp_il2cpp_thread_attach &&
-        !pfp_il2cpp_thread_current()) {
-        pfp_il2cpp_thread_attach(dom);
+
+    if (pfp_il2cpp_thread_current) {
+        pfp_log("bridge: calling thread_current @ %p ...", (void *)pfp_il2cpp_thread_current);
+        void *cur = pfp_il2cpp_thread_current();
+        pfp_log("bridge: thread_current returned %p", cur);
+        if (!cur && pfp_il2cpp_thread_attach) {
+            pfp_log("bridge: calling thread_attach(%p) @ %p ...", dom, (void *)pfp_il2cpp_thread_attach);
+            pfp_il2cpp_thread_attach(dom);
+            pfp_log("bridge: thread_attach returned");
+        }
     }
 
     g_ready = 1;
+    pfp_log("bridge: init complete");
     return 0;
 }
 
