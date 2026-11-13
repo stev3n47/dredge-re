@@ -22,6 +22,7 @@
 #include "features.h"
 #include "pac_swap.h"
 
+#include <string.h>
 #include <sys/time.h>
 
 static Il2CppClass *g_wallet = NULL;              // TicketWallet (legacy)
