@@ -174,6 +174,7 @@ struct cfg {
     int skills;             // v1b
     int iap;                // v1.5
     int sync;               // v1e
+    int skills_force;       // v1b: opt-in to fire reset-shaped methods
     int fumbles;            // v2a diagnostic
     int injuries;           // v2a diagnostic
     int tackle;             // v2a diagnostic
@@ -190,7 +191,7 @@ struct cfg {
 static struct cfg g_cfg = {
     .pro = 1, .agent = 1, .triple_tickets = 1, .cap_increase = 1,
     .pro_force = 0, .agent_force = 0, .triple_tickets_force = 0, .cap_increase_force = 0,
-    .money = 1, .skills = 1, .iap = 1, .sync = 1,
+    .money = 1, .skills = 1, .skills_force = 0, .iap = 1, .sync = 1,
     .fumbles = 1, .injuries = 1, .tackle = 1, .catch_hands = 1,
     .throw_cannon = 1, .speed = 1,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
@@ -243,6 +244,9 @@ static int pfp_cfg_reload_if_changed(void) {
                     "# v1b–v2 features (set to 0 to disable)\n"
                     "money=1\n"
                     "skills=1\n"
+                    "# skills_force=1 fires reset-shaped methods on\n"
+                    "# CareerSkillCosts — potentially destructive, opt-in.\n"
+                    "skills_force=0\n"
                     "iap=1\n"
                     "sync=1\n"
                     "fumbles=1\n"
@@ -296,6 +300,7 @@ static int pfp_cfg_reload_if_changed(void) {
         else if (!strcmp(k, "cap_increase_force"))   next.cap_increase_force = parse_bool_or_int(v, next.cap_increase_force);
         else if (!strcmp(k, "money"))                 next.money = parse_bool_or_int(v, next.money);
         else if (!strcmp(k, "skills"))                next.skills = parse_bool_or_int(v, next.skills);
+        else if (!strcmp(k, "skills_force"))          next.skills_force = parse_bool_or_int(v, next.skills_force);
         else if (!strcmp(k, "iap"))                   next.iap = parse_bool_or_int(v, next.iap);
         else if (!strcmp(k, "sync"))                  next.sync = parse_bool_or_int(v, next.sync);
         else if (!strcmp(k, "fumbles"))               next.fumbles = parse_bool_or_int(v, next.fumbles);
@@ -386,6 +391,7 @@ int pfp_cfg_bool(const char *key, int defval) {
     else if (!strcmp(key, "cap_increase"))   v = g_cfg.cap_increase;
     else if (!strcmp(key, "money"))          v = g_cfg.money;
     else if (!strcmp(key, "skills"))         v = g_cfg.skills;
+    else if (!strcmp(key, "skills_force"))   v = g_cfg.skills_force;
     else if (!strcmp(key, "iap"))            v = g_cfg.iap;
     else if (!strcmp(key, "sync"))           v = g_cfg.sync;
     else if (!strcmp(key, "fumbles"))        v = g_cfg.fumbles;

@@ -22,30 +22,39 @@ static int init(void) {
     g_manager_class    = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "MultiplayerProfileSaveManager");
     g_envelope_class   = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "MultiplayerProfileEnvelope");
     g_savedata_class   = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "MultiplayerProfileSaveData");
-    g_httpresult_class = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "HttpResult");
+    // Critic 3: HttpResult likely lives in a shared networking DLL, not
+    // Assembly-CSharp. Search any image.
+    g_httpresult_class = pfp_il2cpp_find_class(NULL, NULL, "HttpResult");
 
-    if (!g_manager_class) {
-        pfp_log("sync: MultiplayerProfileSaveManager not found — class name may have drifted");
-        return -1;
+    // Critic 3: log every class pointer UNCONDITIONALLY — don't early-return
+    // on manager miss. Missing one class is still useful diagnostic signal.
+    pfp_log("sync: MultiplayerProfileSaveManager=%p MultiplayerProfileEnvelope=%p "
+            "MultiplayerProfileSaveData=%p HttpResult=%p",
+            (void *)g_manager_class, (void *)g_envelope_class,
+            (void *)g_savedata_class, (void *)g_httpresult_class);
+    if (g_manager_class) {
+        int mc = pfp_il2cpp_count_methods(g_manager_class);
+        pfp_log("sync: MultiplayerProfileSaveManager method_count=%d (catalog=26)", mc);
     }
-    int mc = pfp_il2cpp_count_methods(g_manager_class);
-    pfp_log("sync: MultiplayerProfileSaveManager class=%p method_count=%d (catalog expects 26)",
-            (void *)g_manager_class, mc);
-    pfp_log("sync: MultiplayerProfileEnvelope class=%p", (void *)g_envelope_class);
-    pfp_log("sync: MultiplayerProfileSaveData class=%p", (void *)g_savedata_class);
-    pfp_log("sync: HttpResult class=%p", (void *)g_httpresult_class);
 
-    // Enumerate manager methods matching the apply/serialise surface so the
-    // v1e.1 implementation can pick the right one to short-circuit.
+    // Critic 3: dump apply-shaped methods on ALL THREE candidate classes,
+    // not just the manager. Unity's envelope pattern often puts the
+    // deserialise/apply logic on the envelope or on the savedata class.
+    // Also add async-callback shapes — the real overwrite often fires from
+    // a callback named `<Apply>b__12_0` or `OnReceived`.
     static const char *substrs[] = {
         "Apply", "Save", "Load", "Post",
         "Upload", "Download", "Sync",
         "Serialize", "Deserialize",
+        "Callback", "OnResponse", "OnReceived", "Reply", "Response",
     };
-    pfp_diag_log_methods("sync", g_manager_class, substrs,
-                         (int)(sizeof(substrs) / sizeof(substrs[0])));
+    int nsub = (int)(sizeof(substrs) / sizeof(substrs[0]));
+    if (g_manager_class)  pfp_diag_log_methods("sync", g_manager_class, substrs, nsub);
+    if (g_envelope_class) pfp_diag_log_methods("sync", g_envelope_class, substrs, nsub);
+    if (g_savedata_class) pfp_diag_log_methods("sync", g_savedata_class, substrs, nsub);
 
-    // Walk heap once for live instances across the three relevant classes.
+    // Walk heap once for live instances across the three relevant classes
+    // (HttpResult is a short-lived call-wrapper; not worth walking).
     Il2CppClass *targets[3];
     int n = 0;
     if (g_manager_class)  targets[n++] = g_manager_class;
@@ -55,7 +64,7 @@ static int init(void) {
         pfp_diag_log_live_instances("sync", targets, n);
     }
 
-    return 0;
+    return 0;  // diagnostic feature — missing class is not an init failure
 }
 
 static int tick(void) {

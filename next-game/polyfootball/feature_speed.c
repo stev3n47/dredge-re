@@ -22,10 +22,15 @@ static Il2CppClass *g_joystick_locomotion     = NULL;
 static Il2CppClass *g_defense_speeds          = NULL;
 
 static int init(void) {
+    int total_hits = 0;  // classes resolved + pattern methods found
+
     // Resolve the three named locomotion classes.
     g_carrier_move_controls = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "CarrierMoveControls");
     g_joystick_locomotion   = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "FootballJoystickLocomotion");
     g_defense_speeds        = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "FootballDefenseSpeeds");
+    if (g_carrier_move_controls) total_hits++;
+    if (g_joystick_locomotion)   total_hits++;
+    if (g_defense_speeds)        total_hits++;
     pfp_log("speed: class CarrierMoveControls=%p FootballJoystickLocomotion=%p FootballDefenseSpeeds=%p",
             (void *)g_carrier_move_controls,
             (void *)g_joystick_locomotion,
@@ -98,6 +103,7 @@ static int init(void) {
         } else if (hits >= cap) {
             pfp_log("speed: pattern-method hits truncated at %d", cap);
         }
+        total_hits += hits;
     }
 
     // Walk heap for live instances of the three locomotion classes.
@@ -110,6 +116,12 @@ static int init(void) {
         pfp_diag_log_live_instances("speed", targets, tcount);
     }
 
+    // Critic 6: distinguish "working" from "completely missed all targets"
+    // in the status log. Return -1 on total miss so init_failed shows 'x'.
+    if (total_hits == 0) {
+        pfp_log("speed: all 3 classes missing AND pattern scan found 0 — disabling");
+        return -1;
+    }
     return 0;
 }
 

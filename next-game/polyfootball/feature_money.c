@@ -104,9 +104,12 @@ static int tick(void) {
     // invoke with a huge value. Throttled to every 600 ticks (~60s at 10Hz).
     if (g_set_cap_mi && g_set_cap_static && g_set_cap_argc == 1) {
         if (tick_count == 1 || (tick_count % 600) == 0) {
+            // IL2CPP runtime_invoke expects args[i] = POINTER to the value
+            // for primitive/value types. Critic 2+10: passing
+            // (void*)(intptr_t)huge would have derefed near-NULL on invoke.
             int64_t huge = 1000000000LL;  // 1B
             int ok = 1;
-            pfp_il2cpp_invoke1(g_set_cap_mi, NULL, (void *)(intptr_t)huge, &ok);
+            pfp_il2cpp_invoke1(g_set_cap_mi, NULL, &huge, &ok);
             if (ok) {
                 pfp_log("money: set_Cap(1e9) invoked ok (tick=%d)", tick_count);
                 return 1;

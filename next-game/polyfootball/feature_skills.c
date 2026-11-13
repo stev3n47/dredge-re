@@ -83,6 +83,21 @@ static int init(void) {
 
 static int tick(void) {
     if (g_reset_n == 0) return 0;
+    // Critic 2: Reset/Clear/Zero-shaped methods on CareerSkillCosts could
+    // be destructive (e.g. wipe player progression). Gate the actual
+    // invocation behind an explicit opt-in flag `skills_force=1` in
+    // pfplus.json. Default: log what was discovered, never auto-fire.
+    if (!pfp_cfg_bool("skills_force", 0)) {
+        static int warned = 0;
+        if (!warned) {
+            pfp_log("skills: %d reset-shaped method(s) discovered; auto-fire "
+                    "GATED behind skills_force=1 in pfplus.json "
+                    "(potentially destructive, needs device-log confirmation first)",
+                    g_reset_n);
+            warned = 1;
+        }
+        return 0;
+    }
     unsigned long t = skills_now_ms();
     if (g_last_fire_ms && (t - g_last_fire_ms) < 60000UL) return 0;
 
@@ -91,8 +106,11 @@ static int tick(void) {
         if (!g_reset_mi[i]) continue;
         int ok = 1;
         pfp_il2cpp_invoke0(g_reset_mi[i], NULL, &ok);
-        if (ok) { any = 1; }
-        else {
+        if (ok) {
+            pfp_log("skills: invoked %s (skills_force=1)",
+                    g_reset_name[i] ? g_reset_name[i] : "?");
+            any = 1;
+        } else {
             pfp_log("skills: %s threw on invoke — clearing from reset list",
                     g_reset_name[i] ? g_reset_name[i] : "?");
             g_reset_mi[i] = NULL;

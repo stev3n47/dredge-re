@@ -28,12 +28,16 @@ static const char *k_image = "Assembly-CSharp.dll";
 
 // Classes we try to resolve. NULLs tolerated — init logs each miss and
 // keeps going.
+// Critic 5: the three locomotion classes (CarrierMoveControls,
+// FootballJoystickLocomotion, FootballDefenseSpeeds) are owned by
+// feature_speed.c. Keep tackle focused on tackle-specific classes to
+// avoid duplicate heap walks and duplicate method dumps on first boot.
 static const char *k_classes[] = {
     "FootballCarrierMoveRules",
     "FootballTackleStyle",
-    "CarrierMoveControls",
-    "FootballJoystickLocomotion",
-    "FootballDefenseSpeeds",
+    // Locomotion classes (CarrierMoveControls, FootballJoystickLocomotion,
+    // FootballDefenseSpeeds) are owned by feature_speed.c to avoid
+    // duplicate heap walks and duplicate method dumps.
 };
 #define NUM_CLASSES (int)(sizeof(k_classes) / sizeof(k_classes[0]))
 
