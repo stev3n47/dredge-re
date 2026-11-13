@@ -448,6 +448,38 @@ int pfp_cfg_int(const char *key, int defval) {
     return pfp_cfg_bool(key, defval);
 }
 
+// v2.3 — in-memory config write path used by the UIKit menu so toggles
+// take effect immediately without an mtime-based file reload. Uses the
+// same string→field dispatch as pfp_cfg_bool, mutating g_cfg under the
+// mutex. Unknown keys are silently ignored (same as the file parser).
+void pfp_cfg_set_bool(const char *key, int value) {
+    int v = value ? 1 : 0;
+    pthread_mutex_lock(&g_cfg_mtx);
+    if      (!strcmp(key, "pro"))            g_cfg.pro = v;
+    else if (!strcmp(key, "agent"))          g_cfg.agent = v;
+    else if (!strcmp(key, "triple_tickets")) g_cfg.triple_tickets = v;
+    else if (!strcmp(key, "cap_increase"))   g_cfg.cap_increase = v;
+    else if (!strcmp(key, "money"))          g_cfg.money = v;
+    else if (!strcmp(key, "skills"))         g_cfg.skills = v;
+    else if (!strcmp(key, "skills_force"))   g_cfg.skills_force = v;
+    else if (!strcmp(key, "iap"))            g_cfg.iap = v;
+    else if (!strcmp(key, "sync"))           g_cfg.sync = v;
+    else if (!strcmp(key, "fumbles"))        g_cfg.fumbles = v;
+    else if (!strcmp(key, "injuries"))       g_cfg.injuries = v;
+    else if (!strcmp(key, "tackle"))         g_cfg.tackle = v;
+    else if (!strcmp(key, "catch"))          g_cfg.catch_hands = v;
+    else if (!strcmp(key, "throw"))          g_cfg.throw_cannon = v;
+    else if (!strcmp(key, "speed"))          g_cfg.speed = v;
+    else if (!strcmp(key, "pac"))            g_cfg.pac = v;
+    else if (!strcmp(key, "pac_probe"))      g_cfg.pac_probe = v;
+    else if (!strcmp(key, "fumbles_force"))  g_cfg.fumbles_force = v;
+    else if (!strcmp(key, "injuries_force")) g_cfg.injuries_force = v;
+    else if (!strcmp(key, "tackle_force"))   g_cfg.tackle_force = v;
+    else if (!strcmp(key, "catch_force"))    g_cfg.catch_force = v;
+    else if (!strcmp(key, "iap_force"))      g_cfg.iap_force = v;
+    pthread_mutex_unlock(&g_cfg_mtx);
+}
+
 // ---------------- Diagnostic helpers (features.h) -------------------------
 
 // Enumerate every class in Assembly-CSharp whose name contains any of the
@@ -959,6 +991,12 @@ static void tick_once(void) {
 
     // Run registered v1b–v2 features after Tier 1 unlocks.
     run_features_tick();
+
+    // v2.3 — install the in-game menu once UIKit's key window exists.
+    // pfp_menu_install() is idempotent + returns early if the host
+    // window isn't available yet, so we can call it every tick cheaply
+    // until the install succeeds.
+    pfp_menu_install();
 }
 
 // Status dump — every 30s log the state so the log is useful without
@@ -1038,7 +1076,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v2.2.1 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.3 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 

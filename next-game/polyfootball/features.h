@@ -36,6 +36,8 @@ extern "C" {
 void pfp_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 int  pfp_cfg_bool(const char *key, int defval);
 int  pfp_cfg_int (const char *key, int defval);
+void pfp_cfg_set_bool(const char *key, int value);
+void pfp_menu_install(void);
 
 typedef struct {
     const char *key;               // config key AND log name

@@ -11,6 +11,7 @@ on:
       - 'next-game/polyfootball/features.h'
       - 'next-game/polyfootball/pac_swap.c'
       - 'next-game/polyfootball/pac_swap.h'
+      - 'next-game/polyfootball/pfplus_menu.m'
       - '.github/workflows/build-pfplus.yml'
 
 permissions:
@@ -46,6 +47,7 @@ jobs:
             -install_name '@executable_path/Frameworks/PFPlus.framework/PFPlus' \
             -o PFPlus \
               next-game/polyfootball/PFPlus.m \
+              next-game/polyfootball/pfplus_menu.m \
               next-game/polyfootball/il2cpp_bridge.c \
               next-game/polyfootball/pac_swap.c \
               next-game/polyfootball/feature_*.c
