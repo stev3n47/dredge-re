@@ -697,6 +697,7 @@ static void stp_periodic_rewalk(void) {
 
 static StpFeature *g_feature_registry[] = {
     &stp_feature_diag,
+    &stp_feature_stars,
 };
 static const int NUM_FEATURES = sizeof(g_feature_registry) / sizeof(g_feature_registry[0]);
 
@@ -1005,7 +1006,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void stp_ctor(void) {
-    stp_log("boot: STPlus v1.0.1 up · target com.felixrum.supertribes 2.18.0 · Unity 6 / metadata v39");
+    stp_log("boot: STPlus v1.0.2 up · target com.felixrum.supertribes 2.18.0 · Unity 6 / metadata v39");
     stp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     stp_cfg_reload_if_changed();
 

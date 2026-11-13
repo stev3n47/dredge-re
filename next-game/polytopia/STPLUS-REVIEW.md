@@ -65,14 +65,20 @@ been built.
 
 ## Fix plan (prioritized)
 
-### 1. Make effectiveness observable (DONE in this branch — verify on device)
-`pac_swap.c` now has counting trampolines and `STPlus.m`'s `status:` line prints
-`intercepts: true=<n>`. On the next device run, drive a tribe picker and watch the
-counter. If it stays **0** during gameplay, that's hard confirmation the
-`methodPointer` path is inert and you must move to a real interception (below).
-`feature_diag.c` now also dumps the method inventories of `GameManager`,
-`ClientBase` and `GameState` (filtered to the navigation accessors) so you have the
-exact symbol names needed for step 3 after one launch.
+### 1. Make effectiveness observable (DONE — CONFIRMED on device)
+`pac_swap.c` has counting trampolines and `STPlus.m`'s `status:` line prints
+`intercepts: true=<n>`. **The 14:55 device run (v1.0.2) settled it: `intercepts:
+true=0` for the entire ~19‑minute session** (through menu use and gameplay). The
+`methodPointer` swap is inert — tribes/skins must move to a real interception
+(step 2). `feature_diag.c` also dumped the navigation accessors; the useful ones
+turned out to be static:
+
+```
+GameManager.get_LocalPlayer  argc=0 [static]   -> local human PlayerState
+GameManager.get_GameState    argc=0 [static]
+GameState.GetFirstHumanPlayer argc=0           (fallback)
+PlayerState.set_Currency     argc=1            (the write path)
+```
 
 ### 2. Tribes / skins → inline prologue detour (device-test required)
 These are constant-return hooks ("always unlocked"), so you don't need to call the
@@ -104,25 +110,25 @@ return the everything-unlocked impl. Watch `PurchaseCache.VerifyChecksum`/`GetCh
 (anti-tamper) — they guard the *persisted* file; an in-memory set used at call time
 should be fine, but verify.
 
-### 3. Stars → invoke `set_Currency` on the local player (device-test required)
-Drop the `get_Currency` hook entirely (removed in this branch) and instead, each
-tick while `stars=1` and `mp_safe` allows, write the human's balance directly:
+### 3. Stars → invoke `set_Currency` on the local player (DONE — verify on device)
+Implemented in `feature_stars.c`. The old `get_Currency` hook is gone. Each
+throttled (~2 Hz) tick while `stars=1` and `mp_safe=0`:
 
-- Resolve the live `GameState` via the `GameManager`/`ClientBase` singleton. The
-  method names come from the step‑1 diag dump; PLAN.md already has the GameLogic
-  side: `GameState.get_CurrentPlayer` (m80616) / `get_PlayerStates` (m80602),
-  `PlayerState.get_AutoPlay` (m80748, human = false), `set_Currency` (m80754).
-- Filter to the local human (`get_AutoPlay()==false`, or match `get_Id`/`AccountId`
-  to the local client) so AI is untouched — this is the "self-check" PLAN.md §T2.6
-  wants, done on the data side instead of in a trampoline.
-- Call `set_Currency(huge)` via `runtime_invoke` (int32 arg: pass `&value`). This is
-  the **proven** path (the v2.2 probe confirmed `runtime_invoke` routes through our
-  swap), it changes the real stored balance, and it needs no code patching.
-- Keep it under the `mp_safe` gate — it mutates match-sim state.
+```
+PlayerState* lp = GameManager.get_LocalPlayer();   // static, argc 0
+if (lp && lp->klass == PlayerState)                // SPPlus v33 pointer check
+    PlayerState.set_Currency(lp, 999999);          // instance, argc 1, via runtime_invoke
+```
 
-Build it as `feature_stars.c` (CI already globs `feature_*.c`). Follow
-`feature_money.c`'s discipline: resolve everything, log arity/static bits, invoke
-only with verified signatures, never guess.
+`get_LocalPlayer` returns the human's `PlayerState`, so **AI is never touched** —
+no self-check trampoline needed. It uses only `runtime_invoke` (the proven path),
+writes the real stored balance, needs no code patching, and logs a one-shot
+set/readback so the next device log confirms the write. Still `mp_safe`-gated.
+
+**Verify on device:** start a match with `stars=1`, confirm the log shows
+`stars: set local player currency to 999999 (readback=999999)` and that the
+in-game star count reflects it. If `get_LocalPlayer` returns a non-`PlayerState`
+type, the log will say so and skip — fall back to `GameState.GetFirstHumanPlayer`.
 
 ### 4. Cleanup (DONE in this branch)
 Removed the two dead `UnityPlatformPurchaseManager.Is*Unlocked` rows. If you want a
@@ -130,9 +136,16 @@ belt-and-suspenders unlock, re-add them as `IsProductUnlocked` on both
 `UnityPlatformPurchaseManager` and `EverythingUnlockedPlatformPurchaseManager` — but
 that's still a `methodPointer` swap and won't fire on direct calls until step 2 lands.
 
+## Status
+
+- **stars** — implemented (`feature_stars.c`), pending device verification.
+- **tribes/skins** — still need step 2; `intercepts: true=0` confirms the current
+  `methodPointer` swap does nothing.
+
 ## Decisions for Steven
 
-- OK to pursue the inline detour (step 2), given it needs an on-device RWX probe and
-  the project has hit `codesign-invalid-page` before? Or prefer the data-side 2b route?
-- For stars, confirm the `GameManager → GameState` entry accessor from the step‑1 diag
-  dump before I/Devin wire `feature_stars.c`.
+- OK to pursue the inline detour (step 2) for tribes/skins, given it needs an
+  on-device RWX probe and the project has hit `codesign-invalid-page` before? Or
+  prefer the data-side 2b route (invoke the `PurchaseCache` grant path)?
+- If stars' device log shows `get_LocalPlayer` returning a non-`PlayerState`, say so
+  and I'll switch it to `GameState.GetFirstHumanPlayer`.

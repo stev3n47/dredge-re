@@ -59,6 +59,7 @@ typedef struct {
 // Features declared here, defined in feature_<name>.c.
 // Order in g_feature_registry[] = execution order on each tick.
 extern StpFeature stp_feature_diag;    // v1: PurchaseManager/PlayerState method dump
+extern StpFeature stp_feature_stars;   // v1.0.2: unlimited stars via set_Currency invoke
 
 // Convenience helpers shared by diagnostic features. Implemented in STPlus.m.
 
