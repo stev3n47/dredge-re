@@ -32,8 +32,9 @@ int stp_pac_hook_restore(const MethodInfo *mi, void *original, const char *tag) 
     void **slot = (void **)mi;
     void *cur = slot[0];
     slot[0] = original;
-    stp_log("pac-swap: %s restored · MethodInfo=%p cur=%p -> orig=%p",
-            tag ? tag : "?", (const void *)mi, cur, original);
+    stp_log("pac-swap: %s restored · MethodInfo=%p cur=%p -> orig=%p%s",
+            tag ? tag : "?", (const void *)mi, cur, original,
+            (cur == original) ? " (already-orig: something else touched slot)" : "");
     return 1;
 }
 

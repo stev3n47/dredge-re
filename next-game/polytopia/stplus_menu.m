@@ -157,7 +157,7 @@ static void handler_pan(id self, SEL _cmd, id gesture);
 static Class stp_menu_class(void) {
     static Class cls = NULL;
     if (cls) return cls;
-    cls = objc_allocateClassPair(C("NSObject"), "PFPMenuCtrl", 0);
+    cls = objc_allocateClassPair(C("NSObject"), "STPMenuCtrl", 0);
     if (!cls) {
         stp_log("menu: objc_allocateClassPair failed");
         return NULL;
@@ -209,7 +209,10 @@ static void handler_killAll(id self, SEL _cmd, id sender) {
     // behavior reverts because the hooks are only installed once on the
     // true→next-tick transition. Flipping back off prevents re-install.
     for (int i = 0; i < NUM_TOGGLES; i++) {
-        stp_cfg_set_bool(g_toggles[i].key, 0);
+        // Kill All leaves the safety gate ON — re-enabling a match-sim
+        // hook after Kill All shouldn't silently drop mp protection.
+        stp_cfg_set_bool(g_toggles[i].key,
+                         !strcmp(g_toggles[i].key, "mp_safe") ? 1 : 0);
         if (g_toggles[i].sw) {
             ((void (*)(id, SEL, BOOL, BOOL))objc_msgSend)
                 (g_toggles[i].sw, S("setOn:animated:"), NO, YES);

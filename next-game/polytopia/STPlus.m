@@ -172,13 +172,14 @@ struct cfg {
     int tick_hz;
     time_t mtime;
     int    loaded_ok;
-}
+    off_t  size;
+};
 
 static struct cfg g_cfg = {
     .tribes = 1, .skins = 1,
     .stars = 0, .mp_safe = 0,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
-}
+};
 
 static pthread_mutex_t g_cfg_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -232,7 +233,7 @@ static int stp_cfg_reload_if_changed(void) {
         return 0;
     }
     pthread_mutex_lock(&g_cfg_mtx);
-    if (st.st_mtime == g_cfg.mtime && g_cfg.loaded_ok) {
+    if (st.st_mtime == g_cfg.mtime && st.st_size == g_cfg.size && g_cfg.loaded_ok) {
         pthread_mutex_unlock(&g_cfg_mtx);
         return 0;
     }
@@ -271,6 +272,7 @@ static int stp_cfg_reload_if_changed(void) {
     }
     fclose(f);
     next.mtime = st.st_mtime;
+    next.size  = st.st_size;
     next.loaded_ok = 1;
     g_cfg = next;
     pthread_mutex_unlock(&g_cfg_mtx);
@@ -291,24 +293,39 @@ static int stp_cfg_reload_if_changed(void) {
 // instance discovery or heap walk is needed. Disabling a feature writes
 // the saved original slot[0] back (live restore, no relaunch).
 
+// Each row is one (image, class, method) target. A cfg key may own several
+// rows — e.g. "tribes" patches BOTH the base PurchaseManager and the live
+// UnityPlatformPurchaseManager impl, because the runtime object is the impl
+// and callvirt dispatches on ITS vtable. Every row patches two slots:
+//   1. MethodInfo.methodPointer  — covers il2cpp_runtime_invoke / delegates
+//   2. klass->vtable[i].methodPtr — covers callvirt (interface dispatch)
+// Non-virtual methods reachable only via direct `bl` (no vtable entry) are
+// logged as "no-vtable" — an honest signal that the invoke path is needed.
 struct hook {
     const char *key;          // config flag name
-    const char *class_name;   // C# class in PolytopiaAssembly.dll
+    const char *image;        // owning image (exact match first)
+    const char *class_name;   // C# class
     const char *method;       // method name
     int         argc;         // arg count; -1 = wildcard match
     void       *tramp;        // constant-return trampoline to install
     int         mp_unsafe;    // 1 = install blocked while mp_safe=1
     const MethodInfo *mi;
-    void       *orig;         // saved slot[0] for live restore
+    void       *mi_orig;      // saved MethodInfo.methodPointer
+    void      **vslot;        // located &vtable[i].methodPtr (NULL if n/a)
+    void       *v_orig;       // saved vtable methodPtr
     int         installed;
     int         blocked_logged;
+    int         miss_logged;
+    int         novtable_logged;
     unsigned long fires;      // install count
 };
 
 static struct hook g_hooks[] = {
-    { "tribes", "PurchaseManager", "IsTribeUnlocked", -1, (void *)stp_tramp_one_int, 0, NULL, NULL, 0, 0, 0 },
-    { "skins",  "PurchaseManager", "IsSkinUnlocked",  -1, (void *)stp_tramp_one_int, 0, NULL, NULL, 0, 0, 0 },
-    { "stars",  "PlayerState",     "get_Currency",     0, (void *)stp_tramp_huge_int, 1, NULL, NULL, 0, 0, 0 },
+    { "tribes", "PolytopiaAssembly.dll", "PurchaseManager",               "IsTribeUnlocked", -1, (void *)stp_tramp_one_int, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
+    { "tribes", "PolytopiaAssembly.dll", "UnityPlatformPurchaseManager",  "IsTribeUnlocked", -1, (void *)stp_tramp_one_int, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
+    { "skins",  "PolytopiaAssembly.dll", "PurchaseManager",               "IsSkinUnlocked",  -1, (void *)stp_tramp_one_int, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
+    { "skins",  "PolytopiaAssembly.dll", "UnityPlatformPurchaseManager",  "IsSkinUnlocked",  -1, (void *)stp_tramp_one_int, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
+    { "stars",  "GameLogicAssembly.dll", "PlayerState",                   "get_Currency",     0, (void *)stp_tramp_huge_int, 1, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0 },
 };
 
 static const int NUM_HOOKS = sizeof(g_hooks) / sizeof(g_hooks[0]);
@@ -371,6 +388,10 @@ static void stp_cfg_save_locked(void) {
     if (rename(tmp, path) != 0) {
         stp_log("cfg: save failed -- rename %s -> %s errno=%d", tmp, path, errno);
     }
+    // Keep g_cfg.mtime in sync so our own save doesn't trigger a
+    // spurious re-parse + "cfg: reloaded" log next tick.
+    struct stat st2;
+    if (stat(path, &st2) == 0) { g_cfg.mtime = st2.st_mtime; g_cfg.size = st2.st_size; }
 }
 
 // v2.3 â€” in-memory config write path used by the UIKit menu so toggles
@@ -394,6 +415,10 @@ void stp_cfg_set_bool(const char *key, int value) {
 // `substrs`. Returns count written to out_classes.
 int stp_find_classes_by_name(const char **substrs, int substr_count,
                              Il2CppClass **out_classes, int cap) {
+    if (!out_classes || cap <= 0 ||
+        !stp_il2cpp_domain_get_assemblies || !stp_il2cpp_assembly_get_image ||
+        !stp_il2cpp_image_get_name || !stp_il2cpp_image_get_class_count ||
+        !stp_il2cpp_image_get_class || !stp_il2cpp_class_get_name) return 0;
     if (!stp_il2cpp_ready() || !substrs || substr_count <= 0) return 0;
     int n = 0;
     Il2CppDomain *dom = stp_il2cpp_domain_get();
@@ -470,7 +495,8 @@ int stp_diag_log_live_instances(const char *prefix,
 
 void stp_diag_log_methods(const char *prefix, Il2CppClass *klass,
                           const char **name_substrs, int substr_count) {
-    if (!stp_il2cpp_ready() || !klass || !stp_il2cpp_class_get_methods) return;
+    if (!stp_il2cpp_ready() || !klass || !stp_il2cpp_class_get_methods ||
+        !stp_il2cpp_method_get_name) return;
     const char *kn = stp_il2cpp_class_get_name(klass);
     void *iter = NULL;
     int logged = 0;
@@ -718,22 +744,85 @@ static void run_features_tick(void) {
 // Tiny class cache (<=8 entries) — find_class walks every image's class
 // table on first call per name, then we keep the pointer. Class pointers
 // come from image metadata, not the heap — safe to cache for the session.
-static Il2CppClass *resolve_class(const char *name) {
+static Il2CppClass *resolve_class(const char *image, const char *name) {
     static struct { const char *name; Il2CppClass *k; } cache[8];
     static int n = 0;
     for (int i = 0; i < n; i++) {
         if (!strcmp(cache[i].name, name)) return cache[i].k;
     }
-    Il2CppClass *k = stp_il2cpp_find_class("PolytopiaAssembly.dll", NULL, name);
-    if (!k) k = stp_il2cpp_find_class(NULL, NULL, name);
+    // Exact image first (PlayerState lives in GameLogicAssembly.dll, NOT
+    // PolytopiaAssembly — a wildcard scan could grab a same-named UI class
+    // and hook the wrong get_Currency). Wildcard fallback only as a
+    // last resort and only for the purchase classes (distinctive names).
+    Il2CppClass *k = stp_il2cpp_find_class(image, NULL, name);
+    if (!k && !strstr(name, "PlayerState"))
+        k = stp_il2cpp_find_class(NULL, NULL, name);
     if (!k) {
-        stp_log("resolve: %s class NOT FOUND", name);
+        // Log the miss once per class, then retry quietly at the caller's
+        // cadence — avoids 10 Hz "NOT FOUND" spam forever (800k lines/day).
+        static char miss_logged[8][64];
+        static int nmiss = 0;
+        int seen = 0;
+        for (int i = 0; i < nmiss; i++) {
+            if (!strcmp(miss_logged[i], name)) { seen = 1; break; }
+        }
+        if (!seen) {
+            stp_log("resolve: %s class NOT FOUND (will retry)", name);
+            if (nmiss < 8) { snprintf(miss_logged[nmiss], 64, "%s", name); nmiss++; }
+        }
         return NULL;
     }
     if (n < 8) { cache[n].name = name; cache[n].k = k; n++; }
     stp_log("resolve: %s class=%p method_count=%d", name, (void *)k,
             stp_il2cpp_count_methods(k));
     return k;
+}
+
+// -------- vtable discovery --------
+//
+// methodPointer swap alone only intercepts il2cpp_runtime_invoke — the
+// game's compiled call sites use direct `bl` (non-virtual) or
+// `callvirt` -> klass->vtable[i].methodPtr (a snapshot pointer, not a
+// MethodInfo lookup). Since PurchaseManager's impls dispatch through an
+// interface, IsTribeUnlocked/IsSkinUnlocked are virtual: every caller
+// goes through the live impl's vtable. Patching vtable[i].methodPtr
+// therefore intercepts all callvirt sites.
+//
+// We discover the vtable pointer + slot at RUNTIME rather than relying on
+// an Il2CppClass layout offset: scan the class object's first 64 pointer
+// fields for an array of VirtualInvokeData { methodPtr, method } whose
+// .method equals our resolved MethodInfo*. All reads go through a
+// mach_vm probe so a non-pointer field can't fault us.
+
+extern int mach_vm_read_overwrite(long task, long addr, long size,
+                                  long data, long *outsz);
+extern unsigned int mach_task_self(void);
+
+static int safe_read(const void *addr, void *buf, unsigned long n) {
+    long out = 0;
+    return mach_vm_read_overwrite(mach_task_self(), (long)addr, (long)n,
+                                  (long)buf, &out) == 0 && out == (long)n;
+}
+
+// Returns &vtable[i].methodPtr on success.
+static void **find_vtable_slot(Il2CppClass *klass, const MethodInfo *mi) {
+    void *kp[64];
+    if (!safe_read(klass, kp, sizeof kp)) return NULL;
+    for (int f = 0; f < 64; f++) {
+        void *cand = kp[f];
+        if (!cand) continue;
+        for (int i = 0; i < 256; i++) {
+            struct { void *methodPtr; const MethodInfo *method; } ent;
+            if (!safe_read((char *)cand + i * sizeof ent, &ent, sizeof ent)) break;
+            if (!ent.methodPtr && !ent.method) break;   // vtables end {NULL,NULL}
+            if (((unsigned long)ent.method & 0x7) ||
+                ((unsigned long)ent.methodPtr & 0x7)) break;  // not a ptr pair
+            if (ent.method == mi) {
+                return (void **)((char *)cand + i * sizeof ent);
+            }
+        }
+    }
+    return NULL;
 }
 
 // -------- tick --------
@@ -765,20 +854,44 @@ static void tick_once(void) {
 
         if (want && !h->installed) {
             if (!h->mi) {
-                Il2CppClass *k = resolve_class(h->class_name);
-                if (k) h->mi = stp_il2cpp_find_method(k, h->method, h->argc);
-                stp_log("resolve: %s -> %s.%s(argc=%d) mi=%p",
-                        h->key, h->class_name, h->method, h->argc, (void *)h->mi);
+                Il2CppClass *k = resolve_class(h->image, h->class_name);
+                if (k) {
+                    h->mi = stp_il2cpp_find_method(k, h->method, h->argc);
+                    // Only scan for a vtable slot when we have a real
+                    // MethodInfo — a NULL mi would false-match the
+                    // {NULL,NULL} vtable terminator entry.
+                    if (h->mi) h->vslot = find_vtable_slot(k, h->mi);
+                }
+                if (!h->miss_logged) {
+                    stp_log("resolve: %s -> %s.%s(argc=%d) mi=%p vslot=%p%s",
+                            h->key, h->class_name, h->method, h->argc,
+                            (void *)h->mi, (void *)h->vslot,
+                            h->mi ? "" : " (will retry)");
+                    h->miss_logged = 1;
+                }
+                if (h->mi) h->miss_logged = 0;
             }
-            if (h->mi &&
-                stp_pac_hook_install_save(h->mi, h->tramp, &h->orig, h->key)) {
-                h->installed = 1;
-                h->fires++;
+            if (h->mi) {
+                int ok = stp_pac_hook_install_save(h->mi, h->tramp,
+                                                   &h->mi_orig, h->key);
+                if (ok && h->vslot) {
+                    h->v_orig = *h->vslot;
+                    *h->vslot = h->tramp;
+                    stp_log("vtable-swap: %s methodPtr %p -> tramp=%p",
+                            h->key, h->v_orig, h->tramp);
+                } else if (ok && !h->novtable_logged) {
+                    stp_log("vtable: %s no vtable slot (non-virtual/direct-call) "
+                            "-- methodPointer swap only, may not reach game callsites",
+                            h->key);
+                    h->novtable_logged = 1;
+                }
+                if (ok) { h->installed = 1; h->fires++; }
             }
         } else if (!want && h->installed) {
-            if (stp_pac_hook_restore(h->mi, h->orig, h->key)) {
+            if (h->vslot && h->v_orig) *h->vslot = h->v_orig;
+            if (stp_pac_hook_restore(h->mi, h->mi_orig, h->key)) {
                 h->installed = 0;
-                h->orig = NULL;
+                h->mi_orig = h->v_orig = NULL;
             }
         }
     }
@@ -867,7 +980,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void stp_ctor(void) {
-    stp_log("boot: STPlus v2.9 up Â· target com.Miceli.Poly 4.5.3 Â· Unity 6 / metadata v39");
+    stp_log("boot: STPlus v1.0 up · target com.felixrum.supertribes 2.18.0 · Unity 6 / metadata v39");
     stp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     stp_cfg_reload_if_changed();
 

@@ -12,8 +12,8 @@
 
 static int g_dumped = 0;
 
-static void dump(const char *name) {
-    Il2CppClass *k = stp_il2cpp_find_class("PolytopiaAssembly.dll", NULL, name);
+static void dump(const char *image, const char *name) {
+    Il2CppClass *k = stp_il2cpp_find_class(image, NULL, name);
     if (!k) k = stp_il2cpp_find_class(NULL, NULL, name);
     if (!k) {
         stp_log("diag: %s class NOT FOUND", name);
@@ -26,8 +26,9 @@ static void dump(const char *name) {
 
 static int diag_init(void) {
     if (g_dumped) return 0;
-    dump("PurchaseManager");
-    dump("PlayerState");
+    dump("PolytopiaAssembly.dll", "PurchaseManager");
+    dump("PolytopiaAssembly.dll", "UnityPlatformPurchaseManager");
+    dump("GameLogicAssembly.dll", "PlayerState");
     g_dumped = 1;
     return 0;
 }

@@ -1,4 +1,4 @@
-# Polytopia (Super Tribes) 2.18.0 — PTPlus feature plan
+# Polytopia (Super Tribes) 2.18.0 — STPlus feature plan
 
 Source IPA: `com.felixrum.supertribes-2.18.0-eeveedecrypter.ipa`
 Bundle: `Payload/Polytopia.app`, executable `Polytopia` (88KB stub), engine in
@@ -130,3 +130,19 @@ CityReward m10735 / CityRewardData m10736
   PFPlus v2.5.x is the reference architecture; rebrand + retarget.
 - `mp_safe` flag must gate T2/T3 — Polytopia multiplayer is real-time via
   SignalR with server-side replay; desync is detectable.
+
+## Implementation status (STPlus v1 — 45c21ef)
+
+- [x] STPlus.m scaffold (PFPlus architecture, main-runloop tick, write(2)
+      log, line-config, atomic save)
+- [x] methodPointer-swap hook table: IsTribeUnlocked / IsSkinUnlocked / 
+      get_Currency -> huge (stars, opt-in, mp_safe-gated)
+- [x] Live restore on toggle-off (saved slot[0])
+- [x] stplus_menu.m UIKit orb+panel (mp_safe / tribes / skins / stars)
+- [x] feature_diag.c boot method dump (PurchaseManager + PlayerState)
+- [x] tools/inject_polytopia.py (fork of inject_polyfootball.py)
+- [x] .github/workflows/build-stplus.yml (macOS CI, self-sign, stplus-latest)
+- [ ] Device verification — first log should show `resolve:` + `pac-swap:
+      installed` lines + the diag method dump
+- [ ] Deferred: GetUnlockedDifficulties (collection return — needs real
+      shim), tech/fog/unit hooks, EOS/SignalR surfaces
