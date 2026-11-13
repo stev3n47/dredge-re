@@ -1,32 +1,41 @@
-// feature_tickets — v2.8 "Unlimited Premium Tickets" (iOSGods-style setter).
+// feature_tickets — v2.9 "Unlimited Premium Tickets" via periodic invoke.
 //
-// v2.7 diagnostic dump revealed the real ticket wallet is PremiumCurrency,
-// NOT TicketWallet. PremiumCurrency has:
-//   get_Balance    argc=0 [static]   ← ticket balance getter
-//   set_Balance    argc=1 [static]
-//   Add            argc=1 [static]
-//   TrySpend       argc=1 [static]   ← the REAL deduction method
-//   plus 18 other methods we'd previously only partially used for
-//   Pro/Agent/Triple/Cap unlocks.
+// Prior attempts (hooks) failed:
+//   v2.5.x: hooked TicketWallet.TrySpend* — wrong class (game-ticket API,
+//           not premium). No effect on premium balance.
+//   v2.8:   hooked PremiumCurrency.get_Balance → huge_int and
+//           PremiumCurrency.TrySpend → true. Hooks installed cleanly
+//           but BLANKED the user's cash + ticket balance to 0.
+//           Likely cause: the real return type of get_Balance isn't
+//           plain int (maybe a struct or nullable wrapper), so our
+//           int64 trampoline writes to the wrong register and the UI
+//           reads 0. Or anti-cheat kicked in on save.
 //
-// TicketWallet (which we were hooking in v2.5.x) has 3 methods with
-// argc=2 and was likely the GAME-ticket wallet (different currency).
-// Keep those hooks too — they don't hurt and may still help the
-// game-ticket spend path.
+// v2.9 pivot: INVOKE the game's own Add() method periodically. This
+// uses the normal "earn tickets" code path the game already has — no
+// ABI mismatch risk, no anti-cheat flag, no replaced method bodies.
 //
-// v2.8 strategy (matches iOSGods' "max balance" approach):
-//   - Hook PremiumCurrency.get_Balance → return huge int so every
-//     balance read (UI + internal checks) sees max.
-//   - Hook PremiumCurrency.TrySpend → return true unconditionally
-//     so purchases succeed even if the game bypasses the getter.
-//   - Keep legacy TicketWallet.TrySpend* hooks for game-ticket path.
+//   PremiumCurrency.Add(int)  argc=1 [static]
+//
+// Every 2 seconds while tickets_force=1, invoke Add(100). Net: +50
+// tickets per second. Over 1 min = +3000. Visible, safe, reversible.
+// User can flip the toggle off at any time and the Add stops.
 
 #include "features.h"
 #include "pac_swap.h"
 
-static Il2CppClass *g_wallet = NULL;              // TicketWallet
+#include <sys/time.h>
+
+static Il2CppClass *g_wallet = NULL;              // TicketWallet (legacy)
 static Il2CppClass *g_prem   = NULL;              // PremiumCurrency
-static int g_hooks_installed = 0;
+static const MethodInfo *g_add_mi = NULL;         // PremiumCurrency.Add(int)
+static unsigned long g_last_add_ms = 0;
+
+static unsigned long tickets_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (unsigned long)tv.tv_sec * 1000UL + (unsigned long)(tv.tv_usec / 1000);
+}
 
 static int init(void) {
     g_wallet = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "TicketWallet");
@@ -40,10 +49,17 @@ static int init(void) {
         int mc = pfp_il2cpp_count_methods(g_prem);
         pfp_log("tickets: PremiumCurrency class=%p method_count=%d (premium-ticket balance holder)",
                 (void *)g_prem, mc);
+        g_add_mi = pfp_il2cpp_find_method(g_prem, "Add", 1);
+        if (g_add_mi) {
+            pfp_log("tickets: resolved PremiumCurrency.Add(int) @ %p — will invoke periodically when tickets_force=1",
+                    (const void *)g_add_mi);
+        } else {
+            pfp_log("tickets: PremiumCurrency.Add(int) NOT FOUND — tickets_force cannot top up");
+        }
     } else {
-        pfp_log("tickets: PremiumCurrency NOT FOUND — premium ticket hook disabled");
+        pfp_log("tickets: PremiumCurrency NOT FOUND — premium ticket feature disabled");
     }
-    if (!g_wallet && !g_prem) return -1;
+    if (!g_prem && !g_wallet) return -1;
 
     // v2.8 — hunt the career-player cash wallet. "Unlimited Money"
     // (in the user's canonical feature list) needs a different class
@@ -72,45 +88,37 @@ static int init(void) {
 }
 
 static int tick(void) {
-    if (g_hooks_installed) return 0;
     if (!pfp_cfg_bool("tickets_force", 0)) return 0;
-    // mp_safe shouldn't apply here — currency stores aren't gameplay-
-    // roll surfaces. Server doesn't authority-check them for MP matches.
+    if (!g_add_mi) return 0;
 
-    int installed = 0;
-    void *ti = (void *)pfp_tramp_one_int;
-    void *huge = (void *)pfp_tramp_huge_int;
+    // Throttle: Add(100) every 2000ms. Yields +50/s = ~3000/min.
+    unsigned long now = tickets_now_ms();
+    if (g_last_add_ms && (now - g_last_add_ms) < 2000UL) return 0;
+    g_last_add_ms = now;
 
-    // --- Primary: PremiumCurrency (the real premium ticket wallet) ---
-    // Hook get_Balance → huge: every UI balance read + every internal
-    // affordability check sees max. If TrySpend's body does
-    // "if (get_Balance() >= cost) set_Balance(get_Balance() - cost)",
-    // the first getter returns huge, the second getter also returns
-    // huge (post-decrement would be huge-cost = still huge), so
-    // persistence stays high even if Balance is a real field.
-    if (g_prem) {
-        const MethodInfo *m = pfp_il2cpp_find_method(g_prem, "get_Balance", 0);
-        if (m && pfp_pac_hook_install(m, huge, "tickets.get_Balance")) installed++;
-        // Hook TrySpend → true as insurance for any internal path that
-        // bypasses the getter (direct field access).
-        m = pfp_il2cpp_find_method(g_prem, "TrySpend", 1);
-        if (m && pfp_pac_hook_install(m, ti, "tickets.PremiumCurrency.TrySpend")) installed++;
+    // Invoke PremiumCurrency.Add(int amount). Static method, so self=NULL.
+    // invoke1 boxes the int arg via pfp_il2cpp_runtime_invoke; we pass
+    // a pointer to a local int32 holding our amount.
+    int32_t amount = 100;
+    int ok = 1;
+    pfp_il2cpp_invoke1(g_add_mi, NULL, &amount, &ok);
+    if (!ok) {
+        static int warned = 0;
+        if (!warned) {
+            pfp_log("tickets: PremiumCurrency.Add(%d) invoke threw — disabling", amount);
+            warned = 1;
+            g_add_mi = NULL;
+        }
+        return 0;
     }
 
-    // --- Legacy: TicketWallet (game-ticket API, different currency) ---
-    // These hooks fire for game tickets (earned via play, rewards, ads).
-    if (g_wallet) {
-        const MethodInfo *m = pfp_il2cpp_find_method(g_wallet, "TrySpend", 2);
-        if (m && pfp_pac_hook_install(m, ti, "tickets.TicketWallet.TrySpend")) installed++;
-        m = pfp_il2cpp_find_method(g_wallet, "TrySpendCareer", 2);
-        if (m && pfp_pac_hook_install(m, ti, "tickets.TicketWallet.TrySpendCareer")) installed++;
-        m = pfp_il2cpp_find_method(g_wallet, "CanAffordCareer", 2);
-        if (m && pfp_pac_hook_install(m, ti, "tickets.TicketWallet.CanAffordCareer")) installed++;
+    // Only log occasionally so we don't spam the file.
+    static int fire_count = 0;
+    fire_count++;
+    if (fire_count == 1 || (fire_count % 30) == 0) {
+        pfp_log("tickets: PremiumCurrency.Add(%d) invoked (total fires=%d)", amount, fire_count);
     }
-
-    g_hooks_installed = 1;
-    pfp_log("tickets: installed %d methodPointer hook(s) — premium balance pinned max + every spend succeeds", installed);
-    return installed > 0 ? 1 : 0;
+    return 1;
 }
 
 PfpFeature pfp_feature_tickets = { "tickets", init, tick, 0, 0, 0, 0 };
