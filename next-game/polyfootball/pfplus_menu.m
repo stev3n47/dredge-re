@@ -423,8 +423,8 @@ static void build_panel(id host) {
                               1, 22.0, 1, 1, 1);
     msg1(content, S("addSubview:"), (void *)wordmark);
 
-    // "v2.5.2" version pill — small amber chip to the right of the wordmark.
-    id ver_pill = build_tier_chip("v2.5.2", 0.91, 0.64, 0.24,
+    // "v2.5.3" version pill — small amber chip to the right of the wordmark.
+    id ver_pill = build_tier_chip("v2.5.3", 0.91, 0.64, 0.24,
                                   (CGRect){{side_pad + 92, 24}, {50, 18}});
     msg1(content, S("addSubview:"), (void *)ver_pill);
 
