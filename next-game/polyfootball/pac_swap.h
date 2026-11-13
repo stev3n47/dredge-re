@@ -45,6 +45,11 @@ float   pfp_tramp_zero_float(void);
 float   pfp_tramp_one_float(void);
 int64_t pfp_tramp_zero_int(void);
 int64_t pfp_tramp_one_int(void);
+// v2.5 — "huge" int return for Infinite Save-Cap. Returns 999,999,999
+// which fits both int32 (max ~2.1B) and int64 interpretations of the
+// hooked method's return type. Picked under INT32_MAX so callers that
+// multiply / add won't overflow into negative.
+int64_t pfp_tramp_huge_int(void);
 
 #ifdef __cplusplus
 }

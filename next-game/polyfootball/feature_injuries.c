@@ -87,6 +87,11 @@ static int init(void) {
 static int tick(void) {
     if (g_injuries_hooks_installed) return 0;
     if (!pfp_cfg_bool("injuries_force", 0)) return 0;
+    if (pfp_cfg_bool("mp_safe", 0)) {
+        static int warned = 0;
+        if (!warned) { pfp_log("injuries: mp_safe=1 — install gated"); warned = 1; }
+        return 0;
+    }
     int installed = 0;
     void *tzf = (void *)pfp_tramp_zero_float;
     void *tzi = (void *)pfp_tramp_zero_int;

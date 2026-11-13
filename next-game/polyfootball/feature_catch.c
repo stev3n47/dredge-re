@@ -62,23 +62,35 @@ static int init(void) {
 static int tick(void) {
     if (g_catch_hooks_installed) return 0;
     if (!pfp_cfg_bool("catch_force", 0)) return 0;
+    if (pfp_cfg_bool("mp_safe", 0)) {
+        static int warned = 0;
+        if (!warned) { pfp_log("catch: mp_safe=1 — install gated"); warned = 1; }
+        return 0;
+    }
     int installed = 0;
     void *tof = (void *)pfp_tramp_one_float;
     const char *img = "Assembly-CSharp.dll";
 
     // FootballCatchReach.Confidence(args) → float. Return 1.0 to pin
-    // receiver confidence at the top — Magnet Hands effect.
+    // receiver confidence at the top — base Magnet Hands effect.
     Il2CppClass *k = pfp_il2cpp_find_class(img, NULL, "FootballCatchReach");
     if (k) {
         const MethodInfo *m = pfp_il2cpp_find_method(k, "Confidence", 5);
         if (m && pfp_pac_hook_install(m, tof, "catch.Confidence")) installed++;
+        // v2.4.1 — also hook InFront to always return true. InFront is the
+        // reach check: "is the ball in front of the receiver so they can
+        // catch it?" Pinning it true means even balls that would normally
+        // sail past still register as reachable — closer to the "ball
+        // sticks to hands" feel. argc=3, static; return type is bool/int.
+        const MethodInfo *mi = pfp_il2cpp_find_method(k, "InFront", 3);
+        if (mi && pfp_pac_hook_install(mi, (void *)pfp_tramp_one_int, "catch.InFront")) installed++;
     }
     // FootballCatchStyle.RollState(args) → ? (int enum likely) — skip for
     // now; return value semantics unknown. v2.2.2 can add this after
     // on-device inspection of the Confidence hook's effect.
 
     g_catch_hooks_installed = 1;
-    pfp_log("catch: installed %d methodPointer hook(s) — catch Confidence pinned to 1.0", installed);
+    pfp_log("catch: installed %d methodPointer hook(s) — Confidence=1.0 + InFront=true (magnet hands)", installed);
     return installed > 0 ? 1 : 0;
 }
 

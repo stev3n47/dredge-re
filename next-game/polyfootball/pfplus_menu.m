@@ -1,10 +1,14 @@
-// pfplus_menu.m — v2.4 in-game UIKit overlay menu (premium polish).
+// pfplus_menu.m — v2.4.1 in-game UIKit overlay menu (premium polish).
 //
 // Replaces hand-editing Documents/pfplus.json with a floating panel of
 // UISwitches. Reveal via tap on a floating "PF+" orb pinned to the
 // top-right of the screen. Toggles write directly to the in-memory
 // config (pfp_cfg_set_bool) so the next tick picks them up — no file
 // reload, no app relaunch.
+//
+// v2.4.1: orb is now draggable too. Pan handler moved to gesture.view
+// so it reuses between orb + panel. Added a visible drag handle (grab
+// bar) at the top of the panel so users can see where to drag.
 //
 // Approach: pure ObjC-runtime via objc_msgSend. No SDK headers needed —
 // we forward-declare the ObjC runtime API, then build a dynamic
@@ -120,6 +124,11 @@ struct toggle_def {
 //   T2.5 violet (0.70, 0.61, 0.94)
 //   SAFE red    (0.94, 0.48, 0.48)
 static struct toggle_def g_toggles[] = {
+    // Safety — flip ON before joining multiplayer. Blocks installation
+    // of all physics/offense hooks (tackle/fumbles/injuries/catch/throw/
+    // accuracy). Already-installed hooks from a prior session persist
+    // until next cold boot, so set this before you first enable them.
+    { "mp_safe",        "MP safe mode",     "gates offense hooks for MP",     "SAFE", 0.94,0.48,0.48, nil },
     // Tier 1 — economy (invoke-pattern, already proven)
     { "pro",            "Pro",              "UnlockPro · static",            "T1",  0.37,0.84,0.61, nil },
     { "agent",          "Agent",            "UnlockAgent · static",          "T1",  0.37,0.84,0.61, nil },
@@ -129,7 +138,12 @@ static struct toggle_def g_toggles[] = {
     { "fumbles_force",  "No fumbles",       "FootballFumbleRules · 5 hooks",  "T2",  0.91,0.64,0.24, nil },
     { "injuries_force", "No injuries",      "InjuryCatalog · 4 hooks",        "T2",  0.91,0.64,0.24, nil },
     { "tackle_force",   "Never tackled",    "CarrierMoveRules · 6 hooks",     "T2",  0.91,0.64,0.24, nil },
-    { "catch_force",    "Magnet hands",     "FootballCatchReach · 1 hook",    "T2",  0.91,0.64,0.24, nil },
+    { "catch_force",    "Magnet hands",     "FootballCatchReach · 2 hooks",   "T2",  0.91,0.64,0.24, nil },
+    // Tier 2 — economy/offense (methodPointer swap, v2.5)
+    { "skills_force",   "Free skill points","CareerSkillCosts · Cost+Spent=0","T2",  0.91,0.64,0.24, nil },
+    { "cap_force",      "Infinite save-cap","CareerTeamBudget.Cap · huge int","T2",  0.91,0.64,0.24, nil },
+    { "throw_force",    "Cannon arm",       "ThrowController · PassIsBullet", "T2",  0.91,0.64,0.24, nil },
+    { "accuracy_force", "Perfect accuracy", "ThrowController · spread=0",     "T2",  0.91,0.64,0.24, nil },
 };
 #define NUM_TOGGLES ((int)(sizeof(g_toggles) / sizeof(g_toggles[0])))
 
@@ -227,17 +241,23 @@ static void handler_dumpLog(id self, SEL _cmd, id sender) {
 
 static void handler_pan(id self, SEL _cmd, id gesture) {
     (void)self; (void)_cmd;
-    if (!g_panel || !gesture) return;
-    // CGPoint t = [gesture translationInView:panel.superview];
+    if (!gesture) return;
+    // Use the gesture's own view so one handler drags whatever it's on:
+    // the panel OR the floating orb. This lets us reuse the same handler
+    // for both — no duplicated geometry code.
+    id view = msg0(gesture, S("view"));
+    if (!view) return;
+    id parent = msg0(view, S("superview"));
+    if (!parent) return;
+
     CGPoint t = ((CGPoint (*)(id, SEL, id))objc_msgSend)
-        (gesture, S("translationInView:"), msg0(g_panel, S("superview")));
-    // Add translation to panel.center and zero the gesture.
-    CGPoint c = ((CGPoint (*)(id, SEL))objc_msgSend)(g_panel, S("center"));
+        (gesture, S("translationInView:"), parent);
+    CGPoint c = ((CGPoint (*)(id, SEL))objc_msgSend)(view, S("center"));
     c.x += t.x; c.y += t.y;
-    ((void (*)(id, SEL, CGPoint))objc_msgSend)(g_panel, S("setCenter:"), c);
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(view, S("setCenter:"), c);
     CGPoint zero = {0, 0};
     ((void (*)(id, SEL, CGPoint, id))objc_msgSend)
-        (gesture, S("setTranslation:inView:"), zero, msg0(g_panel, S("superview")));
+        (gesture, S("setTranslation:inView:"), zero, parent);
 }
 
 // --- Panel builder ---------------------------------------------------------
@@ -341,12 +361,21 @@ static id build_action_button(const char *title, double r, double g, double b,
 
 static void build_panel(id host) {
     // Layout constants — mirror the design artifact.
+    // v2.5.1: rows live in a UIScrollView so the panel fits on smaller
+    // phones (iPhone SE ≈ 667pt). Panel height is capped at the host
+    // window's bounds minus 100pt safe margin; the scroll view takes
+    // whatever's between header and footer.
     const double panel_w     = 320.0;
     const double header_h    = 56.0;
-    const double row_h       = 62.0;
+    const double row_h       = 50.0;
     const double footer_h    = 60.0;
     const double side_pad    = 14.0;
-    const double panel_h     = header_h + NUM_TOGGLES * row_h + footer_h;
+    const double desired_h   = header_h + NUM_TOGGLES * row_h + footer_h + 8.0;
+    CGSize host_size_tmp = ((CGRect (*)(id, SEL))objc_msgSend)(host, S("bounds")).size;
+    const double max_h       = host_size_tmp.h - 100.0;
+    const double panel_h     = desired_h < max_h ? desired_h : max_h;
+    const double scroll_h    = panel_h - header_h - footer_h - 8.0;
+    const double scroll_content_h = NUM_TOGGLES * row_h;
 
     // --- Backing: UIVisualEffectView with systemThickMaterialDark blur.
     // UIBlurEffectStyleSystemThickMaterialDark = 15 (iOS 13+). If this
@@ -376,20 +405,32 @@ static void build_panel(id host) {
     id content = msg0(g_panel, S("contentView"));
 
     // --- Header ---
+    // Drag handle "grab bar" — a short pale pill centered at the very
+    // top of the header. Purely visual: hints to the user that the panel
+    // is draggable. The pan gesture is attached to the whole panel below,
+    // so dragging anywhere empty on the header actually moves it.
+    id grab = msg0(msg0((id)C("UIView"), S("alloc")), S("init"));
+    msg_setFrame(grab, (CGRect){{(panel_w - 40) / 2.0, 6}, {40, 4}});
+    msg1(grab, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.35));
+    id grab_layer = msg0(grab, S("layer"));
+    ((void (*)(id, SEL, double))objc_msgSend)(grab_layer, S("setCornerRadius:"), 2.0);
+    msg_setBool(grab_layer, S("setMasksToBounds:"), YES);
+    msg1(content, S("addSubview:"), (void *)grab);
+
     // Bold "PFPlus" wordmark.
-    id wordmark = build_label("PFPlus", (CGRect){{side_pad, 14}, {120, 26}},
+    id wordmark = build_label("PFPlus", (CGRect){{side_pad, 16}, {120, 26}},
                               1, 22.0, 1, 1, 1);
     msg1(content, S("addSubview:"), (void *)wordmark);
 
-    // "v2.4" version pill — small amber chip to the right of the wordmark.
-    id ver_pill = build_tier_chip("v2.4", 0.91, 0.64, 0.24,
-                                  (CGRect){{side_pad + 92, 22}, {44, 18}});
+    // "v2.5.1" version pill — small amber chip to the right of the wordmark.
+    id ver_pill = build_tier_chip("v2.5.1", 0.91, 0.64, 0.24,
+                                  (CGRect){{side_pad + 92, 24}, {50, 18}});
     msg1(content, S("addSubview:"), (void *)ver_pill);
 
     // "×" close button — top-right of the header.
     id close_btn = ((id (*)(Class, SEL, long))objc_msgSend)
         ((id)C("UIButton"), S("buttonWithType:"), 0L);  // Custom
-    msg_setFrame(close_btn, (CGRect){{panel_w - 44, 12}, {32, 32}});
+    msg_setFrame(close_btn, (CGRect){{panel_w - 44, 14}, {32, 32}});
     ((void (*)(id, SEL, void *, long))objc_msgSend)(close_btn, S("setTitle:forState:"),
                                                      (void *)msg_string("×"), 0L);
     ((void (*)(id, SEL, void *, long))objc_msgSend)(close_btn, S("setTitleColor:forState:"),
@@ -418,47 +459,62 @@ static void build_panel(id host) {
     msg1(div, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.15));
     msg1(content, S("addSubview:"), (void *)div);
 
-    // --- Rows ---
-    double y = header_h + 4.0;
+    // --- Scrollable rows container ---
+    // v2.5.1 — a UIScrollView between header and footer holds every
+    // toggle row, so the panel fits SE-sized screens.
+    id scroll = msg0(msg0((id)C("UIScrollView"), S("alloc")), S("init"));
+    msg_setFrame(scroll, (CGRect){{0, header_h}, {panel_w, scroll_h}});
+    ((void (*)(id, SEL, CGSize))objc_msgSend)
+        (scroll, S("setContentSize:"), (CGSize){panel_w, scroll_content_h});
+    msg_setBool(scroll, S("setShowsVerticalScrollIndicator:"), YES);
+    msg_setBool(scroll, S("setBounces:"), YES);
+    // Let the panel's own pan gesture work even when the touch starts
+    // on the scroll view — the recognizer will fail if the user is
+    // flicking the scroll content, so both gestures coexist naturally.
+    msg1(content, S("addSubview:"), (void *)scroll);
+
+    // --- Rows (into the scroll view, origin starts at 4) ---
+    double y = 4.0;
     for (int i = 0; i < NUM_TOGGLES; i++) {
         struct toggle_def *t = &g_toggles[i];
 
         // Tier chip on the left.
         id chip = build_tier_chip(t->tier, t->tr, t->tg, t->tb,
-                                  (CGRect){{side_pad, y + 10}, {36, 18}});
-        msg1(content, S("addSubview:"), (void *)chip);
+                                  (CGRect){{side_pad, y + 8}, {36, 16}});
+        msg1(scroll, S("addSubview:"), (void *)chip);
 
         // Bold row label.
         id lbl = build_label(t->label,
-                             (CGRect){{side_pad + 44, y + 6}, {panel_w - 44 - 80, 22}},
-                             1, 15.0, 0.98, 0.98, 1.0);
-        msg1(content, S("addSubview:"), (void *)lbl);
+                             (CGRect){{side_pad + 44, y + 4}, {panel_w - 44 - 80, 20}},
+                             1, 14.0, 0.98, 0.98, 1.0);
+        msg1(scroll, S("addSubview:"), (void *)lbl);
 
         // Mono meta subline.
         id meta = build_mono_label(t->meta,
-                                   (CGRect){{side_pad + 44, y + 28}, {panel_w - 44 - 80, 16}},
-                                   11.0);
-        msg1(content, S("addSubview:"), (void *)meta);
+                                   (CGRect){{side_pad + 44, y + 24}, {panel_w - 44 - 80, 14}},
+                                   10.0);
+        msg1(scroll, S("addSubview:"), (void *)meta);
 
         // UISwitch on the right.
         BOOL initial = pfp_cfg_bool(t->key, 0) ? YES : NO;
         t->sw = build_switch(t->key, initial,
-                             (CGRect){{panel_w - 51 - side_pad, y + 14}, {51, 31}});
-        msg1(content, S("addSubview:"), (void *)t->sw);
+                             (CGRect){{panel_w - 51 - side_pad, y + 9}, {51, 31}});
+        msg1(scroll, S("addSubview:"), (void *)t->sw);
 
         // Row separator.
         if (i < NUM_TOGGLES - 1) {
             id sep = msg0(msg0((id)C("UIView"), S("alloc")), S("init"));
             msg_setFrame(sep, (CGRect){{side_pad, y + row_h - 1}, {panel_w - 2 * side_pad, 0.5}});
             msg1(sep, S("setBackgroundColor:"), (void *)msg_color_rgba(1, 1, 1, 0.07));
-            msg1(content, S("addSubview:"), (void *)sep);
+            msg1(scroll, S("addSubview:"), (void *)sep);
         }
 
         y += row_h;
     }
 
     // --- Footer action bar ---
-    double footer_y = header_h + NUM_TOGGLES * row_h + 8.0;
+    // v2.5.1 — pinned to the panel's bottom, outside the scroll view.
+    double footer_y = panel_h - footer_h + 8.0;
     double btn_w = (panel_w - 3 * side_pad) / 2.0;
     // Kill All — red (SAFE palette).
     id kill_btn = build_action_button("Kill All", 0.94, 0.48, 0.48,
@@ -518,6 +574,17 @@ static void build_orb(id host) {
     ((void (*)(id, SEL, void *))objc_msgSend)(layer, S("setBorderColor:"), (void *)cg_border);
 
     msg_addTarget(g_orb, g_controller, S("orbTap:"), EV_TOUCH_UP);
+
+    // v2.4.1 — orb is now draggable too. Attach the same pan handler;
+    // the handler uses gesture.view so it drags the orb directly.
+    // Short taps still fire orbTap: because the pan gesture only triggers
+    // once the finger moves far enough — iOS cancels the button's touch
+    // at that moment.
+    id orb_pan = ((id (*)(id, SEL, id, SEL))objc_msgSend)
+        (msg0((id)C("UIPanGestureRecognizer"), S("alloc")),
+         S("initWithTarget:action:"), g_controller, S("pan:"));
+    msg1(g_orb, S("addGestureRecognizer:"), (void *)orb_pan);
+
     msg1(host, S("addSubview:"), (void *)g_orb);
 }
 

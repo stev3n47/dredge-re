@@ -19,6 +19,7 @@
 // pointers touched.
 
 #include "features.h"
+#include "pac_swap.h"
 
 #include <string.h>
 #include <sys/time.h>
@@ -81,7 +82,39 @@ static int init(void) {
     return 0;
 }
 
+static int g_hooks_installed = 0;
+
+static int install_cost_spent_hooks(void) {
+    if (!g_klass) return 0;
+    int installed = 0;
+    void *tz = (void *)pfp_tramp_zero_int;
+
+    // Cost(int skillIdx) → 0 means every skill upgrade is free.
+    const MethodInfo *m_cost = pfp_il2cpp_find_method(g_klass, "Cost", 1);
+    if (m_cost && pfp_pac_hook_install(m_cost, tz, "skills.Cost")) installed++;
+
+    // Spent(int skillIdx) → 0 means "nothing spent so far" — the game's
+    // available = cap - spent math then always yields full budget.
+    const MethodInfo *m_spent = pfp_il2cpp_find_method(g_klass, "Spent", 1);
+    if (m_spent && pfp_pac_hook_install(m_spent, tz, "skills.Spent")) installed++;
+
+    return installed;
+}
+
 static int tick(void) {
+    // v2.5 — install Cost/Spent methodPointer hooks when skills_force=1.
+    // This is the real "free skill points" path: every skill costs 0
+    // and all players read as having spent 0 points, so the available
+    // balance is full.
+    if (!g_hooks_installed && pfp_cfg_bool("skills_force", 0)) {
+        int n = install_cost_spent_hooks();
+        g_hooks_installed = 1;
+        pfp_log("skills: installed %d methodPointer hook(s) — Cost=0, Spent=0 (free skill points)", n);
+        if (n > 0) return 1;
+    }
+
+    // Legacy destructive-reset path kept behind the same flag for the
+    // rare case the pattern-swap misses a build. Harmless when both run.
     if (g_reset_n == 0) return 0;
     // Critic 2: Reset/Clear/Zero-shaped methods on CareerSkillCosts could
     // be destructive (e.g. wipe player progression). Gate the actual

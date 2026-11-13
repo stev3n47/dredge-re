@@ -186,8 +186,12 @@ struct cfg {
     int fumbles_force;      // v2.2.1: install fumble-chance hooks (static methods -> 0)
     int injuries_force;     // v2.2.1: AggravationChance/StaysDown hooks
     int tackle_force;       // v2.2.1: BreakChance/ShoveChance/SpinEscape/AnkleBreak -> 1
-    int catch_force;        // v2.2.1: Confidence -> 1.0
+    int catch_force;        // v2.2.1: Confidence -> 1.0, v2.4.1: + InFront -> true
     int iap_force;          // v2.2.1: reserved for v2.2.2 AppleReceiptParser hook
+    int cap_force;          // v2.5: CareerTeamBudget.Cap -> 999,999,999
+    int throw_force;        // v2.5: ThrowController.get_PassIsBullet -> true (cannon arm)
+    int accuracy_force;     // v2.5: ThrowController.get_ThrowSpreadOnTheRun -> 0
+    int mp_safe;            // v2.5.1: 1 = block physics/offense hook installs (safe for MP)
     // Housekeeping
     int log_each_fire;
     int tick_hz;
@@ -203,6 +207,7 @@ static struct cfg g_cfg = {
     .throw_cannon = 1, .speed = 1,
     .pac = 1, .pac_probe = 0,  // phase 1 always; phase 2 opt-in
     .fumbles_force = 0, .injuries_force = 0, .tackle_force = 0, .catch_force = 0, .iap_force = 0,
+    .cap_force = 0, .throw_force = 0, .accuracy_force = 0, .mp_safe = 0,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
 };
 
@@ -280,6 +285,17 @@ static int pfp_cfg_reload_if_changed(void) {
                     "tackle_force=0\n"
                     "catch_force=0\n"
                     "iap_force=0\n"
+                    "# v2.5 methodPointer swap hooks (opt-in).\n"
+                    "# cap_force=1 → CareerTeamBudget.Cap → 999,999,999 (infinite save-cap)\n"
+                    "# throw_force=1 → ThrowController.get_PassIsBullet → true (cannon arm)\n"
+                    "# accuracy_force=1 → get_ThrowSpreadOnTheRun → 0 (perfect run-throws)\n"
+                    "cap_force=0\n"
+                    "throw_force=0\n"
+                    "accuracy_force=0\n"
+                    "# v2.5.1 — set mp_safe=1 to block install of physics/offense\n"
+                    "# hooks (tackle/fumbles/injuries/catch/throw/accuracy).\n"
+                    "# Flip ON before joining multiplayer to avoid desync/bans.\n"
+                    "mp_safe=0\n"
                     "log_each_fire=0\n"
                     "tick_hz=10\n";
                 (void)write(fd, defaults, strlen(defaults));
@@ -341,6 +357,10 @@ static int pfp_cfg_reload_if_changed(void) {
         else if (!strcmp(k, "tackle_force"))          next.tackle_force = parse_bool_or_int(v, next.tackle_force);
         else if (!strcmp(k, "catch_force"))           next.catch_force = parse_bool_or_int(v, next.catch_force);
         else if (!strcmp(k, "iap_force"))             next.iap_force = parse_bool_or_int(v, next.iap_force);
+        else if (!strcmp(k, "cap_force"))             next.cap_force = parse_bool_or_int(v, next.cap_force);
+        else if (!strcmp(k, "throw_force"))           next.throw_force = parse_bool_or_int(v, next.throw_force);
+        else if (!strcmp(k, "accuracy_force"))        next.accuracy_force = parse_bool_or_int(v, next.accuracy_force);
+        else if (!strcmp(k, "mp_safe"))               next.mp_safe = parse_bool_or_int(v, next.mp_safe);
         else if (!strcmp(k, "log_each_fire"))         next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
         else if (!strcmp(k, "tick_hz")) {
             int hz = atoi(v);
@@ -439,6 +459,10 @@ int pfp_cfg_bool(const char *key, int defval) {
     else if (!strcmp(key, "tackle_force"))   v = g_cfg.tackle_force;
     else if (!strcmp(key, "catch_force"))    v = g_cfg.catch_force;
     else if (!strcmp(key, "iap_force"))      v = g_cfg.iap_force;
+    else if (!strcmp(key, "cap_force"))      v = g_cfg.cap_force;
+    else if (!strcmp(key, "throw_force"))    v = g_cfg.throw_force;
+    else if (!strcmp(key, "accuracy_force")) v = g_cfg.accuracy_force;
+    else if (!strcmp(key, "mp_safe"))        v = g_cfg.mp_safe;
     pthread_mutex_unlock(&g_cfg_mtx);
     return v;
 }
@@ -448,10 +472,77 @@ int pfp_cfg_int(const char *key, int defval) {
     return pfp_cfg_bool(key, defval);
 }
 
+// v2.5.1 — write the full in-memory g_cfg back to Documents/pfplus.json
+// atomically (write to .tmp, rename over the original). Called from
+// pfp_cfg_set_bool so menu toggles survive a cold restart. Must be
+// called WITH g_cfg_mtx held so the snapshot is consistent.
+static void pfp_cfg_save_locked(void) {
+    char path[1024];
+    pfp_resolve_doc_path("pfplus.json", path, sizeof path);
+    char tmp[1024];
+    int tn = snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (tn <= 0 || tn >= (int)sizeof tmp) return;
+
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+
+    // Keep the same layout/comments as the first-run default so edits in
+    // the Files app still read naturally. Order matches the struct for
+    // easy mental diff when debugging.
+    fprintf(f,
+        "# PFPlus config — one key=value per line\n"
+        "# Written by the in-game menu. Hand-edits are preserved across\n"
+        "# restarts; the next menu toggle will re-serialize the file.\n");
+    fprintf(f, "pro=%d\n",                   g_cfg.pro);
+    fprintf(f, "agent=%d\n",                 g_cfg.agent);
+    fprintf(f, "triple_tickets=%d\n",        g_cfg.triple_tickets);
+    fprintf(f, "cap_increase=%d\n",          g_cfg.cap_increase);
+    fprintf(f, "pro_force=%d\n",             g_cfg.pro_force);
+    fprintf(f, "agent_force=%d\n",           g_cfg.agent_force);
+    fprintf(f, "triple_tickets_force=%d\n",  g_cfg.triple_tickets_force);
+    fprintf(f, "cap_increase_force=%d\n",    g_cfg.cap_increase_force);
+    fprintf(f, "money=%d\n",                 g_cfg.money);
+    fprintf(f, "skills=%d\n",                g_cfg.skills);
+    fprintf(f, "skills_force=%d\n",          g_cfg.skills_force);
+    fprintf(f, "iap=%d\n",                   g_cfg.iap);
+    fprintf(f, "sync=%d\n",                  g_cfg.sync);
+    fprintf(f, "fumbles=%d\n",               g_cfg.fumbles);
+    fprintf(f, "injuries=%d\n",              g_cfg.injuries);
+    fprintf(f, "tackle=%d\n",                g_cfg.tackle);
+    fprintf(f, "catch=%d\n",                 g_cfg.catch_hands);
+    fprintf(f, "throw=%d\n",                 g_cfg.throw_cannon);
+    fprintf(f, "speed=%d\n",                 g_cfg.speed);
+    fprintf(f, "pac=%d\n",                   g_cfg.pac);
+    fprintf(f, "pac_probe=%d\n",             g_cfg.pac_probe);
+    fprintf(f, "fumbles_force=%d\n",         g_cfg.fumbles_force);
+    fprintf(f, "injuries_force=%d\n",        g_cfg.injuries_force);
+    fprintf(f, "tackle_force=%d\n",          g_cfg.tackle_force);
+    fprintf(f, "catch_force=%d\n",           g_cfg.catch_force);
+    fprintf(f, "iap_force=%d\n",             g_cfg.iap_force);
+    fprintf(f, "cap_force=%d\n",             g_cfg.cap_force);
+    fprintf(f, "throw_force=%d\n",           g_cfg.throw_force);
+    fprintf(f, "accuracy_force=%d\n",        g_cfg.accuracy_force);
+    fprintf(f, "mp_safe=%d\n",               g_cfg.mp_safe);
+    fprintf(f, "log_each_fire=%d\n",         g_cfg.log_each_fire);
+    fprintf(f, "tick_hz=%d\n",               g_cfg.tick_hz);
+    fflush(f);
+    fclose(f);
+
+    if (rename(tmp, path) == 0) {
+        // Update mtime so the next pfp_cfg_reload_if_changed() sees the
+        // file we just wrote and doesn't replay it back on top of us.
+        struct stat st;
+        if (stat(path, &st) == 0) g_cfg.mtime = st.st_mtime;
+    } else {
+        unlink(tmp);
+    }
+}
+
 // v2.3 — in-memory config write path used by the UIKit menu so toggles
 // take effect immediately without an mtime-based file reload. Uses the
 // same string→field dispatch as pfp_cfg_bool, mutating g_cfg under the
-// mutex. Unknown keys are silently ignored (same as the file parser).
+// mutex. v2.5.1 — also persists to disk via pfp_cfg_save_locked so
+// toggles survive a cold restart.
 void pfp_cfg_set_bool(const char *key, int value) {
     int v = value ? 1 : 0;
     pthread_mutex_lock(&g_cfg_mtx);
@@ -477,6 +568,12 @@ void pfp_cfg_set_bool(const char *key, int value) {
     else if (!strcmp(key, "tackle_force"))   g_cfg.tackle_force = v;
     else if (!strcmp(key, "catch_force"))    g_cfg.catch_force = v;
     else if (!strcmp(key, "iap_force"))      g_cfg.iap_force = v;
+    else if (!strcmp(key, "cap_force"))      g_cfg.cap_force = v;
+    else if (!strcmp(key, "throw_force"))    g_cfg.throw_force = v;
+    else if (!strcmp(key, "accuracy_force")) g_cfg.accuracy_force = v;
+    else if (!strcmp(key, "mp_safe"))        g_cfg.mp_safe = v;
+    // v2.5.1 — persist every change so cold restart gets the same state.
+    pfp_cfg_save_locked();
     pthread_mutex_unlock(&g_cfg_mtx);
 }
 
@@ -718,15 +815,15 @@ static void pfp_periodic_rewalk(void) {
         for (int i = 0; i < ctx.n_sampled; i++) {
             uintptr_t p = (uintptr_t)ctx.sampled_klass[i];
             int ok = (p >= safe_lo && p <= safe_hi);
-            if (ok) {
-                const char *kn = pfp_il2cpp_class_get_name(ctx.sampled_klass[i]);
-                pfp_log("rewalk-sample: [%2d] klass=%p IN-RANGE name=%s",
-                        i, (void *)ctx.sampled_klass[i], kn ? kn : "?");
-                in_range++;
-            } else {
-                pfp_log("rewalk-sample: [%2d] klass=%p OUT-OF-RANGE",
-                        i, (void *)ctx.sampled_klass[i]);
-            }
+            // v2.5.1 — do NOT call class_get_name on a heap-derived klass
+            // pointer, per the SPPlus v33 rule. Even gated by a ±64MB
+            // metadata window, a bogus pointer from a non-managed alloc
+            // can pass and trap inside type->name deref. The pointer
+            // alone + the in-range flag is enough diagnostic signal.
+            pfp_log("rewalk-sample: [%2d] klass=%p %s",
+                    i, (void *)ctx.sampled_klass[i],
+                    ok ? "IN-RANGE" : "OUT-OF-RANGE");
+            if (ok) in_range++;
         }
         if (in_range == 0) {
             pfp_log("rewalk-sample: ZERO in-range klass pointers — "
@@ -1076,7 +1173,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v2.4 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.5.1 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 
