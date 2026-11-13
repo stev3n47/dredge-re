@@ -1,0 +1,124 @@
+name: Build STPlus.dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'next-game/polytopia/STPlus.m'
+      - 'next-game/polytopia/il2cpp_*.h'
+      - 'next-game/polytopia/il2cpp_*.c'
+      - 'next-game/polytopia/feature_*.c'
+      - 'next-game/polytopia/features.h'
+      - 'next-game/polytopia/pac_swap.c'
+      - 'next-game/polytopia/pac_swap.h'
+      - 'next-game/polytopia/stplus_menu.m'
+      - '.github/workflows/build-stplus.yml'
+
+permissions:
+  contents: write
+
+# v2.5.1 — one publish at a time. Two pushes within ~30s used to race
+# the delete+recreate release flow below and could leave the download
+# URL 404ing. Cancel in-flight runs when a newer commit lands; the
+# newer one does the publish.
+concurrency:
+  group: stplus-release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          # Polytopia doesn't ship a SpooferPro-style anti-tamper that
+          # scans for il2cpp_* symbol names (SPPlus had to strip those to
+          # survive). We still hide local symbols for cleanliness but no
+          # post-build grep gate.
+          # v1a.4: add -framework CoreFoundation so kCFRunLoopCommonModes
+          # resolves as an explicit load-command symbol. v1a.3 relied on
+          # flat-namespace dynamic-lookup for the CF globals and hit a subtle
+          # pointer-equality bug: our runtime-created CFString with the same
+          # content as kCFRunLoopCommonModes failed CFRunLoopAddTimer's
+          # pointer check (the compare is literally `modeName == kCF...`),
+          # so the timer was added to a never-serviced mode name.
+          clang -arch arm64 -dynamiclib \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=13.0 \
+            -fno-objc-arc -fblocks -O2 -fno-objc-exceptions \
+            -fvisibility=hidden \
+            -Wl,-undefined,dynamic_lookup -lSystem \
+            -framework CoreFoundation \
+            -Wl,-x -Wl,-unexported_symbol,'*' \
+            -install_name '@executable_path/Frameworks/STPlus.framework/STPlus' \
+            -o STPlus \
+              next-game/polytopia/STPlus.m \
+              next-game/polytopia/stplus_menu.m \
+              next-game/polytopia/il2cpp_bridge.c \
+              next-game/polytopia/pac_swap.c \
+              next-game/polytopia/feature_*.c
+          strip -x STPlus || true
+          file STPlus
+          otool -L STPlus
+          # Real (self-signed) cert — not ad-hoc. Signulous-style re-signers
+          # enumerate nested binaries by their CMS signature; a stripped stub
+          # gets skipped, stays unsigned, and iOS kills the app on launch.
+          openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+            -days 30 -nodes -subj "/CN=STPlus/" \
+            -addext "keyUsage=critical,digitalSignature" \
+            -addext "extendedKeyUsage=critical,codeSigning" \
+            -addext "basicConstraints=critical,CA:FALSE"
+          openssl pkcs12 -export -legacy -out id.p12 -inkey key.pem -in cert.pem -passout pass:temp
+          security create-keychain -p temp t.keychain
+          security default-keychain -s t.keychain
+          security list-keychains -d user -s t.keychain
+          security unlock-keychain -p temp t.keychain
+          security import id.p12 -k t.keychain -P temp -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp t.keychain
+          codesign --force --sign "STPlus" STPlus
+          codesign -dv STPlus 2>&1 | head -5
+      - name: Re-sign + verify like a sideload re-signer
+        run: |
+          codesign --force --sign "STPlus" STPlus
+          codesign -vvv --deep STPlus
+          otool -l STPlus | grep -A4 LC_CODE_SIGNATURE
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: STPlus
+          path: STPlus
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Rolling "stplus-latest" release so the signed dylib is reachable
+          # from a github.com URL — the actions-artifact download redirects to
+          # Azure blob which some proxies block. We overwrite the asset each
+          # successful build so the latest-stable link stays current.
+          TAG="stplus-latest"
+          TITLE="STPlus.dylib · ${GITHUB_SHA::7}"
+          BODY=$(printf 'STPlus arm64 iOS dylib built from %s on %s.\n\nSize: %s bytes.\nIntegrity: %s\n\nUsage: python tools/inject_polytopia.py <Polytopia.ipa> STPlus <out.ipa>; sign with TrollStore/AltStore/SideStore/dev-signed; install.' \
+            "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(stat -f%z STPlus)" "$(shasum -a 256 STPlus | awk '{print $1}')")
+          # v2.5.1 — atomic swap. The old flow did delete→tag→create,
+          # which 404'd the download URL for ~30-60s. Instead:
+          #  1. Move the tag to the new SHA (force-push).
+          #  2. If a release already exists, update metadata + upload
+          #     the asset with --clobber so there's never a gap where
+          #     the asset is missing.
+          #  3. If no release exists (first run), create it.
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push -f origin "$TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "$TITLE" \
+              --notes "$BODY" \
+              --target "$GITHUB_SHA"
+            gh release upload "$TAG" STPlus --clobber
+          else
+            gh release create "$TAG" STPlus \
+              --title "$TITLE" \
+              --notes "$BODY" \
+              --target "$GITHUB_SHA"
+          fi
