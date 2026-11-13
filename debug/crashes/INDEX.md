@@ -100,7 +100,8 @@ can be 0 with no name = anonymous page.
 
 | ver | changes | result | crash signature | notes |
 |-----|---------|--------|-----------------|-------|
-| v1a | first build — PremiumCurrency poll-and-invoke unlocks (pro/agent/triple/cap), 10 Hz tick, GC heap walk for instance, `il2cpp_runtime_invoke` getters/setters | crash | `SIGSEGV` KERN_INVALID_ADDRESS at `0x135` — near-null field read | faulting thread = our tick pthread: `PFPlus+0x5608` → `PFPlus+0x46ec` → `Unity+0x700b24` → `+0x6e06fc` → **`Unity+0x71d9b4`** (frame 0). `pfplus-v1a-PolyFootball-2026-11-12-175228.ips` |
+| v1a | first build — PremiumCurrency poll-and-invoke unlocks (pro/agent/triple/cap), 10 Hz tick, GC heap walk for instance, `il2cpp_runtime_invoke` getters/setters | crash | `SIGSEGV` KERN_INVALID_ADDRESS at `0x135` | `pfplus-v1a-PolyFootball-2026-11-12-175228.ips` |
+| v1a.2 | heap-walk fix (v33 pattern) + write(2) logger + staleness guard | crash — SAME signature | `SIGSEGV` at `0x135`, identical Unity chain | `pfplus-v1a2-PolyFootball-2026-11-12-192122.ips`. **Heap walk was not the fault path** — frames identical: tick pthread → `PFPlus+0x4710` (poll fn) → `+0x5710` = `blr [exports+0x2f0]` → `Unity+0x700b24` → `+0x6e06fc` → `+0x71d9b4` |
 
 ### v1a diagnosis (disasm of PFPlus+0x5608/+0x46ec)
 
@@ -128,3 +129,40 @@ has resumed. Drop `gc_disable`/`gc_enable`. Also note
 `find_method` calls `runtime_class_init` per lookup (bridge.c:210) — static
 ctors run managed code; keep, but know it's an invoke-adjacent surface if
 further crashes stack here.
+
+### v1a.2 re-diagnosis — v1a conclusion was WRONG
+
+v1a.2 removed every il2cpp call from the heap-walk callback and still produced
+the IDENTICAL crash (`pfplus-v1a2-PolyFootball-2026-11-12-192122.ips`):
+tick pthread → poll fn → `blr [exports+0x2f0]` → `Unity+0x700b24` →
+`+0x6e06fc` → `+0x71d9b4` → `0x135`. So the fault was never the walk.
+
+Sharper read from the v1a2 .ips: frame-0 PC `Unity+0x71d9b4` disassembles to
+`ldp x22, x21, [sp], #0x30` — a **stack-pointer-relative load**. A `0x135`
+fault there means **SP itself ≈ 0x12d** — the thread's stack pointer is
+corrupted to a near-zero value, not a heap field deref. That signature fits
+an il2cpp/GC **unregistered-thread** failure on Unity 6: Boehm's GC suspends
+and scans every registered thread; a pthread that isn't GC-registered (or
+whose `il2cpp_thread_attach` hasn't run yet) either gets a bogus
+`thread_state` read or the il2cpp call hits a per-thread-state path that
+longjmps into a dead context.
+
+The crashing export (`[x23+0x2f0]`) is the FIRST il2cpp call the resolver
+makes — `il2cpp_domain_get` (or the `thread_current`/`thread_attach` pair
+right behind it). So on Unity 6000.3.9f1 even `domain_get` is not safe on an
+unattached thread; `thread_attach` in `pfp_il2cpp_init` runs AFTER
+`domain_get` — too late.
+
+**Candidate fixes for v1a.3:**
+1. Marshal `pfp_il2cpp_init` + every tick onto `dispatch_get_main_queue()`
+   (or a CFRunLoop source on the main runloop) — Unity's main thread is
+   always attached. Slowest-path tick work is fine there for a 10 Hz poll;
+   can split: metadata resolve + invokes on main, config reread on pthread.
+2. If the tick must stay on the pthread: call `il2cpp_thread_attach(dom)`
+   but ONLY after confirming on-device whether `domain_get` itself is the
+   crash — if domain_get needs registration first, the chicken-and-egg is
+   real and (1) is the only route.
+3. Cheapest instrumentation: log `resolved %d` + each export's resolved
+   address in `pfplus.log` before first call; if `domain_get`'s entry
+   doesn't match the symtab VMA + slide, the crash is bad resolution, not
+   threading (dlsym-by-name should be right, but verify once).
