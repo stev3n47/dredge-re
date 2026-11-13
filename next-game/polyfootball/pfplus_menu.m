@@ -140,7 +140,8 @@ static struct toggle_def g_toggles[] = {
     { "tackle_force",   "Never tackled",    "CarrierMoveRules · 6 hooks",     "T2",  0.91,0.64,0.24, nil },
     { "catch_force",    "Magnet hands",     "FootballCatchReach · 2 hooks",   "T2",  0.91,0.64,0.24, nil },
     // Tier 2 — economy/offense (methodPointer swap, v2.5)
-    { "skills_force",   "Free skill points","CareerSkillCosts · Cost+Spent=0","T2",  0.91,0.64,0.24, nil },
+    { "tickets_force",  "Unlimited tickets","TicketWallet · TrySpend=true",   "T2",  0.91,0.64,0.24, nil },
+    { "skills_force",   "Free skill points","UI only — use tickets instead",  "T2",  0.91,0.64,0.24, nil },
     { "cap_force",      "Infinite save-cap","CareerTeamBudget.Cap · huge int","T2",  0.91,0.64,0.24, nil },
     { "throw_force",    "Cannon arm",       "ThrowController · PassIsBullet", "T2",  0.91,0.64,0.24, nil },
     { "accuracy_force", "Perfect accuracy", "ThrowController · spread=0",     "T2",  0.91,0.64,0.24, nil },
@@ -422,8 +423,8 @@ static void build_panel(id host) {
                               1, 22.0, 1, 1, 1);
     msg1(content, S("addSubview:"), (void *)wordmark);
 
-    // "v2.5.1" version pill — small amber chip to the right of the wordmark.
-    id ver_pill = build_tier_chip("v2.5.1", 0.91, 0.64, 0.24,
+    // "v2.5.2" version pill — small amber chip to the right of the wordmark.
+    id ver_pill = build_tier_chip("v2.5.2", 0.91, 0.64, 0.24,
                                   (CGRect){{side_pad + 92, 24}, {50, 18}});
     msg1(content, S("addSubview:"), (void *)ver_pill);
 
