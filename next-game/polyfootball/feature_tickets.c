@@ -52,11 +52,14 @@ static int tick(void) {
     int installed = 0;
     void *ti = (void *)pfp_tramp_one_int;
 
-    const MethodInfo *m = pfp_il2cpp_find_method(g_wallet, "TrySpend", 1);
+    // v2.5.3 — on-device logs showed all three methods are argc=2, not
+    // argc=1 as the first-pass code assumed. v2.5.2 found_method returned
+    // NULL for every selector and installed 0 hooks. Fix: search argc=2.
+    const MethodInfo *m = pfp_il2cpp_find_method(g_wallet, "TrySpend", 2);
     if (m && pfp_pac_hook_install(m, ti, "tickets.TrySpend")) installed++;
-    m = pfp_il2cpp_find_method(g_wallet, "TrySpendCareer", 1);
+    m = pfp_il2cpp_find_method(g_wallet, "TrySpendCareer", 2);
     if (m && pfp_pac_hook_install(m, ti, "tickets.TrySpendCareer")) installed++;
-    m = pfp_il2cpp_find_method(g_wallet, "CanAffordCareer", 1);
+    m = pfp_il2cpp_find_method(g_wallet, "CanAffordCareer", 2);
     if (m && pfp_pac_hook_install(m, ti, "tickets.CanAffordCareer")) installed++;
 
     g_hooks_installed = 1;

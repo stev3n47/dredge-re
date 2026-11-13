@@ -50,25 +50,29 @@ static int init(void) {
     }
     pfp_log("skills: CareerSkillCosts class=%p (expect 5 methods per catalog m9231)", (void *)g_klass);
 
-    // v2.5.2 — Cost/Spent on CareerSkillCosts only drives the UI cost
-    // display. The actual skill-point deduction on upgrade uses a
-    // different ledger class (user report: hooks installed, point still
-    // decremented on upgrade). Scan Assembly-CSharp for classes whose
-    // names match plausible ledger patterns and dump their methods so
-    // the next device log tells us the right hook target for v2.5.3.
+    // v2.5.3 — the v2.5.2 scan with Skill/Ledger/Wallet substrings
+    // returned 0 matches on-device. Cast a much wider net: any class
+    // containing Skill/Upgrade/Token/Credit/Attribute/Ability/Perk/
+    // Boost/Advance/Progress/Tree/Pool/Level. Dump ALL methods on each
+    // hit (NULL substr list) so we see the full shape.
     {
         static const char *scan_subs[] = {
-            "SkillPoint", "SkillBank", "SkillBalance", "SkillLedger",
-            "PlayerSkill", "CareerUpgrade", "SkillUpgrade", "PlayerUpgrade",
-            "SkillWallet", "SkillTransaction", "SkillSpend",
+            "Skill",      "Upgrade",    "Token",      "Credit",
+            "Attribute",  "Ability",    "Perk",       "Boost",
+            "Advance",    "Progress",   "Tree",       "Pool",
+            "Level",      "Point",      "Ledger",     "Bank",
+            "Balance",    "Spend",
         };
         const int nsubs = (int)(sizeof(scan_subs) / sizeof(scan_subs[0]));
-        Il2CppClass *hits[16];
-        int n = pfp_find_classes_by_name(scan_subs, nsubs, hits, 16);
-        pfp_log("skills: v2.5.3-scan — %d class(es) match skill-ledger patterns", n);
+        Il2CppClass *hits[64];
+        int n = pfp_find_classes_by_name(scan_subs, nsubs, hits, 64);
+        pfp_log("skills: v2.5.3-scan — %d class(es) match wide ledger patterns", n);
+        // Filter method names to spend/transaction-shaped to keep log
+        // volume manageable — a ledger WILL have at least one of these.
         static const char *method_subs[] = {
             "Spend", "Afford", "Available", "Balance", "Add", "Grant",
-            "Consume", "Decrement", "Debit", "Credit",
+            "Consume", "Decrement", "Debit", "Credit", "Apply",
+            "Upgrade", "Purchase", "Buy", "Cost", "Use",
         };
         const int nms = (int)(sizeof(method_subs) / sizeof(method_subs[0]));
         for (int i = 0; i < n; i++) {

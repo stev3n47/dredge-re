@@ -15,7 +15,11 @@
 // unknown parent class).
 
 #include "features.h"
+#include "pac_swap.h"
 #include <string.h>
+
+static Il2CppClass *g_throw_class_for_speed = NULL;
+static int g_speed_hooks_installed = 0;
 
 static Il2CppClass *g_carrier_move_controls   = NULL;
 static Il2CppClass *g_joystick_locomotion     = NULL;
@@ -121,6 +125,9 @@ static int init(void) {
     pfp_register_rewalk("speed", g_joystick_locomotion);
     pfp_register_rewalk("speed", g_defense_speeds);
 
+    // v2.6 — resolve ThrowController too for QB pocket-move speed hook.
+    g_throw_class_for_speed = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "ThrowController");
+
     // Critic 6: distinguish "working" from "completely missed all targets"
     // in the status log. Return -1 on total miss so init_failed shows 'x'.
     if (total_hits == 0) {
@@ -131,7 +138,39 @@ static int init(void) {
 }
 
 static int tick(void) {
-    return 0;  // diagnostic only — one-shot init, no per-tick work
+    // v2.6 — Super Speed: hook the AnimatorSpeed scalar on
+    // FootballJoystickLocomotion plus the pocket-move multiplier on
+    // ThrowController. Both return float speed multipliers (typically
+    // ~1.0); pinning them to 2.0 roughly doubles the player's run+turn
+    // and the QB's scrambling speed.
+    if (g_speed_hooks_installed) return 0;
+    if (!pfp_cfg_bool("speed_force", 0)) return 0;
+    if (pfp_cfg_bool("mp_safe", 0)) {
+        static int warned = 0;
+        if (!warned) { pfp_log("speed: mp_safe=1 — install gated"); warned = 1; }
+        return 0;
+    }
+
+    int installed = 0;
+    void *tf2 = (void *)pfp_tramp_two_float;
+
+    if (g_joystick_locomotion) {
+        const MethodInfo *m = pfp_il2cpp_find_method(g_joystick_locomotion,
+                                                     "AnimatorSpeed", 5);
+        if (m && pfp_pac_hook_install(m, tf2, "speed.AnimatorSpeed")) installed++;
+    }
+
+    if (g_throw_class_for_speed) {
+        const MethodInfo *m = pfp_il2cpp_find_method(
+            g_throw_class_for_speed,
+            "GetPocketMoveSpeedMultiplierForCurrentCareerArchetype",
+            0);
+        if (m && pfp_pac_hook_install(m, tf2, "speed.PocketMoveSpeedMultiplier")) installed++;
+    }
+
+    g_speed_hooks_installed = 1;
+    pfp_log("speed: installed %d methodPointer hook(s) — AnimatorSpeed + PocketMoveSpeedMultiplier pinned to 2.0 (super speed)", installed);
+    return installed > 0 ? 1 : 0;
 }
 
 PfpFeature pfp_feature_speed = { "speed", init, tick, 0, 0, 0, 0 };

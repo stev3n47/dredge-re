@@ -145,6 +145,7 @@ static struct toggle_def g_toggles[] = {
     { "cap_force",      "Infinite save-cap","CareerTeamBudget.Cap · huge int","T2",  0.91,0.64,0.24, nil },
     { "throw_force",    "Cannon arm",       "ThrowController · PassIsBullet", "T2",  0.91,0.64,0.24, nil },
     { "accuracy_force", "Perfect accuracy", "ThrowController · spread=0",     "T2",  0.91,0.64,0.24, nil },
+    { "speed_force",    "Super speed",      "AnimatorSpeed · ×2.0",           "T2",  0.91,0.64,0.24, nil },
 };
 #define NUM_TOGGLES ((int)(sizeof(g_toggles) / sizeof(g_toggles[0])))
 
@@ -423,9 +424,9 @@ static void build_panel(id host) {
                               1, 22.0, 1, 1, 1);
     msg1(content, S("addSubview:"), (void *)wordmark);
 
-    // "v2.5.2" version pill — small amber chip to the right of the wordmark.
-    id ver_pill = build_tier_chip("v2.5.2", 0.91, 0.64, 0.24,
-                                  (CGRect){{side_pad + 92, 24}, {50, 18}});
+    // "v2.6" version pill — small amber chip to the right of the wordmark.
+    id ver_pill = build_tier_chip("v2.6", 0.91, 0.64, 0.24,
+                                  (CGRect){{side_pad + 92, 24}, {44, 18}});
     msg1(content, S("addSubview:"), (void *)ver_pill);
 
     // "×" close button — top-right of the header.
