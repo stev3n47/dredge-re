@@ -160,15 +160,23 @@ struct cfg {
     int agent;
     int triple_tickets;
     int cap_increase;
+    // *_force: skip the getter check, re-invoke the setter every second.
+    // Useful when a getter lies (returns "already true" for a reason other
+    // than the user owning it — e.g. capability-exposed flag vs purchased
+    // flag). Setter invocations are static and cheap.
+    int pro_force;
+    int agent_force;
+    int triple_tickets_force;
+    int cap_increase_force;
     int log_each_fire;
     int tick_hz;
-    // Observability
     time_t mtime;
     int    loaded_ok;
 };
 
 static struct cfg g_cfg = {
     .pro = 1, .agent = 1, .triple_tickets = 1, .cap_increase = 1,
+    .pro_force = 0, .agent_force = 0, .triple_tickets_force = 0, .cap_increase_force = 0,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
 };
 
@@ -209,6 +217,13 @@ static int pfp_cfg_reload_if_changed(void) {
                     "agent=1\n"
                     "triple_tickets=1\n"
                     "cap_increase=1\n"
+                    "# Set <feature>_force=1 to re-invoke the setter every tick\n"
+                    "# even when the getter says the state is already unlocked.\n"
+                    "# Useful if a getter returns true for reasons other than ownership.\n"
+                    "pro_force=0\n"
+                    "agent_force=0\n"
+                    "triple_tickets_force=0\n"
+                    "cap_increase_force=0\n"
                     "log_each_fire=0\n"
                     "tick_hz=10\n";
                 (void)write(fd, defaults, strlen(defaults));
@@ -244,11 +259,15 @@ static int pfp_cfg_reload_if_changed(void) {
         while (e > k && (e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
         char *ve = v + strlen(v);
         while (ve > v && (ve[-1] == '\n' || ve[-1] == '\r' || ve[-1] == ' ' || ve[-1] == '\t')) *--ve = 0;
-        if      (!strcmp(k, "pro"))            next.pro = parse_bool_or_int(v, next.pro);
-        else if (!strcmp(k, "agent"))          next.agent = parse_bool_or_int(v, next.agent);
-        else if (!strcmp(k, "triple_tickets")) next.triple_tickets = parse_bool_or_int(v, next.triple_tickets);
-        else if (!strcmp(k, "cap_increase"))   next.cap_increase = parse_bool_or_int(v, next.cap_increase);
-        else if (!strcmp(k, "log_each_fire"))  next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
+        if      (!strcmp(k, "pro"))                   next.pro = parse_bool_or_int(v, next.pro);
+        else if (!strcmp(k, "agent"))                 next.agent = parse_bool_or_int(v, next.agent);
+        else if (!strcmp(k, "triple_tickets"))        next.triple_tickets = parse_bool_or_int(v, next.triple_tickets);
+        else if (!strcmp(k, "cap_increase"))          next.cap_increase = parse_bool_or_int(v, next.cap_increase);
+        else if (!strcmp(k, "pro_force"))             next.pro_force = parse_bool_or_int(v, next.pro_force);
+        else if (!strcmp(k, "agent_force"))           next.agent_force = parse_bool_or_int(v, next.agent_force);
+        else if (!strcmp(k, "triple_tickets_force")) next.triple_tickets_force = parse_bool_or_int(v, next.triple_tickets_force);
+        else if (!strcmp(k, "cap_increase_force"))   next.cap_increase_force = parse_bool_or_int(v, next.cap_increase_force);
+        else if (!strcmp(k, "log_each_fire"))         next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
         else if (!strcmp(k, "tick_hz")) {
             int hz = atoi(v);
             if (hz < 1) hz = 1;
@@ -261,8 +280,11 @@ static int pfp_cfg_reload_if_changed(void) {
     next.loaded_ok = 1;
     g_cfg = next;
     pthread_mutex_unlock(&g_cfg_mtx);
-    pfp_log("cfg: reloaded (pro=%d agent=%d triple=%d cap=%d tick_hz=%d log=%d)",
-            next.pro, next.agent, next.triple_tickets, next.cap_increase,
+    pfp_log("cfg: reloaded (pro=%d/f%d agent=%d/f%d triple=%d/f%d cap=%d/f%d tick_hz=%d log=%d)",
+            next.pro, next.pro_force,
+            next.agent, next.agent_force,
+            next.triple_tickets, next.triple_tickets_force,
+            next.cap_increase, next.cap_increase_force,
             next.tick_hz, next.log_each_fire);
     return 1;
 }
@@ -300,6 +322,17 @@ static int cfg_flag_for(const char *key) {
     else if (!strcmp(key, "agent"))          v = g_cfg.agent;
     else if (!strcmp(key, "triple_tickets")) v = g_cfg.triple_tickets;
     else if (!strcmp(key, "cap_increase"))   v = g_cfg.cap_increase;
+    pthread_mutex_unlock(&g_cfg_mtx);
+    return v;
+}
+
+static int cfg_force_for(const char *key) {
+    pthread_mutex_lock(&g_cfg_mtx);
+    int v = 0;
+    if      (!strcmp(key, "pro"))            v = g_cfg.pro_force;
+    else if (!strcmp(key, "agent"))          v = g_cfg.agent_force;
+    else if (!strcmp(key, "triple_tickets")) v = g_cfg.triple_tickets_force;
+    else if (!strcmp(key, "cap_increase"))   v = g_cfg.cap_increase_force;
     pthread_mutex_unlock(&g_cfg_mtx);
     return v;
 }
@@ -416,8 +449,13 @@ static void tick_once(void) {
         if (!cfg_flag_for(g_hooks[i].key)) continue;
         if (!g_hooks[i].s_mi) continue;
 
+        int force = cfg_force_for(g_hooks[i].key);
         int should_set = 1;
         int prev_state = g_hooks[i].last_getter_state;
+
+        // Always consult the getter (even in force mode) so we still log
+        // drift and know the game's view of state. Force mode just means
+        // "invoke setter anyway, throttled to 1Hz".
         if (g_hooks[i].g_mi) {
             void *g_self = g_hooks[i].g_static ? NULL : inst;
             int ok = 1;
@@ -433,12 +471,20 @@ static void tick_once(void) {
                         g_hooks[i].key, g_hooks[i].fires);
             }
             g_hooks[i].last_getter_state = cur;
-            should_set = !cur;
+            if (!force) should_set = !cur;
         } else {
             unsigned long t = now_ms();
-            if (g_hooks[i].last_tick_ms && (t - g_hooks[i].last_tick_ms) < 60000UL) {
+            unsigned long throttle = force ? 1000UL : 60000UL;
+            if (g_hooks[i].last_tick_ms && (t - g_hooks[i].last_tick_ms) < throttle) {
                 should_set = 0;
             }
+        }
+
+        // In force mode, throttle setter to once per second so we don't
+        // 10 Hz spam for no diagnostic value.
+        if (force && g_hooks[i].last_tick_ms &&
+            (now_ms() - g_hooks[i].last_tick_ms) < 1000UL) {
+            should_set = 0;
         }
 
         if (!should_set) continue;
@@ -469,12 +515,16 @@ static void tick_once(void) {
 }
 
 // Status dump — every 30s log the state so the log is useful without
-// log_each_fire=1.
+// log_each_fire=1. Format: `<key>=<fires>/<last_getter_state>` where
+// last_getter_state is T (true), F (false), or ? (never observed).
 static void status_dump(void) {
     char line[512];
     int w = snprintf(line, sizeof line, "status:");
     for (int i = 0; i < NUM_HOOKS; i++) {
-        int n = snprintf(line + w, sizeof(line) - w, " %s=%lu", g_hooks[i].key, g_hooks[i].fires);
+        char g = (g_hooks[i].last_getter_state == 1) ? 'T' :
+                 (g_hooks[i].last_getter_state == 0) ? 'F' : '?';
+        int n = snprintf(line + w, sizeof(line) - w, " %s=%lu/%c",
+                         g_hooks[i].key, g_hooks[i].fires, g);
         if (n < 0 || (size_t)n >= sizeof(line) - w) break;
         w += n;
     }
@@ -532,7 +582,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v1a.5 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v1a.6 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 
