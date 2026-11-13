@@ -365,25 +365,15 @@ static void stp_cfg_save_locked(void) {
     FILE *f = fopen(tmp, "w");
     if (!f) return;
 
-    fprintf(f,
-        "# STPlus config — one key=value per line
-"
-        "# Written by the in-game menu. Hand-edits are preserved across
-"
-        "# restarts; the next menu toggle will re-serialize the file.
-");
-    fprintf(f, "tribes=%d
-",       g_cfg.tribes);
-    fprintf(f, "skins=%d
-",        g_cfg.skins);
-    fprintf(f, "stars=%d
-",        g_cfg.stars);
-    fprintf(f, "mp_safe=%d
-",      g_cfg.mp_safe);
-    fprintf(f, "log_each_fire=%d
-",g_cfg.log_each_fire);
-    fprintf(f, "tick_hz=%d
-",      g_cfg.tick_hz);
+    fprintf(f, "# STPlus config -- one key=value per line%c", 10);
+    fprintf(f, "# Written by the in-game menu. Hand-edits are preserved%c", 10);
+    fprintf(f, "# across restarts; the next menu toggle re-serializes.%c", 10);
+    fprintf(f, "tribes=%d%c",        g_cfg.tribes,        10);
+    fprintf(f, "skins=%d%c",         g_cfg.skins,         10);
+    fprintf(f, "stars=%d%c",         g_cfg.stars,         10);
+    fprintf(f, "mp_safe=%d%c",       g_cfg.mp_safe,       10);
+    fprintf(f, "log_each_fire=%d%c", g_cfg.log_each_fire, 10);
+    fprintf(f, "tick_hz=%d%c",       g_cfg.tick_hz,       10);
     fclose(f);
     if (rename(tmp, path) != 0) {
         stp_log("cfg: save failed -- rename %s -> %s errno=%d", tmp, path, errno);
