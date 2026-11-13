@@ -50,33 +50,33 @@ static int init(void) {
     }
     pfp_log("skills: CareerSkillCosts class=%p (expect 5 methods per catalog m9231)", (void *)g_klass);
 
-    // v2.5.3 — the v2.5.2 scan with Skill/Ledger/Wallet substrings
-    // returned 0 matches on-device. Cast a much wider net: any class
-    // containing Skill/Upgrade/Token/Credit/Attribute/Ability/Perk/
-    // Boost/Advance/Progress/Tree/Pool/Level. Dump ALL methods on each
-    // hit (NULL substr list) so we see the full shape.
+    // v2.7 — hunt the balance class directly (iOSGods-style setter path).
+    // v2.5.3 scan found 43 class name matches but only 9 methods matched
+    // the inner filter, hiding most classes. Now: log every matched
+    // class NAME (so we see all 43), then dump ALL methods on each
+    // (NULL filter). High log volume but gives us the full picture
+    // for v2.8 hook targeting.
     {
         static const char *scan_subs[] = {
             "Skill",      "Upgrade",    "Token",      "Credit",
             "Attribute",  "Ability",    "Perk",       "Boost",
             "Advance",    "Progress",   "Tree",       "Pool",
             "Level",      "Point",      "Ledger",     "Bank",
-            "Balance",    "Spend",
+            "Balance",    "Spend",      "Xp",
         };
         const int nsubs = (int)(sizeof(scan_subs) / sizeof(scan_subs[0]));
         Il2CppClass *hits[64];
         int n = pfp_find_classes_by_name(scan_subs, nsubs, hits, 64);
-        pfp_log("skills: v2.5.3-scan — %d class(es) match wide ledger patterns", n);
-        // Filter method names to spend/transaction-shaped to keep log
-        // volume manageable — a ledger WILL have at least one of these.
-        static const char *method_subs[] = {
-            "Spend", "Afford", "Available", "Balance", "Add", "Grant",
-            "Consume", "Decrement", "Debit", "Credit", "Apply",
-            "Upgrade", "Purchase", "Buy", "Cost", "Use",
-        };
-        const int nms = (int)(sizeof(method_subs) / sizeof(method_subs[0]));
+        pfp_log("skills: v2.7-scan — %d class(es) match wide ledger patterns", n);
         for (int i = 0; i < n; i++) {
-            pfp_diag_log_methods("skills-scan", hits[i], method_subs, nms);
+            const char *kn = pfp_il2cpp_class_get_name
+                ? pfp_il2cpp_class_get_name(hits[i]) : NULL;
+            int mc = pfp_il2cpp_count_methods(hits[i]);
+            pfp_log("skills-scan: [%2d] class=%s @ %p methods=%d",
+                    i, kn ? kn : "?", (void *)hits[i], mc);
+            // Dump every method (NULL/0 = all). Hits max 64 and most
+            // classes have < 20 methods, so bounded output.
+            pfp_diag_log_methods("skills-scan", hits[i], NULL, 0);
         }
     }
 

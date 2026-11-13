@@ -38,6 +38,39 @@ static int init(void) {
     static const char *subs[] = { "Spend", "Afford" };
     pfp_diag_log_methods("tickets", g_wallet, subs,
                          (int)(sizeof(subs) / sizeof(subs[0])));
+
+    // v2.7 — hunt the balance holder. TicketWallet only has 3 methods
+    // (TrySpend/CanAffordCareer/TrySpendCareer), so the balance isn't
+    // on this class. Likely lives on PremiumCurrency (we already
+    // resolve 4 of its 22 methods — dump the other 18) and/or on a
+    // class whose name contains Ticket/Money/Cash/Currency.
+    Il2CppClass *prem = pfp_il2cpp_find_class("Assembly-CSharp.dll", NULL, "PremiumCurrency");
+    if (prem) {
+        pfp_log("tickets: v2.7-dump — PremiumCurrency all methods (unfiltered):");
+        pfp_diag_log_methods("tickets-prem", prem, NULL, 0);
+    }
+
+    // Broad class-name scan: anything matching Ticket/Money/Cash/
+    // Currency/Wallet/Balance/Premium in Assembly-CSharp. Dump every
+    // method on each hit so we can spot a get_Balance / get_Tickets /
+    // AddTickets shape in the next device log.
+    static const char *bal_subs[] = {
+        "Ticket", "Money", "Cash", "Currency", "Wallet",
+        "Balance", "Premium",
+    };
+    Il2CppClass *bal_hits[32];
+    int bn = pfp_find_classes_by_name(bal_subs,
+                                       (int)(sizeof(bal_subs) / sizeof(bal_subs[0])),
+                                       bal_hits, 32);
+    pfp_log("tickets: v2.7-scan — %d balance-class candidate(s)", bn);
+    for (int i = 0; i < bn; i++) {
+        const char *kn = pfp_il2cpp_class_get_name
+            ? pfp_il2cpp_class_get_name(bal_hits[i]) : NULL;
+        int cmc = pfp_il2cpp_count_methods(bal_hits[i]);
+        pfp_log("tickets-scan: [%2d] class=%s @ %p methods=%d",
+                i, kn ? kn : "?", (void *)bal_hits[i], cmc);
+        pfp_diag_log_methods("tickets-scan", bal_hits[i], NULL, 0);
+    }
     return 0;
 }
 
