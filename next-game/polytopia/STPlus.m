@@ -795,9 +795,23 @@ static int safe_read(const void *addr, void *buf, unsigned long n) {
 }
 
 // Returns &vtable[i].methodPtr on success.
+//
+// v1.0.1 crash fix: the original matcher accepted ANY {ptr, mi} pair —
+// but klass->methods is an array of consecutive MethodInfo*, where the
+// pair {methods[i-1], methods[i]} ALSO satisfies it. We "patched"
+// methods[i-1] with our trampoline; the next class_get_method_from_name
+// dereferenced the trampoline as a MethodInfo -> read its machine code
+// (stp;ret = 0xa9be4ff4d65f03c0) as a pointer -> KERN_INVALID crash in
+// UnityFramework. Airtight fix: a real VirtualInvokeData entry for this
+// method holds the method's own CODE pointer — mi[0] (methodPointer) or
+// mi[1] (virtualMethodPointer). Require BOTH ent.method==mi AND
+// ent.methodPtr==mi[0]/mi[1]. A MethodInfo* can never equal a code ptr.
 static void **find_vtable_slot(Il2CppClass *klass, const MethodInfo *mi) {
     void *kp[64];
     if (!safe_read(klass, kp, sizeof kp)) return NULL;
+    const void * const *mp = (const void * const *)mi;
+    const void *code0 = mp[0];               // methodPointer
+    const void *code1 = mp[1];               // virtualMethodPointer
     for (int f = 0; f < 64; f++) {
         void *cand = kp[f];
         if (!cand) continue;
@@ -807,7 +821,8 @@ static void **find_vtable_slot(Il2CppClass *klass, const MethodInfo *mi) {
             if (!ent.methodPtr && !ent.method) break;   // vtables end {NULL,NULL}
             if (((unsigned long)ent.method & 0x7) ||
                 ((unsigned long)ent.methodPtr & 0x7)) break;  // not a ptr pair
-            if (ent.method == mi) {
+            if (ent.method == mi &&
+                (ent.methodPtr == code0 || ent.methodPtr == code1)) {
                 return (void **)((char *)cand + i * sizeof ent);
             }
         }
@@ -970,7 +985,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void stp_ctor(void) {
-    stp_log("boot: STPlus v1.0 up · target com.felixrum.supertribes 2.18.0 · Unity 6 / metadata v39");
+    stp_log("boot: STPlus v1.0.1 up · target com.felixrum.supertribes 2.18.0 · Unity 6 / metadata v39");
     stp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     stp_cfg_reload_if_changed();
 

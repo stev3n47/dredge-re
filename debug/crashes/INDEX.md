@@ -166,3 +166,13 @@ unattached thread; `thread_attach` in `pfp_il2cpp_init` runs AFTER
    address in `pfplus.log` before first call; if `domain_get`'s entry
    doesn't match the symtab VMA + slide, the crash is bad resolution, not
    threading (dlsym-by-name should be right, but verify once).
+
+## Polytopia-2026-11-13-134840.ips — STPlus v1.0 (vtable false-positive)
+SIGSEGV KERN_INVALID at 0xa9be4ff4d65f03c0 (machine-code bytes as address).
+Stack: CFRunLoopTimer -> STPlus+0x5348 (bl -> il2cpp export) -> Unity+0x2a6a20.
+Root cause: find_vtable_slot matched {methods[i-1], methods[i]==mi} INSIDE
+klass->methods (consecutive MethodInfo* array). Patching "methodPtr" wrote
+our trampoline over methods[i-1]; next class_get_method_from_name derefed
+the tramp as MethodInfo -> read its code bytes as a field -> crash.
+Fix (v1.0.1): require ent.methodPtr == mi[0] (methodPointer) or mi[1]
+(virtualMethodPointer) — a MethodInfo* can never equal a code pointer.
