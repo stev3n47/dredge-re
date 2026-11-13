@@ -278,14 +278,19 @@ struct hook {
     unsigned long fires;
     unsigned long last_tick_ms;
     int last_getter_state; // -1 unknown, 0 false, 1 true — for drift log
+    int g_static;          // getter is static (self=NULL at invoke)
+    int s_static;          // setter is static (self=NULL at invoke)
 };
 
 static struct hook g_hooks[] = {
-    { "pro",            "get_HasPro",               "UnlockPro",              NULL, NULL, 0, 0, -1 },
-    { "agent",          "get_HasAgent",             "UnlockAgent",            NULL, NULL, 0, 0, -1 },
-    { "triple_tickets", "get_HasTripleTicketBoost", "UnlockTripleTicketBoost",NULL, NULL, 0, 0, -1 },
-    { "cap_increase",   "get_HasCapIncrease",       "UnlockCapIncrease",      NULL, NULL, 0, 0, -1 },
+    { "pro",            "get_HasPro",               "UnlockPro",              NULL, NULL, 0, 0, -1, 0, 0 },
+    { "agent",          "get_HasAgent",             "UnlockAgent",            NULL, NULL, 0, 0, -1, 0, 0 },
+    { "triple_tickets", "get_HasTripleTicketBoost", "UnlockTripleTicketBoost",NULL, NULL, 0, 0, -1, 0, 0 },
+    { "cap_increase",   "get_HasCapIncrease",       "UnlockCapIncrease",      NULL, NULL, 0, 0, -1, 0, 0 },
 };
+
+// METHOD_ATTRIBUTE_STATIC = 0x0010 (mono/ECMA attribute table)
+#define PFP_METHOD_STATIC 0x0010
 static const int NUM_HOOKS = sizeof(g_hooks) / sizeof(g_hooks[0]);
 
 static int cfg_flag_for(const char *key) {
@@ -340,8 +345,32 @@ static int resolve_premium_class_and_methods(void) {
     for (int i = 0; i < NUM_HOOKS; i++) {
         g_hooks[i].g_mi = pfp_il2cpp_find_method(k, g_hooks[i].getter, 0);
         g_hooks[i].s_mi = pfp_il2cpp_find_method(k, g_hooks[i].setter, 0);
-        pfp_log("resolve: %-24s getter=%p setter=%p",
-                g_hooks[i].key, (void *)g_hooks[i].g_mi, (void *)g_hooks[i].s_mi);
+        if (pfp_il2cpp_method_get_flags) {
+            uint32_t iflags = 0;
+            if (g_hooks[i].g_mi) {
+                uint32_t f = pfp_il2cpp_method_get_flags(g_hooks[i].g_mi, &iflags);
+                g_hooks[i].g_static = (f & PFP_METHOD_STATIC) ? 1 : 0;
+            }
+            if (g_hooks[i].s_mi) {
+                uint32_t f = pfp_il2cpp_method_get_flags(g_hooks[i].s_mi, &iflags);
+                g_hooks[i].s_static = (f & PFP_METHOD_STATIC) ? 1 : 0;
+            }
+        }
+        pfp_log("resolve: %-24s getter=%p%s setter=%p%s",
+                g_hooks[i].key,
+                (void *)g_hooks[i].g_mi, g_hooks[i].g_static ? " [static]" : "",
+                (void *)g_hooks[i].s_mi, g_hooks[i].s_static ? " [static]" : "");
+    }
+
+    // If every hook's setter is static, we don't need an instance — skip
+    // heap-walk entirely. Log that as a one-liner so we know we took the
+    // fast path.
+    int all_static = 1;
+    for (int i = 0; i < NUM_HOOKS; i++) {
+        if (g_hooks[i].s_mi && !g_hooks[i].s_static) { all_static = 0; break; }
+    }
+    if (all_static) {
+        pfp_log("resolve: all setters are STATIC — no instance needed, skipping heap walk");
     }
     return 1;
 }
@@ -360,15 +389,26 @@ static void tick_once(void) {
     if (!pfp_il2cpp_ready()) return;
     if (!resolve_premium_class_and_methods()) return;
 
-    void *inst = resolve_premium_instance();
-    if (!inst) {
-        static unsigned long last_warn = 0;
-        unsigned long t = now_ms();
-        if (t - last_warn > 10000) {
-            pfp_log("tick: no PremiumCurrency instance yet (menu probably not loaded)");
-            last_warn = t;
+    // Only fetch the instance if ANY enabled hook has a non-static method.
+    // All-static case (common C# singleton pattern) skips the heap walk.
+    int need_inst = 0;
+    for (int i = 0; i < NUM_HOOKS; i++) {
+        if (!cfg_flag_for(g_hooks[i].key)) continue;
+        if (g_hooks[i].s_mi && !g_hooks[i].s_static) { need_inst = 1; break; }
+        if (g_hooks[i].g_mi && !g_hooks[i].g_static) { need_inst = 1; break; }
+    }
+    void *inst = NULL;
+    if (need_inst) {
+        inst = resolve_premium_instance();
+        if (!inst) {
+            static unsigned long last_warn = 0;
+            unsigned long t = now_ms();
+            if (t - last_warn > 10000) {
+                pfp_log("tick: no PremiumCurrency instance yet (menu probably not loaded)");
+                last_warn = t;
+            }
+            return;
         }
-        return;
     }
 
     int invoke_fail_this_tick = 0;
@@ -379,16 +419,15 @@ static void tick_once(void) {
         int should_set = 1;
         int prev_state = g_hooks[i].last_getter_state;
         if (g_hooks[i].g_mi) {
+            void *g_self = g_hooks[i].g_static ? NULL : inst;
             int ok = 1;
-            Il2CppObject *r = pfp_il2cpp_invoke0(g_hooks[i].g_mi, inst, &ok);
+            Il2CppObject *r = pfp_il2cpp_invoke0(g_hooks[i].g_mi, g_self, &ok);
             if (!ok) {
                 pfp_log("tick: %s getter threw — skipping this tick", g_hooks[i].key);
                 invoke_fail_this_tick++;
                 continue;
             }
             int cur = pfp_unbox_bool(r);
-            // Drift detection (per plan: MultiplayerProfileSaveManager server sync
-            // can overwrite our flags). Log transitions 1 → 0 as evidence.
             if (prev_state == 1 && cur == 0) {
                 pfp_log("drift: %s server-overwrote (fires=%lu) — re-asserting",
                         g_hooks[i].key, g_hooks[i].fires);
@@ -404,8 +443,9 @@ static void tick_once(void) {
 
         if (!should_set) continue;
 
+        void *s_self = g_hooks[i].s_static ? NULL : inst;
         int ok = 1;
-        pfp_il2cpp_invoke0(g_hooks[i].s_mi, inst, &ok);
+        pfp_il2cpp_invoke0(g_hooks[i].s_mi, s_self, &ok);
         if (!ok) {
             pfp_log("tick: %s %s threw", g_hooks[i].key, g_hooks[i].setter);
             invoke_fail_this_tick++;
@@ -414,17 +454,14 @@ static void tick_once(void) {
         g_hooks[i].fires++;
         g_hooks[i].last_tick_ms = now_ms();
         if (g_cfg.log_each_fire) {
-            pfp_log("fire: %s (%s) · fires=%lu", g_hooks[i].key,
-                    g_hooks[i].setter, g_hooks[i].fires);
+            pfp_log("fire: %s (%s%s) · fires=%lu", g_hooks[i].key,
+                    g_hooks[i].setter, g_hooks[i].s_static ? " static" : "",
+                    g_hooks[i].fires);
         }
     }
 
-    // Staleness guard: if EVERY enabled hook that tried to invoke failed, the
-    // cached PremiumCurrency instance is likely dangling (scene teardown,
-    // save-slot switch, GC collected). Clear it and let the next tick
-    // re-walk. Only trigger when >= 2 failures so we don't thrash on a
-    // transient managed exception from a single getter.
-    if (invoke_fail_this_tick >= 2 && g_premium_instance) {
+    // Staleness guard: only applies when we were using an instance.
+    if (need_inst && invoke_fail_this_tick >= 2 && g_premium_instance) {
         pfp_log("inst: >=2 invoke failures — dropping cached instance %p, will re-walk",
                 g_premium_instance);
         g_premium_instance = NULL;
@@ -495,7 +532,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v1a.4 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v1a.5 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 
