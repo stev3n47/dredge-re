@@ -45,6 +45,36 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
+// CoreFoundation forward decls. Resolved at load time via
+// `-Wl,-undefined,dynamic_lookup` — these symbols are all plain C exports
+// of CoreFoundation.framework (unlike dispatch_get_main_queue which was
+// flat-namespace-broken on SPPlus's rig). We create our own CFString for
+// kCFRunLoopCommonModes at runtime rather than extern'ing the global.
+typedef struct __CFRunLoop *CFRunLoopRef;
+typedef struct __CFRunLoopTimer *CFRunLoopTimerRef;
+typedef const struct __CFString *CFStringRef;
+typedef double CFTimeInterval;
+typedef double CFAbsoluteTime;
+typedef void *CFAllocatorRef;
+typedef long CFIndex;
+typedef unsigned long CFOptionFlags;
+typedef unsigned CFStringEncoding;
+#define kCFStringEncodingUTF8 0x08000100
+typedef struct {
+    CFIndex version;
+    void *info;
+    const void *(*retain)(const void *info);
+    void (*release)(const void *info);
+    CFStringRef (*copyDescription)(const void *info);
+} CFRunLoopTimerContext;
+extern CFRunLoopRef CFRunLoopGetMain(void);
+extern CFRunLoopTimerRef CFRunLoopTimerCreate(
+    CFAllocatorRef, CFAbsoluteTime, CFTimeInterval, CFOptionFlags, CFIndex,
+    void (*)(CFRunLoopTimerRef, void *), CFRunLoopTimerContext *);
+extern void CFRunLoopAddTimer(CFRunLoopRef, CFRunLoopTimerRef, CFStringRef);
+extern CFAbsoluteTime CFAbsoluteTimeGetCurrent(void);
+extern CFStringRef CFStringCreateWithCString(CFAllocatorRef, const char *, CFStringEncoding);
+
 // -------- forward decls --------
 
 static unsigned long now_ms(void);
@@ -409,63 +439,78 @@ static void status_dump(void) {
     pfp_log("%s", line);
 }
 
-// -------- worker thread --------
+// -------- main-runloop driver --------
+//
+// v1a and v1a.2 crashed at SIGSEGV 0x135 on a stack-pointer-relative load
+// inside Unity's il2cpp runtime, from our pthread. Steve's diagnosis in
+// debug/crashes/INDEX.md: on Unity 6000.3.9f1 even `il2cpp_domain_get` is
+// unsafe on a non-GC-registered thread — the il2cpp exports rely on
+// per-thread GC state that only gets populated by `thread_attach`, and
+// `thread_attach` itself runs on that same unregistered thread. Chicken +
+// egg.
+//
+// Fix: run EVERY il2cpp call from a CFRunLoopTimer on the main runloop.
+// Unity's main thread is attached by the runtime itself at startup, so
+// every call from inside this timer callback sees a valid GC thread
+// state. 10 Hz tick load on main is negligible.
 
-static void *worker(void *unused) {
-    (void)unused;
-    pfp_log("worker: thread up");
+static CFRunLoopTimerRef g_timer = NULL;
 
-    // Wait for IL2CPP to be mapped. UnityFramework is loaded very early
-    // but il2cpp_init itself runs asynchronously — poll until domain is up.
-    char err[256];
-    int tries = 0;
-    while (pfp_il2cpp_init(err, sizeof err) != 0) {
-        if ((tries++ % 20) == 0) {
-            pfp_log("worker: waiting for il2cpp (%s)", err);
+static int  g_init_warned = 0;
+static unsigned long g_last_status_ms = 0;
+
+static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
+    (void)timer;
+    (void)info;
+
+    pfp_cfg_reload_if_changed();
+
+    if (!pfp_il2cpp_ready()) {
+        char err[256];
+        int rc = pfp_il2cpp_init(err, sizeof err);
+        if (rc != 0) {
+            if ((g_init_warned++ % 30) == 0) {
+                pfp_log("main: waiting for il2cpp (rc=%d, %s)", rc, err);
+            }
+            return;
         }
-        usleep(500 * 1000);  // 0.5s
-        if (tries > 240) {   // 2 min
-            pfp_log("worker: giving up on il2cpp — exiting thread");
-            return NULL;
-        }
+        pfp_log("main: il2cpp ready");
     }
-    pfp_log("worker: il2cpp ready");
 
-    unsigned long last_status = 0;
-    for (;;) {
-        pthread_mutex_lock(&g_cfg_mtx);
-        int hz = g_cfg.tick_hz;
-        pthread_mutex_unlock(&g_cfg_mtx);
-        if (hz < 1) hz = 1;
-        if (hz > 60) hz = 60;
-        useconds_t period = (useconds_t)(1000000 / hz);
+    tick_once();
 
-        tick_once();
-
-        unsigned long t = now_ms();
-        if (t - last_status > 30000) {
-            status_dump();
-            last_status = t;
-        }
-
-        usleep(period);
+    unsigned long t = now_ms();
+    if (t - g_last_status_ms > 30000) {
+        status_dump();
+        g_last_status_ms = t;
     }
-    return NULL;
 }
 
 // -------- entry --------
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v1a up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v1a.3 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 
-    pthread_t th;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&th, &attr, worker, NULL) != 0) {
-        pfp_log("boot: pthread_create failed — PFPlus disabled");
+    CFStringRef mode = CFStringCreateWithCString(NULL, "kCFRunLoopCommonModes", kCFStringEncodingUTF8);
+    CFRunLoopRef rl = CFRunLoopGetMain();
+    if (!rl || !mode) {
+        pfp_log("boot: CoreFoundation unavailable (rl=%p mode=%p) — PFPlus disabled", (void *)rl, (void *)mode);
+        return;
     }
-    pthread_attr_destroy(&attr);
+    g_timer = CFRunLoopTimerCreate(
+        NULL,
+        CFAbsoluteTimeGetCurrent() + 0.5,  // first fire +500 ms
+        0.1,                                // repeat every 100 ms = 10 Hz
+        0, 0,
+        main_tick_cb,
+        NULL);
+    if (!g_timer) {
+        pfp_log("boot: CFRunLoopTimerCreate failed — PFPlus disabled");
+        return;
+    }
+    CFRunLoopAddTimer(rl, g_timer, mode);
+    pfp_log("boot: main-runloop timer armed (first fire +500ms, interval 100ms)");
 }
