@@ -1,25 +1,23 @@
-// feature_tickets — v2.9 "Unlimited Premium Tickets" via periodic invoke.
+// feature_tickets — v2.10 "Unlimited Cash" via periodic Add invoke.
 //
-// Prior attempts (hooks) failed:
-//   v2.5.x: hooked TicketWallet.TrySpend* — wrong class (game-ticket API,
-//           not premium). No effect on premium balance.
-//   v2.8:   hooked PremiumCurrency.get_Balance → huge_int and
-//           PremiumCurrency.TrySpend → true. Hooks installed cleanly
-//           but BLANKED the user's cash + ticket balance to 0.
-//           Likely cause: the real return type of get_Balance isn't
-//           plain int (maybe a struct or nullable wrapper), so our
-//           int64 trampoline writes to the wrong register and the UI
-//           reads 0. Or anti-cheat kicked in on save.
+// Device verify of v2.9: user confirmed CASH balance ticks up (+100
+// every 2s) but PREMIUM TICKETS do NOT. So PremiumCurrency.Balance is
+// actually career/player CASH, not premium tickets. Despite the class
+// name, this is the game's cash wallet. Premium tickets are stored
+// somewhere else — we don't know where yet.
 //
-// v2.9 pivot: INVOKE the game's own Add() method periodically. This
-// uses the normal "earn tickets" code path the game already has — no
-// ABI mismatch risk, no anti-cheat flag, no replaced method bodies.
-//
-//   PremiumCurrency.Add(int)  argc=1 [static]
-//
-// Every 2 seconds while tickets_force=1, invoke Add(100). Net: +50
-// tickets per second. Over 1 min = +3000. Visible, safe, reversible.
-// User can flip the toggle off at any time and the Add stops.
+// v2.10:
+//   * Rename the user-facing feature from "Unlimited Tickets" to
+//     "Unlimited Cash". Config key stays "tickets_force" for backward
+//     compat with saved pfplus.json (users already have that flag=1);
+//     only the menu label + meta subline change, plus a new config
+//     alias "cash_force" that mirrors it.
+//   * Invoke logic unchanged — PremiumCurrency.Add(100) every 2s is
+//     doing exactly the right thing for cash.
+//   * Add diagnostic: periodically log the current balance by invoking
+//     get_Balance() so we can confirm growth on-device.
+//   * Add a wider method-name scan for the REAL premium ticket class
+//     (get_Tickets / AddTickets / SpendTickets / set_Tickets).
 
 #include "features.h"
 #include "pac_swap.h"
@@ -27,8 +25,9 @@
 #include <sys/time.h>
 
 static Il2CppClass *g_wallet = NULL;              // TicketWallet (legacy)
-static Il2CppClass *g_prem   = NULL;              // PremiumCurrency
+static Il2CppClass *g_prem   = NULL;              // PremiumCurrency (cash)
 static const MethodInfo *g_add_mi = NULL;         // PremiumCurrency.Add(int)
+static const MethodInfo *g_get_balance_mi = NULL; // PremiumCurrency.get_Balance()
 static unsigned long g_last_add_ms = 0;
 
 static unsigned long tickets_now_ms(void) {
@@ -50,14 +49,90 @@ static int init(void) {
         pfp_log("tickets: PremiumCurrency class=%p method_count=%d (premium-ticket balance holder)",
                 (void *)g_prem, mc);
         g_add_mi = pfp_il2cpp_find_method(g_prem, "Add", 1);
+        g_get_balance_mi = pfp_il2cpp_find_method(g_prem, "get_Balance", 0);
         if (g_add_mi) {
-            pfp_log("tickets: resolved PremiumCurrency.Add(int) @ %p — will invoke periodically when tickets_force=1",
+            pfp_log("tickets: resolved PremiumCurrency.Add(int) @ %p — adds CASH (not premium tickets) when cash/tickets_force=1",
                     (const void *)g_add_mi);
         } else {
-            pfp_log("tickets: PremiumCurrency.Add(int) NOT FOUND — tickets_force cannot top up");
+            pfp_log("tickets: PremiumCurrency.Add(int) NOT FOUND — cash top-up disabled");
+        }
+
+        // v2.10 one-shot: read current balance so user can compare in-game
+        // display to our value and confirm what currency this is.
+        if (g_get_balance_mi) {
+            int ok = 1;
+            Il2CppObject *boxed = pfp_il2cpp_invoke0(g_get_balance_mi, NULL, &ok);
+            if (ok) {
+                int64_t v = pfp_unbox_i32(boxed);
+                pfp_log("tickets: PremiumCurrency.get_Balance() returned %lld (this value = CASH per v2.9 device test)",
+                        (long long)v);
+            }
         }
     } else {
-        pfp_log("tickets: PremiumCurrency NOT FOUND — premium ticket feature disabled");
+        pfp_log("tickets: PremiumCurrency NOT FOUND — cash top-up feature disabled");
+    }
+
+    // v2.10 — hunt the real premium TICKET balance class. TicketWallet
+    // has only spend methods (no get_Balance / Add), so the actual
+    // ticket balance lives on another class not matched by v2.7's
+    // class-name scan. Scan every Assembly-CSharp method for names
+    // containing Ticket + get/Add/Spend/set patterns.
+    if (pfp_il2cpp_ready() &&
+        pfp_il2cpp_domain_get &&
+        pfp_il2cpp_domain_get_assemblies &&
+        pfp_il2cpp_assembly_get_image &&
+        pfp_il2cpp_image_get_name &&
+        pfp_il2cpp_image_get_class &&
+        pfp_il2cpp_image_get_class_count &&
+        pfp_il2cpp_class_get_name &&
+        pfp_il2cpp_class_get_methods &&
+        pfp_il2cpp_method_get_name) {
+        pfp_log("tickets: v2.10 ticket-balance hunt — scanning methods for Ticket get/Add/Spend/set");
+        static const char *needles[] = {
+            "get_Tickets", "AddTickets", "SpendTickets", "set_Tickets",
+            "get_GameTickets", "AddGameTickets", "GameTicketBalance",
+            "TicketBalance", "get_TicketCount", "AddTicketReward",
+        };
+        const int nn = (int)(sizeof(needles) / sizeof(needles[0]));
+        Il2CppDomain *dom = pfp_il2cpp_domain_get();
+        size_t na = 0;
+        const Il2CppAssembly **asms = pfp_il2cpp_domain_get_assemblies(dom, &na);
+        int hits_total = 0;
+        for (size_t ai = 0; ai < na && hits_total < 64; ai++) {
+            const Il2CppImage *img = pfp_il2cpp_assembly_get_image(asms[ai]);
+            if (!img) continue;
+            const char *in = pfp_il2cpp_image_get_name(img);
+            if (!in || strcmp(in, "Assembly-CSharp.dll") != 0) continue;
+            size_t nc = pfp_il2cpp_image_get_class_count(img);
+            for (size_t ci = 0; ci < nc && hits_total < 64; ci++) {
+                Il2CppClass *k = pfp_il2cpp_image_get_class(img, ci);
+                if (!k) continue;
+                void *iter = NULL;
+                const MethodInfo *m;
+                while ((m = pfp_il2cpp_class_get_methods(k, &iter)) != NULL) {
+                    const char *mn = pfp_il2cpp_method_get_name(m);
+                    if (!mn) continue;
+                    for (int ni = 0; ni < nn; ni++) {
+                        if (strstr(mn, needles[ni])) {
+                            const char *kn = pfp_il2cpp_class_get_name(k);
+                            uint32_t iflags = 0;
+                            uint32_t f = pfp_il2cpp_method_get_flags ?
+                                pfp_il2cpp_method_get_flags(m, &iflags) : 0;
+                            int is_static = (f & 0x10) ? 1 : 0;
+                            int argc = pfp_il2cpp_method_get_param_count ?
+                                (int)pfp_il2cpp_method_get_param_count(m) : -1;
+                            pfp_log("tickets-hunt: %s.%s argc=%d%s",
+                                    kn ? kn : "?", mn, argc,
+                                    is_static ? " [static]" : "");
+                            hits_total++;
+                            break;
+                        }
+                    }
+                    if (hits_total >= 64) break;
+                }
+            }
+        }
+        pfp_log("tickets: v2.10 ticket-balance hunt — %d hit(s)", hits_total);
     }
     if (!g_prem && !g_wallet) return -1;
 
