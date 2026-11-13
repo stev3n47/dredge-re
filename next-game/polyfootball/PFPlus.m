@@ -192,6 +192,7 @@ struct cfg {
     int throw_force;        // v2.5: ThrowController.get_PassIsBullet -> true (cannon arm)
     int accuracy_force;     // v2.5: ThrowController.get_ThrowSpreadOnTheRun -> 0
     int mp_safe;            // v2.5.1: 1 = block physics/offense hook installs (safe for MP)
+    int tickets_force;      // v2.5.2: TicketWallet.TrySpend/TrySpendCareer -> true (free tickets)
     // Housekeeping
     int log_each_fire;
     int tick_hz;
@@ -207,7 +208,7 @@ static struct cfg g_cfg = {
     .throw_cannon = 1, .speed = 1,
     .pac = 1, .pac_probe = 0,  // phase 1 always; phase 2 opt-in
     .fumbles_force = 0, .injuries_force = 0, .tackle_force = 0, .catch_force = 0, .iap_force = 0,
-    .cap_force = 0, .throw_force = 0, .accuracy_force = 0, .mp_safe = 0,
+    .cap_force = 0, .throw_force = 0, .accuracy_force = 0, .mp_safe = 0, .tickets_force = 0,
     .log_each_fire = 0, .tick_hz = 10, .mtime = 0, .loaded_ok = 0,
 };
 
@@ -296,6 +297,10 @@ static int pfp_cfg_reload_if_changed(void) {
                     "# hooks (tackle/fumbles/injuries/catch/throw/accuracy).\n"
                     "# Flip ON before joining multiplayer to avoid desync/bans.\n"
                     "mp_safe=0\n"
+                    "# v2.5.2 — tickets_force=1 hooks TicketWallet.TrySpend* -> true\n"
+                    "# so every ticket transaction succeeds without deducting.\n"
+                    "# Buy skill points infinitely, buy anything else that costs tickets.\n"
+                    "tickets_force=0\n"
                     "log_each_fire=0\n"
                     "tick_hz=10\n";
                 (void)write(fd, defaults, strlen(defaults));
@@ -361,6 +366,7 @@ static int pfp_cfg_reload_if_changed(void) {
         else if (!strcmp(k, "throw_force"))           next.throw_force = parse_bool_or_int(v, next.throw_force);
         else if (!strcmp(k, "accuracy_force"))        next.accuracy_force = parse_bool_or_int(v, next.accuracy_force);
         else if (!strcmp(k, "mp_safe"))               next.mp_safe = parse_bool_or_int(v, next.mp_safe);
+        else if (!strcmp(k, "tickets_force"))         next.tickets_force = parse_bool_or_int(v, next.tickets_force);
         else if (!strcmp(k, "log_each_fire"))         next.log_each_fire = parse_bool_or_int(v, next.log_each_fire);
         else if (!strcmp(k, "tick_hz")) {
             int hz = atoi(v);
@@ -463,6 +469,7 @@ int pfp_cfg_bool(const char *key, int defval) {
     else if (!strcmp(key, "throw_force"))    v = g_cfg.throw_force;
     else if (!strcmp(key, "accuracy_force")) v = g_cfg.accuracy_force;
     else if (!strcmp(key, "mp_safe"))        v = g_cfg.mp_safe;
+    else if (!strcmp(key, "tickets_force"))  v = g_cfg.tickets_force;
     pthread_mutex_unlock(&g_cfg_mtx);
     return v;
 }
@@ -523,6 +530,7 @@ static void pfp_cfg_save_locked(void) {
     fprintf(f, "throw_force=%d\n",           g_cfg.throw_force);
     fprintf(f, "accuracy_force=%d\n",        g_cfg.accuracy_force);
     fprintf(f, "mp_safe=%d\n",               g_cfg.mp_safe);
+    fprintf(f, "tickets_force=%d\n",         g_cfg.tickets_force);
     fprintf(f, "log_each_fire=%d\n",         g_cfg.log_each_fire);
     fprintf(f, "tick_hz=%d\n",               g_cfg.tick_hz);
     fflush(f);
@@ -572,6 +580,7 @@ void pfp_cfg_set_bool(const char *key, int value) {
     else if (!strcmp(key, "throw_force"))    g_cfg.throw_force = v;
     else if (!strcmp(key, "accuracy_force")) g_cfg.accuracy_force = v;
     else if (!strcmp(key, "mp_safe"))        g_cfg.mp_safe = v;
+    else if (!strcmp(key, "tickets_force"))  g_cfg.tickets_force = v;
     // v2.5.1 — persist every change so cold restart gets the same state.
     pfp_cfg_save_locked();
     pthread_mutex_unlock(&g_cfg_mtx);
@@ -870,6 +879,7 @@ static PfpFeature *g_feature_registry[] = {
     &pfp_feature_throw,
     &pfp_feature_speed,
     &pfp_feature_pac,
+    &pfp_feature_tickets,
 };
 static const int NUM_FEATURES = sizeof(g_feature_registry) / sizeof(g_feature_registry[0]);
 
@@ -1173,7 +1183,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void pfp_ctor(void) {
-    pfp_log("boot: PFPlus v2.5.1 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
+    pfp_log("boot: PFPlus v2.5.2 up · target com.Miceli.Poly 4.5.3 · Unity 6 / metadata v39");
     pfp_log("boot: running on main runloop (Unity 6 GC-thread-attach requirement)");
     pfp_cfg_reload_if_changed();
 

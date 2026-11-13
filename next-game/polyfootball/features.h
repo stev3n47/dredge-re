@@ -69,6 +69,7 @@ extern PfpFeature pfp_feature_catch;     // v2a: diagnostic, FootballCatchReach
 extern PfpFeature pfp_feature_throw;     // v2a: diagnostic, ThrowController
 extern PfpFeature pfp_feature_speed;     // v2a: diagnostic, CarrierMoveControls
 extern PfpFeature pfp_feature_pac;       // v2.2: PAC probe + methodPointer swap test
+extern PfpFeature pfp_feature_tickets;   // v2.5.2: TicketWallet.TrySpend* -> true
 
 // Convenience helpers shared by diagnostic features. Implemented in PFPlus.m.
 

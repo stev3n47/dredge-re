@@ -50,6 +50,32 @@ static int init(void) {
     }
     pfp_log("skills: CareerSkillCosts class=%p (expect 5 methods per catalog m9231)", (void *)g_klass);
 
+    // v2.5.2 — Cost/Spent on CareerSkillCosts only drives the UI cost
+    // display. The actual skill-point deduction on upgrade uses a
+    // different ledger class (user report: hooks installed, point still
+    // decremented on upgrade). Scan Assembly-CSharp for classes whose
+    // names match plausible ledger patterns and dump their methods so
+    // the next device log tells us the right hook target for v2.5.3.
+    {
+        static const char *scan_subs[] = {
+            "SkillPoint", "SkillBank", "SkillBalance", "SkillLedger",
+            "PlayerSkill", "CareerUpgrade", "SkillUpgrade", "PlayerUpgrade",
+            "SkillWallet", "SkillTransaction", "SkillSpend",
+        };
+        const int nsubs = (int)(sizeof(scan_subs) / sizeof(scan_subs[0]));
+        Il2CppClass *hits[16];
+        int n = pfp_find_classes_by_name(scan_subs, nsubs, hits, 16);
+        pfp_log("skills: v2.5.3-scan — %d class(es) match skill-ledger patterns", n);
+        static const char *method_subs[] = {
+            "Spend", "Afford", "Available", "Balance", "Add", "Grant",
+            "Consume", "Decrement", "Debit", "Credit",
+        };
+        const int nms = (int)(sizeof(method_subs) / sizeof(method_subs[0]));
+        for (int i = 0; i < n; i++) {
+            pfp_diag_log_methods("skills-scan", hits[i], method_subs, nms);
+        }
+    }
+
     if (!pfp_il2cpp_class_get_methods) {
         pfp_log("skills: class_get_methods unavailable — cannot enumerate");
         return 0;  // init still ok; tick will just no-op
