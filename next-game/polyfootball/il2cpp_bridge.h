@@ -59,6 +59,7 @@ extern const char          *(*pfp_il2cpp_method_get_name)(const MethodInfo *);
 // bits and writes the IL2CPP impl flags to iflags. Static bit is 0x10
 // (METHOD_ATTRIBUTE_STATIC in the mono/ECMA attribute table).
 extern uint32_t             (*pfp_il2cpp_method_get_flags)(const MethodInfo *, uint32_t *iflags);
+extern uint32_t             (*pfp_il2cpp_method_get_param_count)(const MethodInfo *);
 
 // High-level helpers.
 Il2CppClass      *pfp_il2cpp_find_class(const char *image_name, const char *ns, const char *cls);
