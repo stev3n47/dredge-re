@@ -1,9 +1,0 @@
-/* 
-  InfoPlist.strings
-  rubens
-
-  Created by Yuriy Dynnikov on 29.04.2021.
-  
-*/
-
-NSUserTrackingUsageDescription = "Esto nos ayudará a restaurar tu cuenta de juego en el futuro y a publicitar Total Battle a personas fantásticas como tú 😉";

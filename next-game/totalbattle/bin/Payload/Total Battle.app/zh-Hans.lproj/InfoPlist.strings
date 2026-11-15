@@ -1,9 +1,0 @@
-/* 
-  InfoPlist.strings
-  rubens
-
-  Created by Yuriy Dynnikov on 29.04.2021.
-  
-*/
-
-NSUserTrackingUsageDescription = "这样我们可以在未来恢复您的游戏账户，向其他与您志同道合的玩家宣传《全军之战》😉";
