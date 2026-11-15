@@ -802,15 +802,19 @@ static Il2CppClass *resolve_class(const char *image, const char *name) {
 // .method equals our resolved MethodInfo*. All reads go through a
 // mach_vm probe so a non-pointer field can't fault us.
 
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
+// mach_vm.h is macOS-only in the iOS SDK — declare the entry points with
+// primitive types (mach_port_t=u32, mach_vm_address_t/mach_vm_size_t=u64).
+extern unsigned int mach_task_self(void);
+extern int mach_vm_read_overwrite(unsigned int task, unsigned long long addr,
+                                  unsigned long long size, unsigned long long data,
+                                  unsigned long long *outsz);
 
 static int safe_read(const void *addr, void *buf, unsigned long n) {
-    mach_vm_size_t out = 0;
+    unsigned long long out = 0;
     return mach_vm_read_overwrite(mach_task_self(),
-                                  (mach_vm_address_t)addr, (mach_vm_size_t)n,
-                                  (mach_vm_address_t)buf, &out) == 0
-           && out == (mach_vm_size_t)n;
+                                  (unsigned long long)(uintptr_t)addr, (unsigned long long)n,
+                                  (unsigned long long)(uintptr_t)buf, &out) == 0
+           && out == (unsigned long long)n;
 }
 
 // Returns &vtable[i].methodPtr on success.
