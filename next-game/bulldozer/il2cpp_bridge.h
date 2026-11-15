@@ -60,6 +60,13 @@ extern const char          *(*bd_il2cpp_method_get_name)(const MethodInfo *);
 // (METHOD_ATTRIBUTE_STATIC in the mono/ECMA attribute table).
 extern uint32_t             (*bd_il2cpp_method_get_flags)(const MethodInfo *, uint32_t *iflags);
 extern uint32_t             (*bd_il2cpp_method_get_param_count)(const MethodInfo *);
+// v1.2 — singleton instance discovery without the (broken on this build)
+// gc_foreach_heap klass compare. class_get_parent walks to the inflated
+// SingletonBase<T>/SingletonBehaviourBase<T> which declares the static
+// `_instance` field; field_static_get_value reads it.
+extern Il2CppClass         *(*bd_il2cpp_class_get_parent)(Il2CppClass *);
+extern const void          *(*bd_il2cpp_class_get_field_from_name)(Il2CppClass *, const char *name);
+extern void                 (*bd_il2cpp_field_static_get_value)(const void *field, void *value);
 
 // High-level helpers.
 Il2CppClass      *bd_il2cpp_find_class(const char *image_name, const char *ns, const char *cls);
@@ -74,6 +81,14 @@ int               bd_il2cpp_count_methods(Il2CppClass *klass);
 // `cap`. Returns the count written. Bracketed by gc_disable/enable so the
 // walk is safe. Not re-entrant.
 int               bd_il2cpp_find_instances(Il2CppClass *klass, void **out, int cap);
+
+// v1.2 — resolve the live singleton instance for classes deriving from
+// SingletonBase<T>/SingletonBehaviourBase<T>: walk the parent chain,
+// find the static `_instance` field on the inflated generic parent, and
+// read it via il2cpp_field_static_get_value. Returns NULL when the
+// class isn't a singleton, the instance isn't spawned yet, or any
+// resolver is missing. Call on the main runloop only.
+void             *bd_singleton_instance(Il2CppClass *klass);
 
 // Invoke `method` with 0/1 args. `self` may be NULL for statics. Returns
 // the boxed result; caller unboxes if needed. On any resolver miss returns

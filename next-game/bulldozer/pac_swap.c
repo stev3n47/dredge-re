@@ -13,6 +13,9 @@
 extern unsigned int mach_task_self(void);
 extern int mach_vm_write(unsigned int task, unsigned long long addr,
                          unsigned long long data, unsigned int cnt);
+extern int vm_protect(unsigned int task, unsigned long long addr,
+                      unsigned long long size, int set_maximum,
+                      unsigned int new_protection);
 extern void sys_icache_invalidate(void *start, unsigned long len);
 
 int bd_pac_hook_install_save(const MethodInfo *mi, void *trampoline,
@@ -93,12 +96,33 @@ static int bd_text_write(void *addr, const void *data, size_t len) {
                            (unsigned long long)(uintptr_t)addr,
                            (unsigned long long)(uintptr_t)data,
                            (unsigned int)len);
+    if (kr == 0) {
+        sys_icache_invalidate(addr, len);
+        return 1;
+    }
+    bd_log("inline: mach_vm_write @%p len=%zu kr=%d — trying vm_protect",
+           addr, len, kr);
+    // v1.2 fallback: UnityFramework is a regular app-bundle framework, not
+    // a platform binary — its __TEXT is usually NOT PPL-protected, so
+    // vm_protect can flip the page RW, we memcpy, then restore RX.
+    // (mach_vm_write fails with KERN_INVALID_ADDRESS because the page
+    // simply isn't writable in the VM map — vm_protect changes that.)
+    unsigned long long page = (unsigned long long)(uintptr_t)addr & ~0x3FFFULL;
+    unsigned long long end  = ((unsigned long long)(uintptr_t)addr + len + 0x3FFFULL)
+                              & ~0x3FFFULL;
+    unsigned int self = mach_task_self();
+    kr = vm_protect(self, page, end - page, 0, 1u | 2u);   // VM_PROT_READ|WRITE
     if (kr != 0) {
-        bd_log("inline: mach_vm_write @%p len=%zu failed kr=%d",
-               addr, len, kr);
+        bd_log("inline: vm_protect RW @%p failed kr=%d", (void *)page, kr);
         return 0;
     }
+    memcpy(addr, data, len);
+    int kr2 = vm_protect(self, page, end - page, 0, 1u | 4u);  // restore R-X
+    if (kr2 != 0) {
+        bd_log("inline: vm_protect RX restore @%p failed kr=%d", (void *)page, kr2);
+    }
     sys_icache_invalidate(addr, len);
+    bd_log("inline: vm_protect path wrote %zuB @%p", len, addr);
     return 1;
 }
 
@@ -129,10 +153,26 @@ static int inline_patch_bytes(const MethodInfo *mi, const uint32_t *code,
 }
 
 int bd_hook_bool_true(const MethodInfo *mi, const char *tag) {
-    static const uint32_t code[2] = { 0x52800020u, 0xD65F03C0u };
+    static const uint32_t code[2] = { 0x52800020u, 0xD65F03C0u };  // mov w0,#1; ret
     if (inline_patch_bytes(mi, code, 8, tag)) return 1;
     bd_log("inline: %s failed — falling back to methodPointer swap", tag);
     return bd_pac_hook_install(mi, (void *)bd_tramp_one_int, tag);
+}
+
+// v1.2 — constant-false variant (e.g. FuelTank.get_IsOilEmpty -> false)
+// and bare `ret` for void methods (e.g. FuelTank.ConsumeOil -> no-op).
+int bd_hook_bool_false(const MethodInfo *mi, const char *tag) {
+    static const uint32_t code[2] = { 0x52800000u, 0xD65F03C0u };  // mov w0,#0; ret
+    if (inline_patch_bytes(mi, code, 8, tag)) return 1;
+    bd_log("inline: %s failed — falling back to methodPointer swap", tag);
+    return bd_pac_hook_install(mi, (void *)bd_tramp_zero_int, tag);
+}
+
+int bd_hook_ret_only(const MethodInfo *mi, const char *tag) {
+    static const uint32_t code[1] = { 0xD65F03C0u };               // ret
+    if (inline_patch_bytes(mi, code, 4, tag)) return 1;
+    bd_log("inline: %s failed — falling back to methodPointer swap", tag);
+    return bd_pac_hook_install(mi, (void *)bd_tramp_zero_int, tag);
 }
 
 int bd_hook_int_imm(const MethodInfo *mi, uint32_t imm, const char *tag) {

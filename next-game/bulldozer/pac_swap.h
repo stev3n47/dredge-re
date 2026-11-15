@@ -81,6 +81,9 @@ float   bd_tramp_two_float(void);
 int  bd_hook_bool_true(const MethodInfo *mi, const char *tag);
 int  bd_hook_int_imm(const MethodInfo *mi, uint32_t imm, const char *tag);
 int  bd_hook_branch(const MethodInfo *mi, void *target, const char *tag);
+// v1.2 variants: constant-false for ->bool methods, bare `ret` for void.
+int  bd_hook_bool_false(const MethodInfo *mi, const char *tag);
+int  bd_hook_ret_only(const MethodInfo *mi, const char *tag);
 
 #ifdef __cplusplus
 }

@@ -48,6 +48,9 @@ const MethodInfo    *(*bd_il2cpp_class_get_methods)(Il2CppClass *, void **iter);
 const char          *(*bd_il2cpp_method_get_name)(const MethodInfo *);
 uint32_t             (*bd_il2cpp_method_get_flags)(const MethodInfo *, uint32_t *iflags);
 uint32_t             (*bd_il2cpp_method_get_param_count)(const MethodInfo *);
+Il2CppClass         *(*bd_il2cpp_class_get_parent)(Il2CppClass *);
+const void          *(*bd_il2cpp_class_get_field_from_name)(Il2CppClass *, const char *name);
+void                 (*bd_il2cpp_field_static_get_value)(const void *field, void *value);
 
 static int g_ready = 0;
 
@@ -130,6 +133,9 @@ int bd_il2cpp_init(char *errbuf, size_t errbuflen) {
     TRY(il2cpp_method_get_name);
     TRY(il2cpp_method_get_flags);
     TRY(il2cpp_method_get_param_count);
+    TRY(il2cpp_class_get_parent);
+    TRY(il2cpp_class_get_field_from_name);
+    TRY(il2cpp_field_static_get_value);
 #undef TRY
     (void)BD_HAVE_OFFSETS;  // reserved for an offset-header fallback (unused in v1a)
 
@@ -328,3 +334,24 @@ int32_t bd_unbox_i32(Il2CppObject *b) { return b ? *(int32_t *)((char *)b + 16) 
 int64_t bd_unbox_i64(Il2CppObject *b) { return b ? *(int64_t *)((char *)b + 16) : 0; }
 int     bd_unbox_bool(Il2CppObject *b) { return b ? (int)*(uint8_t *)((char *)b + 16) : 0; }
 float   bd_unbox_f32(Il2CppObject *b) { return b ? *(float *)((char *)b + 16) : 0.0f; }
+
+// v1.2 — singleton instance via the inflated generic parent's static
+// `_instance` field. gc_foreach_heap's klass compare doesn't match on
+// this build (see bdplus.log rewalk-sample), so instance features use
+// this instead. Walks up to 8 parents; returns NULL on any miss.
+void *bd_singleton_instance(Il2CppClass *klass) {
+    if (!klass || !bd_il2cpp_class_get_parent ||
+        !bd_il2cpp_class_get_field_from_name ||
+        !bd_il2cpp_field_static_get_value) return NULL;
+    Il2CppClass *p = klass;
+    for (int i = 0; i < 8 && p; i++) {
+        const void *f = bd_il2cpp_class_get_field_from_name(p, "_instance");
+        if (f) {
+            void *inst = NULL;
+            bd_il2cpp_field_static_get_value(f, &inst);
+            if (inst) return inst;
+        }
+        p = bd_il2cpp_class_get_parent(p);
+    }
+    return NULL;
+}

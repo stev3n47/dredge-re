@@ -1,29 +1,33 @@
-// feature_fuel.c — infinite fuel via FuelTank.SetOilToMax polling.
+// feature_fuel.c — infinite fuel via FuelTank code patches (+ poll backup).
 //
 // Target: Assembly-CSharp.dll · BulldogzerMaster.Mine.Instances.FuelTank
-// (TypeDefIndex 1191). Methods are VIRTUAL instance methods:
-//   SetOilToMax()          void
-//   ConsumeOil(float)      void
-//   get_IsOilEmpty()       bool
-//   get_OilRemainingRate() float
+// (TypeDefIndex 1191). All fuel methods are VIRTUAL instance methods:
+//   get_IsOilEmpty()    bool   -> patched `mov w0,#0; ret`  (never empty)
+//   ConsumeOil(float)   void   -> patched `ret`             (never drains)
+//   SetOilToMax()        void   [kept for the poll fallback]
 //
-// Why poll-and-invoke instead of methodPointer hooks: virtual dispatch
-// resolves through the klass vtable, which snapshots methodPointer at
-// class-init — a MethodInfo swap may not reach callvirt sites. Invoking
-// the real SetOilToMax through runtime_invoke dispatches correctly and
-// fires the tank's OnOilChanging event so UI/HUD stays consistent.
+// v1.2 rewrite: the v1.0 heap-walk for live FuelTank instances never
+// matched (gc_foreach_heap klass pointers don't line up with image
+// metadata classes on this build — see bdplus.log rewalk-sample).
+// Patching the method CODE covers every instance and every dispatch
+// path (direct call + vtable) with zero instance discovery.
+// NullFuelTank (1192) overrides these methods separately and is left
+// alone — it's the "no fuel system" stub.
 //
-// Every ~5s: heap-walk for live FuelTank instances (cap 8 — player +
-// worker tanks if they're separate objects) and SetOilToMax each.
-// NullFuelTank (1192) is a different class and is intentionally NOT
-// targeted — it's the "no fuel system" stub.
+// Fallback: the original SetOilToMax poll stays — if the text patches
+// fail (vm_protect refused), it still tops up any instance the walk
+// can find.
 
 #include "features.h"
+#include "pac_swap.h"
 #include <string.h>
 
 static Il2CppClass      *g_klass = NULL;
-static const MethodInfo *g_setmax_mi = NULL;
+static const MethodInfo *g_isempty_mi = NULL;
+static const MethodInfo *g_consume_mi = NULL;
+static const MethodInfo *g_setmax_mi  = NULL;
 
+static int g_patched = 0;
 static int tick_count = 0;
 static int walks = 0;
 
@@ -35,23 +39,33 @@ static int init(void) {
         return -1;
     }
     int mc = bd_il2cpp_count_methods(g_klass);
-    g_setmax_mi = bd_il2cpp_find_method(g_klass, "SetOilToMax", 0);
-    bd_log("fuel: FuelTank class=%p method_count=%d SetOilToMax=%p",
-           g_klass, mc, (void *)g_setmax_mi);
-    if (!g_setmax_mi) {
-        bd_log("fuel: SetOilToMax unresolved — disabling");
+    g_isempty_mi = bd_il2cpp_find_method(g_klass, "get_IsOilEmpty", 0);
+    g_consume_mi = bd_il2cpp_find_method(g_klass, "ConsumeOil", 1);
+    g_setmax_mi  = bd_il2cpp_find_method(g_klass, "SetOilToMax", 0);
+    bd_log("fuel: FuelTank class=%p method_count=%d IsOilEmpty=%p ConsumeOil=%p SetOilToMax=%p",
+           g_klass, mc, (void *)g_isempty_mi, (void *)g_consume_mi,
+           (void *)g_setmax_mi);
+    if (!g_isempty_mi && !g_consume_mi && !g_setmax_mi) {
+        bd_log("fuel: no target methods resolved — disabling");
         return -1;
     }
-    // Late-spawning tanks (new stage/worker) — the periodic rewalk gives
-    // us a log line when they appear; the 5s action walk finds them anyway.
-    bd_register_rewalk("fuel", g_klass);
     return 0;
 }
 
 static int tick(void) {
     tick_count++;
-    if ((tick_count % 50) != 0) return 0;   // ~5s at 10 Hz
 
+    // One-shot code patches.
+    if (!g_patched) {
+        int n = 0;
+        if (g_isempty_mi) n += bd_hook_bool_false(g_isempty_mi, "fuel.IsOilEmpty");
+        if (g_consume_mi) n += bd_hook_ret_only(g_consume_mi, "fuel.ConsumeOil");
+        g_patched = 1;
+        bd_log("fuel: installed %d code patch(es) — oil never drains, never empty", n);
+    }
+
+    // Backup poll: SetOilToMax on any live instance the walk finds.
+    if (!g_setmax_mi || (tick_count % 50) != 0) return 0;
     void *found[8] = {0};
     int n = bd_il2cpp_find_instances(g_klass, found, 8);
     walks++;

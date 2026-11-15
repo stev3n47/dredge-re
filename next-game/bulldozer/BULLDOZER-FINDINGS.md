@@ -234,3 +234,42 @@ Open risks for device test:
    signature-method verification — log will show which resolved.
 5. `IsOnSkippedCheat`/`IsBannedUser` server-side effects unknown — telemetry
    flags are re-asserted false client-side; ban review is server-side.
+
+## v1.2 — first on-device log analysis + fixes
+
+Log (bdplus.log, 1031 lines) showed:
+- Bridge resolved 22/22 symbols; every class/method resolved with exact
+  catalog method counts (CurrencyManager 64, MineManager 70,
+  StatUpgradeManager 31, InAppShopManager 26, FuelTank 17).
+- methodPointer = image_base + dump.cs RVA confirmed (e.g. Show @
+  base+0x3B70FE4).
+- ALL inline patches failed: mach_vm_write -> KERN_INVALID_ADDRESS (kr=1)
+  on every target. Text pages are not writable via mach_vm_write.
+- methodPointer swaps installed fine (MethodInfo pages writable) but only
+  reach runtime_invoke/reflection/delegate paths — spend/rv/iap/research
+  hooks were therefore inert for normal game call sites.
+- Money Obtain "ok" but user saw no balance change — GetAmount/SetAmount
+  diagnostics + DEV_ShowMeTheMoreMoney fallback added to find out.
+- gc_foreach_heap klass pointers (0x10446xxxx region) never match image
+  metadata classes (0x124-0x128xxxxxx) — same failure PFPlus/SPPlus saw.
+  Instance features moved to SingletonBase._instance static field reads.
+
+v1.2 changes:
+- pac_swap: vm_protect fallback — flip __TEXT page RW, memcpy, restore RX.
+  UnityFramework is an app-bundle framework (not PPL-protected platform
+  code) so this should succeed where mach_vm_write failed. New helpers
+  bd_hook_bool_false (mov w0,#0;ret) and bd_hook_ret_only (ret).
+- il2cpp_bridge: +il2cpp_class_get_parent / class_get_field_from_name /
+  field_static_get_value; bd_singleton_instance() walks the parent chain
+  to the inflated SingletonBase<T>/SingletonBehaviourBase<T> and reads
+  the static _instance field.
+- feature_money: GetAmount logged around every op; `money` toggle adds a
+  ~10s SetAmount(Money, 2e9) pin (infinite money, spend checks pass
+  naturally); grant = GetAmount->SetAmount(+10M), DEV fallback.
+- feature_fuel: rewritten — code-patches FuelTank.get_IsOilEmpty->false
+  and ConsumeOil->ret (covers ALL instances, no discovery needed);
+  SetOilToMax poll kept as backup.
+- feature_stage: CompleteStage via bd_singleton_instance(MineManager),
+  heap walk kept as fallback.
+- spend/rv/iap/research: unchanged code — they now get real text patches
+  via the vm_protect path; methodPointer swap remains the fallback.
