@@ -1,0 +1,34 @@
+--Tutorial("DefeatViewLevelUp",
+--    cond.All:new(
+--        cond.ViewShown:new("CaptainsBarrelsDefeatView"),
+--        cond.Not:new(cond.CanStarUpgrade:new())
+--    ),
+--    function()
+--        WaitTime(1500)
+--        ShowCursor("buttonLevelUp")
+--        WaitClick()
+--    end
+--)
+
+--Tutorial("DefeatViewRiseStar",
+--    cond.All:new(
+--        cond.ViewShown:new("CaptainsBarrelsDefeatView"),
+--        cond.CanStarUpgrade:new()
+--    ),
+--    function()
+--        WaitTime(1500)
+--        ShowCursor("buttonRiseStar")
+--        WaitClick()
+--        WaitTime(500)
+--
+--        local captainId = tutor.Helper:findCaptainIdForStarUpgrade(20, 26, 22, 27)
+--        ShowTooltip("captainIcon_" .. captainId, "client.cap_minigames.captains.tutor.tooltip_star_up", "BOTTOM_MIDDLE")
+--        WaitClick()
+--        WaitTime(500)
+--        ShowCursor("starsContainer/upgradeButton")
+--        WaitClick()
+--        WaitTime(500)
+--        ShowCursor("priceContainer/[3]", 180)
+--        WaitClick()
+--    end
+--)

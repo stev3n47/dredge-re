@@ -1,0 +1,9 @@
+/* 
+  InfoPlist.strings
+  rubens
+
+  Created by Yuriy Dynnikov on 29.04.2021.
+  
+*/
+
+NSUserTrackingUsageDescription = "이는 향후 여러분의 게임 계정을 복구하고 여러분같이 멋진 분들께 Total Battle을 광고하는 데 도움이 됩니다 😉";

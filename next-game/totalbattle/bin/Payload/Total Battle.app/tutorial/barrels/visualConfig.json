@@ -1,0 +1,186 @@
+{
+    "monsters": {
+        "red_knight": {
+			"linkage": "barrels_enemy_knight",
+			"isRequiredOnPreloader": true,
+			"scale": 1.5,
+			"visualPosition": [0, -100, 0],
+			"hpBarScale": 1,
+			"uiPosition": [0, 160, 0],
+			"shadow": {
+				"linkage": "barrels_enemy_shadow",
+				"position": [-12, -32, 0],
+				"scale": 1.6,
+				"opacity": 140
+			},
+			"death": {
+				"sound": {
+					"channel": "enemy_death",
+					"linkages": ["barrels_enemy_death_1.mp3", "barrels_enemy_death_2.mp3", "barrels_enemy_death_3.mp3"],
+					"cooldown": 0.5
+				},
+				"animations": ["death", "death2"]
+			}
+		},
+        "ghoul": {
+			"linkage": "barrels_enemy_ghoul",
+			"scale": 1.5,
+			"visualPosition": [0, -100, 0],
+			"hpBarScale": 1,
+			"uiPosition": [0, 160, 0],
+			"shadow": {
+				"linkage": "barrels_enemy_shadow",
+				"position": [-12, -32, 0],
+				"scale": 1.6,
+				"opacity": 140
+			},
+			"death": {
+				"sound": {
+					"channel": "enemy_death",
+					"linkages": ["barrels_enemy_death_1.mp3", "barrels_enemy_death_2.mp3", "barrels_enemy_death_3.mp3"],
+					"cooldown": 0.5
+				},
+				"animations": ["death"]
+			}
+		},
+        "troll": {
+			"linkage": "barrels_enemy_troll",
+			"isRequiredOnPreloader": true,
+			"scale": 1.5,
+			"visualPosition": [100, 100, 0],
+			"hpBarScale": 1.6,
+			"uiPosition": [0, 160, 180],
+			"shadow": {
+				"linkage": "barrels_enemy_shadow",
+				"position": [-30, -30, 0],
+				"scale": 3.5,
+				"opacity": 170
+			},
+			"attackSound": {
+				"channel": "troll_attack",
+				"linkages": ["barrels_boss_attack.mp3"],
+				"cooldown": 1
+			},
+			"death": {
+				"sound": {
+					"channel": "boss_death",
+					"linkages": ["barrels_boss_death_1.mp3", "barrels_boss_death_2.mp3"],
+					"cooldown": 0.25
+				},
+				"animations": ["death", "death2"]
+			}
+		},
+        "troll_big": {
+			"linkage": "barrels_enemy_troll",
+			"scale": 2.0,
+			"visualPosition": [100, 100, 0],
+			"hpBarScale": 2.0,
+			"uiPosition": [0, 160, 180],
+			"shadow": {
+				"linkage": "barrels_enemy_shadow",
+				"position": [-30, -30, 0],
+				"scale": 3.5,
+				"opacity": 170
+			},
+			"attackSound": {
+				"channel": "troll_attack",
+				"linkages": ["barrels_boss_attack.mp3"],
+				"cooldown": 1
+			},
+			"death": {
+				"sound": {
+					"channel": "boss_death",
+					"linkages": ["barrels_boss_death_1.mp3", "barrels_boss_death_2.mp3"],
+					"cooldown": 0.25
+				},
+				"animations": ["death", "death2"]
+			}
+		},
+		"doom": {
+			"linkage": "barrels_enemy_doom",
+			"scale": 1.5,
+			"visualPosition": [0, 100, 0],
+			"hpBarScale": 2.0,
+			"uiPosition": [0, 160, 250],
+			"shadow": {
+				"linkage": "barrels_enemy_shadow",
+				"position": [-30, -30, 0],
+				"scale": 3.5,
+				"opacity": 170
+			},
+			"attackSound": {
+				"channel": "troll_attack",
+				"linkages": ["barrels_boss_attack.mp3"],
+				"cooldown": 1
+			},
+			"death": {
+				"sound": {
+					"channel": "boss_death",
+					"linkages": ["barrels_boss_death_1.mp3", "barrels_boss_death_2.mp3"],
+					"cooldown": 0.25
+				},
+				"animations": []
+			}
+		}
+    },
+    "weapons": {
+		"crossbow": {
+			"unitSkin": "bow",
+			"muzzleFireSkin": "bow",
+			"bonusIconSkin": "bow",
+			"projectileLinkage": "barrels_projectile_bow",
+			"shootingSoundLinkage": "barrels_shot_crossbow.mp3",
+			"muzzlePosition": [10, 0, 70],
+			"muzzleFirePositionRegular": [20, 230, 10],
+			"muzzleFirePositionRight": [30, 230, 10]
+		},
+		"shotgun": {
+			"unitSkin": "shotgun",
+			"muzzleFireSkin": "shotgun",
+			"bonusIconSkin": "shotgun",
+			"projectileLinkage": "barrels_projectile_shotgun",
+			"shootingSoundLinkage": "barrels_shot_shotgun.mp3",
+			"muzzlePosition": [10, 0, 70],
+			"muzzleFirePositionRegular": [19, 243, 10],
+			"muzzleFirePositionRight": [38, 205, 10]
+		},
+		"rifle": {
+			"unitSkin": "machinegun",
+			"muzzleFireSkin": "machinegun",
+			"bonusIconSkin": "machinegun",
+			"projectileLinkage": "barrels_projectile_rifle",
+			"shootingSoundLinkage": "barrels_shot_rifle.mp3",
+			"isLoopShootingSound": true,
+			"muzzlePosition": [10, 0, 70],
+			"muzzleFirePositionRegular": [10, 230, 10],
+			"muzzleFirePositionRight": [32, 210, 10]
+		},
+		"minigun": {
+			"unitSkin": "minigun",
+			"muzzleFireSkin": "machinegun",
+			"bonusIconSkin": "minigun",
+			"projectileLinkage": "barrels_projectile_minigun",
+			"shootingSoundLinkage": "barrels_shot_minigun.mp3",
+			"isLoopShootingSound": true,
+			"isAutoMuzzleFire": true,
+			"muzzlePosition": [50, 0, 70],
+			"muzzleFirePositionRegular": [30, 215, 10],
+			"muzzleFirePositionRight": [35, 200, 10]
+		}
+	},
+	"unitDeathSound": {
+		"channel": "unit_death",
+		"linkages": ["barrels_unit_death_1.mp3", "barrels_unit_death_2.mp3"],
+		"cooldown": 0.25
+	},
+	"unitDesintegrateSound": {
+		"channel": "unit_desintegrate",
+		"linkages": ["barrels_unit_disintegration.mp3"],
+		"cooldown": 0.25
+	},
+	"barrelRolloverSound": {
+		"channel": "barrel_rollover",
+		"linkages": ["barrels_barrel_rolling.mp3"],
+		"cooldown": 0.5
+	}
+}

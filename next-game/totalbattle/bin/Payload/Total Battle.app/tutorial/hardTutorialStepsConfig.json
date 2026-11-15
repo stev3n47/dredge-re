@@ -1,0 +1,32 @@
+{
+    "citizenConfigById": {
+        "8": {
+            "standLinkage": "citizen_rich_woman_green1",
+            "x": 30.3, "y": 28.4
+        },
+        "9": {
+            "standLinkage": "citizen_rich_man_blue1",
+            "x": 30.5, "y": 26.9
+        },
+        "10": {
+            "standLinkage": "citizen_rich_man_red1",
+            "x": 31.7, "y": 27.5
+        },
+        "11": {
+            "standLinkage": "citizen_rich_woman_orange1",
+            "x": 32.3, "y": 27.4
+        },
+        "12": {
+            "standLinkage": "citizen_poor_man_011",
+            "x": 31.1, "y": 29.2
+        },
+        "13": {
+            "standLinkage": "citizen_poor_man_011",
+            "x": 32.2, "y": 29.1
+        },
+        "14": {
+            "standLinkage": "citizen_rich_man_blue1",
+            "x": 32.4, "y": 28.5
+        }
+    }
+}

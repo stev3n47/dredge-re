@@ -1,0 +1,11 @@
+{
+	"reg_url" : "https://totalbattle.totalbattle-preprod.com/restapi/totalbattle/mobile/",
+ 	"cluster" : "preprod",
+	"review_reg_url" : "https://totalbattle.totalbattle-preprod.com/restapi/totalbattle/mobile/",
+ 	"review_cluster" : "preprod",
+ 	"cluster_update" :  "preprod",
+ 	"fb_appid" : "1841495079413162",
+ 	"fb_client_token": "198fcc3968008b1bc5011a57879634d4",
+ 	"af_appid" : "pCs7earN24YPjBQm7Hkm2j",
+ 	"didomi_consent_banner_id" : "WHQf8Kt9"
+}

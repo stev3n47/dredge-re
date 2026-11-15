@@ -1,0 +1,25 @@
+#ifdef GL_ES
+precision highp float;
+#endif
+
+varying vec4 v_fragmentColor;
+varying vec2 v_texCoord;
+varying float v_progress;
+
+const vec4 color = vec4(0.92, 0.62, 0.32, 0.7);
+const float maxDiff = 0.8;
+const float halfDiff = 0.4;
+
+void main() 
+{
+    vec4 tex = texture2D(CC_Texture0, v_texCoord);
+
+    float diff = mod(v_texCoord.y + v_progress, 1.0);
+    if (diff <= maxDiff && diff > 0.0) 
+    {
+        diff = maxDiff - (abs(diff - halfDiff) / halfDiff) * maxDiff;
+
+        tex = tex + (color * diff) * color.a * tex.a;
+    }
+    gl_FragColor = tex * v_fragmentColor;
+}
