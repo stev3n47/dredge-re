@@ -803,6 +803,7 @@ static Il2CppClass *resolve_class(const char *image, const char *name) {
 // mach_vm probe so a non-pointer field can't fault us.
 
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 static int safe_read(const void *addr, void *buf, unsigned long n) {
     mach_vm_size_t out = 0;
