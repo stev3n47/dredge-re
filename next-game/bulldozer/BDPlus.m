@@ -1,4 +1,4 @@
-// BDPlus v1.1 — Bulldozer Master (io.supercent.bulldozermasters 11.7.0)
+// BDPlus v1.2 — Bulldozer Master (io.supercent.bulldozermasters 11.7.0)
 // economy / ads / progression cheats.
 //
 // Target: Unity 2022.3.76f1, IL2CPP metadata v31, arm64.
@@ -225,7 +225,7 @@ static int bd_cfg_reload_if_changed(void) {
             int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {
                 const char *defaults =
-                    "# BDPlus v1.1 config — one key=value per line\n"
+                    "# BDPlus v1.2 config — one key=value per line\n"
                     "# Edit in Files app or via SSH; reloaded automatically.\n"
                     "money=1\n"
                     "# money_grant / stage_complete are ACTION keys: the\n"
@@ -754,7 +754,7 @@ static void main_tick_cb(CFRunLoopTimerRef timer, void *info) {
 
 __attribute__((constructor))
 static void bd_ctor(void) {
-    bd_log("boot: BDPlus v1.1 up · target io.supercent.bulldozermasters 11.7.0 · Unity 2022.3.76f1 / metadata v31");
+    bd_log("boot: BDPlus v1.2 up · target io.supercent.bulldozermasters 11.7.0 · Unity 2022.3.76f1 / metadata v31");
     bd_log("boot: running on main runloop (GC-thread-attach requirement)");
     bd_cfg_reload_if_changed();
 
