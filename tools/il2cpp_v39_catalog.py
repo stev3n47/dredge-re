@@ -48,7 +48,7 @@ def cstr(d, blob_off, idx):
     except UnicodeDecodeError: return None
 
 def valid_name(s):
-    return s is not None and re.match(r'^[A-Za-z_][A-Za-z0-9_<>`\.\[\]\, \+\-\*/=()&:]*$', s) is not None
+    return s is not None and re.match(r'^[A-Za-z_<.][A-Za-z0-9_<>`\.\[\]\, \+\-\*/=()&:]*$', s) is not None
 
 def detect_stride(d, sec, rows, name_col, str_off, str_size):
     """Find record stride so that column name_col is a valid string index."""
@@ -132,6 +132,12 @@ def main():
 
     # methodStart: non-decreasing i32 column in typedef bounded by n_meth.
     ms_col = find_monotonic_col(d, sec['typeDefinitions'], td_stride, min(n_td, 3000), n_meth)
+    # v31 (Unity 2022): typedef rows are not token-sorted, so methodStart is
+    # not monotonic in row order — methods table is grouped by token. Use the
+    # fixed 88-byte layout: methodStart i32 @+36 (col9), method_count u16 @+64.
+    mc_off = None
+    if ms_col is None and ver == 31 and td_stride == 88:
+        ms_col, mc_off = 9, 64
     assert ms_col is not None, 'methodStart column not found'
     # method_count: u16 that sums correctly — located after the i32 block;
     # scan u16 columns in typedef tail for values consistent with deltas of methodStart.
@@ -142,7 +148,8 @@ def main():
         name = cstr(d, str_off, i32(d, base)) or f't{r}'
         ns = cstr(d, str_off, i32(d, base + 4)) or ''
         ms = i32(d, base + ms_col * 4)
-        typedefs.append((name, ns, ms))
+        mcnt = u16(d, base + mc_off) if mc_off is not None else None
+        typedefs.append((name, ns, ms, mcnt))
     # typeStart per image: find i32 col in image defs monotonic & bounded by n_td.
     ts_col = find_monotonic_col(d, sec['images'], img_stride, n_img, n_td)
     img_ranges = []
@@ -164,14 +171,18 @@ def main():
     iw = open(os.path.join(outdir, 'images.txt'), 'w', encoding='utf-8')
     for i, (a, b) in enumerate(img_ranges):
         iw.write(f'{i}\t{images[i]}\ttypes {a}..{b-1}\n')
-    for r, (name, ns, ms) in enumerate(typedefs):
+    # v31 method record (36B): flags u16 @+28, parameterCount u16 @+34.
+    flags_off = 28 if (ver == 31 and meth_stride == 36) else meth_stride - 12
+    for r, (name, ns, ms, mcnt) in enumerate(typedefs):
         mend = typedefs[r + 1][2] if r + 1 < n_td else n_meth
-        mc = max(0, mend - ms)
+        mc = mcnt if mcnt is not None else max(0, mend - ms)
         tw.write(f'{img_of(r)}\t{r}\t{ns}\t{name}\t{ms}\t{mc}\n')
-        for m in range(ms, min(mend, ms + mc)):
+        if ms < 0:
+            continue
+        for m in range(ms, min(n_meth, ms + mc)):
             mb = meth_off + m * meth_stride
             mname = cstr(d, str_off, i32(d, mb)) or f'm{m}'
-            flags = u16(d, mb + meth_stride - 12)  # flags near tail; heuristic
+            flags = u16(d, mb + flags_off)
             params = u16(d, mb + meth_stride - 2)
             mw.write(f'{r}\t{m}\t{mname}\tfl={flags:#x}\tpc={params}\n')
     tw.close(); mw.close(); iw.close()
