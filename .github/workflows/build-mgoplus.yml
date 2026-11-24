@@ -1,0 +1,105 @@
+name: Build MGOPlus.dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'next-game/monopolygo/MGOPlus.m'
+      - 'next-game/monopolygo/il2cpp_*.h'
+      - 'next-game/monopolygo/il2cpp_*.c'
+      - 'next-game/monopolygo/feature_*.c'
+      - 'next-game/monopolygo/features.h'
+      - 'next-game/monopolygo/mgoplus_menu.m'
+      - '.github/workflows/build-mgoplus.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mgoplus-release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          # MGOPlus is read-only — no hooks, no methodPointer swaps, no
+          # code-page writes. It resolves il2cpp_* exports via dlsym
+          # (Monopoly GO 1.82.0 exports all 242 of them) and reads managed
+          # fields on a heap-walked BoardState. -framework CoreFoundation
+          # is linked so kCFRunLoopCommonModes resolves as a real
+          # load-command symbol (PFPlus v1a.3 pointer-equality lesson).
+          clang -arch arm64 -dynamiclib \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=13.0 \
+            -fno-objc-arc -fblocks -O2 -fno-objc-exceptions \
+            -fvisibility=hidden \
+            -Wl,-undefined,dynamic_lookup -lSystem \
+            -framework CoreFoundation \
+            -Wl,-x -Wl,-unexported_symbol,'*' \
+            -install_name '@executable_path/Frameworks/MGOPlus.framework/MGOPlus' \
+            -o MGOPlus \
+              next-game/monopolygo/MGOPlus.m \
+              next-game/monopolygo/mgoplus_menu.m \
+              next-game/monopolygo/il2cpp_bridge.c \
+              next-game/monopolygo/feature_*.c
+          strip -x MGOPlus || true
+          file MGOPlus
+          otool -L MGOPlus
+          # Real (self-signed) cert — not ad-hoc. Signulous-style re-signers
+          # enumerate nested binaries by their CMS signature; a stripped stub
+          # gets skipped, stays unsigned, and iOS kills the app on launch.
+          openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+            -days 30 -nodes -subj "/CN=MGOPlus/" \
+            -addext "keyUsage=critical,digitalSignature" \
+            -addext "extendedKeyUsage=critical,codeSigning" \
+            -addext "basicConstraints=critical,CA:FALSE"
+          openssl pkcs12 -export -legacy -out id.p12 -inkey key.pem -in cert.pem -passout pass:temp
+          security create-keychain -p temp t.keychain
+          security default-keychain -s t.keychain
+          security list-keychains -d user -s t.keychain
+          security unlock-keychain -p temp t.keychain
+          security import id.p12 -k t.keychain -P temp -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp t.keychain
+          codesign --force --sign "MGOPlus" MGOPlus
+          codesign -dv MGOPlus 2>&1 | head -5
+      - name: Re-sign + verify like a sideload re-signer
+        run: |
+          codesign --force --sign "MGOPlus" MGOPlus
+          codesign -vvv --deep MGOPlus
+          otool -l MGOPlus | grep -A4 LC_CODE_SIGNATURE
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MGOPlus
+          path: MGOPlus
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Rolling "mgoplus-latest" release so the signed dylib is reachable
+          # from a github.com URL — same atomic-swap flow as PFPlus v2.5.1:
+          # move the tag first, then clobber the asset in place so the
+          # download URL never 404s.
+          TAG="mgoplus-latest"
+          TITLE="MGOPlus.dylib · ${GITHUB_SHA::7}"
+          BODY=$(printf 'MGOPlus arm64 iOS dylib built from %s on %s.\n\nSize: %s bytes.\nIntegrity: %s\n\nUsage: python tools/inject_monopolygo.py <MonopolyGo.ipa> MGOPlus <out.ipa>; sign with TrollStore/AltStore/SideStore/dev-signed; install.' \
+            "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(stat -f%z MGOPlus)" "$(shasum -a 256 MGOPlus | awk '{print $1}')")
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push -f origin "$TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "$TITLE" \
+              --notes "$BODY" \
+              --target "$GITHUB_SHA"
+            gh release upload "$TAG" MGOPlus --clobber
+          else
+            gh release create "$TAG" MGOPlus \
+              --title "$TITLE" \
+              --notes "$BODY" \
+              --target "$GITHUB_SHA"
+          fi
