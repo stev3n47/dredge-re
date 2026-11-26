@@ -232,18 +232,57 @@ static sig_t g_last_sig = { -1, -1, -1, -1, -1, -1 };
 static int   g_last_peek = -1;
 
 static int dice_init(void) {
+    const char *via = NULL;
     g_bs_klass = mgo_il2cpp_find_class("Assembly-CSharp.dll",
                                      "Tophat.Common.Board.State", "BoardState");
-    if (!g_bs_klass)
+    if (g_bs_klass) via = "image+ns";
+    if (!g_bs_klass) {
         g_bs_klass = mgo_il2cpp_find_class(NULL, "Tophat.Common.Board.State", "BoardState");
-    if (!g_bs_klass)
+        if (g_bs_klass) via = "ns-only";
+    }
+    if (!g_bs_klass) {
         g_bs_klass = mgo_il2cpp_find_class(NULL, NULL, "BoardState");
+        if (g_bs_klass) via = "name-only (UNSAFE)";
+    }
     if (!g_bs_klass) {
         mgo_log("dice: BoardState class NOT FOUND");
         return -1;
     }
+    const char *ns = mgo_il2cpp_class_get_namespace(g_bs_klass);
+    const char *nm = mgo_il2cpp_class_get_name(g_bs_klass);
     int mc = mgo_il2cpp_count_methods(g_bs_klass);
-    mgo_log("dice: BoardState class=%p method_count=%d", (void *)g_bs_klass, mc);
+    mgo_log("dice: BoardState class=%p via=%s ns=%s name=%s method_count=%d",
+            (void *)g_bs_klass, via, ns ? ns : "(null)", nm ? nm : "(null)", mc);
+
+    // Zero live matches in the heap walk is almost always a wrong-class
+    // pick (same short name in a protocol/DTO assembly). Enumerate every
+    // class literally named "BoardState" so the next log tells us which
+    // candidate was picked and what the alternatives look like.
+    Il2CppDomain *dom = mgo_il2cpp_domain_get();
+    if (dom && mgo_il2cpp_domain_get_assemblies) {
+        size_t n_asm = 0;
+        const Il2CppAssembly **asms = mgo_il2cpp_domain_get_assemblies(dom, &n_asm);
+        int found = 0;
+        for (size_t ai = 0; ai < n_asm; ai++) {
+            const Il2CppImage *img = mgo_il2cpp_assembly_get_image(asms[ai]);
+            if (!img) continue;
+            const char *in = mgo_il2cpp_image_get_name(img);
+            size_t ncl = mgo_il2cpp_image_get_class_count(img);
+            for (size_t ci = 0; ci < ncl; ci++) {
+                Il2CppClass *k = mgo_il2cpp_image_get_class(img, ci);
+                if (!k) continue;
+                const char *kn = mgo_il2cpp_class_get_name(k);
+                if (!kn || strcmp(kn, "BoardState") != 0) continue;
+                const char *kns = mgo_il2cpp_class_get_namespace(k);
+                mgo_log("dice: candidate %p image=%s ns=%s name=%s%s",
+                        (void *)k, in ? in : "(null)",
+                        kns ? kns : "(null)", kn,
+                        k == g_bs_klass ? "  <-- chosen" : "");
+                found++;
+            }
+        }
+        mgo_log("dice: total 'BoardState'-named classes: %d", found);
+    }
     return 0;
 }
 
