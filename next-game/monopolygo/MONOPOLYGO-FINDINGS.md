@@ -272,3 +272,51 @@ die pulls (burn count drift — logged `st` will still be right, adjust
 draws-per-roll), a pre-filled `action.RollResult` (scripted path), or
 TokenPosition/RollMultiplier read mid-animation (self-corrects on land).
 `draw N/2000` in the panel tracks the cap-reseed boundary.
+
+## Anti-cheat: `withbuddies_integrity_ios` (App Attest) + bypass
+
+`Frameworks/withbuddies_integrity_ios.framework` (324KB, Swift) is a
+DeviceCheck **App Attest** bridge, NOT a classic jailbreak/tweak
+detector. UnityFramework hard-links it (`LC_LOAD_DYLIB @rpath/…`) and
+imports 4 C symbols:
+
+```
+WithBuddies_integrity_iOS_isIntegrityCheckSupported  @0x88f0 (thunk)
+WithBuddies_integrity_iOS_certifyAppAttestKey        @0xb4bc
+WithBuddies_integrity_iOS_generateAssertion          @0xbf00
+WithBuddies_integrity_iOS_getFullAppIdentifier       @0x89c8
+```
+
+Managed side (`WithBuddies.Client.Integrity.dll`):
+`IntegrityRequester`(MonoBehaviour).`Start` → gate on
+`isIntegrityCheckSupported()` (P/Invoke stub @0x5f57240) →
+`FirstSessionRequest` + `ContinuousIntervalRequest` coroutines →
+`IntegrityService.Report()` → `IntegrityReporterIos.GenerateToken` →
+`IntegrityIosBridge.RequestToken` → `certifyAppAttestKey` /
+`generateAssertion` → `IntegrityReportRequest` (token +
+`getFullAppIdentifier()` = embedded.mobileprovision app-ID) → server.
+
+**Why it caught the re-sign:** App Attest still produces a *valid*
+attestation on a re-signed binary — but attesting the re-signer's
+team ID, not `C8JJ626MJR`. Server sees a modified binary → refuses
+entry. `getFullAppIdentifier` would also leak the foreign
+`TEAMID.bundle` from the provisioning profile.
+
+**Bypass:** force `isIntegrityCheckSupported() -> false`. Disasm of
+`IntegrityRequester.<Start>d__10.MoveNext` @0x5ddaca0: `cbz w0` at
+0x5ddadd4 exits the coroutine *before either requester coroutine is
+allocated* — no `IntegrityReportRequest` is ever built or sent, the
+same state a legit iOS<14 device presents (DCAppAttestService
+unsupported). bl-xref scan over `__TEXT,il2cpp` confirms
+`ForceReport`/`ReportNow`/`ElapsedSinceTrustProven`/
+`IsRunningOnSupportedPlatform`/`getFullAppIdentifier` have **zero
+other callers** — nothing else can trigger or leak a report.
+
+Patch (in `inject_monopolygo.py`, export-trie symbol lookup):
+`mov w0, #0; ret` (`00 00 80 52 C0 03 5F D6`) at the
+`isIntegrityCheckSupported` export (file off 0x88f0 in v1.82.0).
+
+Residual risk: if Scopely's server *requires* an integrity report
+rather than merely validating ones it receives, unsupported devices
+couldn't play at all — the same trade Scopely already accepted for
+iOS<14 users, and consistent with the iOSGods mod working.
