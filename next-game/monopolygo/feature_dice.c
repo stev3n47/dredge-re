@@ -112,6 +112,13 @@ void mgo_dice_get_snapshot(mgo_dice_snapshot_t *out) {
 // ---------- BoardState discovery + parse ----------------------------------
 
 static Il2CppClass *g_bs_klass = NULL;
+// BoardState + every derived class we found at init. Heap objects of
+// derived types have a different klass pointer than the base, so pointer-
+// equality against just g_bs_klass would miss them even though the field
+// layout at 0x20/0x30/0x60/0x68 is inherited and still valid.
+#define MGO_BS_MAX_KLASSES 16
+static Il2CppClass *g_bs_klasses[MGO_BS_MAX_KLASSES];
+static int          g_n_bs_klasses = 0;
 static void        *g_bs_inst  = NULL;
 static void        *g_bs_bad   = NULL;   // instance that failed parse — skip on re-walk
 static unsigned long g_last_walk_ms = 0;
@@ -144,11 +151,15 @@ static int read_dice_rng(void *bs, int32_t *out_state, int64_t *out_seed,
     return 0;
 }
 
-// Cheap liveness probe: the object's first word must still be our class
-// pointer. If BoardState was GC'd and the slot reused, this fails fast.
+// Cheap liveness probe: the object's first word must still be one of our
+// known BoardState klass pointers. If the slot was freed and reused, this
+// fails fast.
 static int bs_alive(void *bs) {
-    if (!bs || !g_bs_klass) return 0;
-    return *(void **)bs == (void *)g_bs_klass;
+    if (!bs || g_n_bs_klasses == 0) return 0;
+    void *k = *(void **)bs;
+    for (int i = 0; i < g_n_bs_klasses; i++)
+        if (k == (void *)g_bs_klasses[i]) return 1;
+    return 0;
 }
 
 // Heap-walk for BoardState instances; prefer one that actually parses a
@@ -164,7 +175,7 @@ static void *resolve_boardstate(void) {
     g_last_walk_ms = t;
 
     void *found[16];
-    int n = mgo_il2cpp_find_instances(g_bs_klass, found, 16);
+    int n = mgo_il2cpp_find_instances_any(g_bs_klasses, g_n_bs_klasses, found, 16);
     if (n <= 0) return NULL;
 
     int32_t st; int64_t sd, it;
@@ -233,7 +244,9 @@ static int   g_last_peek = -1;
 
 static int dice_init(void) {
     const char *via = NULL;
-    g_bs_klass = mgo_il2cpp_find_class("Assembly-CSharp.dll",
+    // 1.82.0 ships BoardState in Tophat.Common.dll, not Assembly-CSharp.dll
+    // (confirmed by the init enumeration from the previous diagnostic build).
+    g_bs_klass = mgo_il2cpp_find_class("Tophat.Common.dll",
                                      "Tophat.Common.Board.State", "BoardState");
     if (g_bs_klass) via = "image+ns";
     if (!g_bs_klass) {
@@ -254,35 +267,38 @@ static int dice_init(void) {
     mgo_log("dice: BoardState class=%p via=%s ns=%s name=%s method_count=%d",
             (void *)g_bs_klass, via, ns ? ns : "(null)", nm ? nm : "(null)", mc);
 
-    // Zero live matches in the heap walk is almost always a wrong-class
-    // pick (same short name in a protocol/DTO assembly). Enumerate every
-    // class literally named "BoardState" so the next log tells us which
-    // candidate was picked and what the alternatives look like.
+    g_bs_klasses[g_n_bs_klasses++] = g_bs_klass;
+
+    // The prior build matched zero live objects in the heap walk even on
+    // the correct base class. Most likely the game instantiates a derived
+    // type (e.g. a game-mode-specific state), whose klass pointer differs
+    // from the base — pointer-equality against g_bs_klass can't catch it.
+    // Enumerate every class that is_assignable_from(BoardState, k) and
+    // include them in the heap-walk target set. The field layout at
+    // 0x20/0x30/0x60/0x68 is inherited, so read_dice_rng still works.
     Il2CppDomain *dom = mgo_il2cpp_domain_get();
-    if (dom && mgo_il2cpp_domain_get_assemblies) {
+    if (dom && mgo_il2cpp_domain_get_assemblies && mgo_il2cpp_class_is_assignable_from) {
         size_t n_asm = 0;
         const Il2CppAssembly **asms = mgo_il2cpp_domain_get_assemblies(dom, &n_asm);
-        int found = 0;
-        for (size_t ai = 0; ai < n_asm; ai++) {
+        for (size_t ai = 0; ai < n_asm && g_n_bs_klasses < MGO_BS_MAX_KLASSES; ai++) {
             const Il2CppImage *img = mgo_il2cpp_assembly_get_image(asms[ai]);
             if (!img) continue;
             const char *in = mgo_il2cpp_image_get_name(img);
             size_t ncl = mgo_il2cpp_image_get_class_count(img);
-            for (size_t ci = 0; ci < ncl; ci++) {
+            for (size_t ci = 0; ci < ncl && g_n_bs_klasses < MGO_BS_MAX_KLASSES; ci++) {
                 Il2CppClass *k = mgo_il2cpp_image_get_class(img, ci);
-                if (!k) continue;
-                const char *kn = mgo_il2cpp_class_get_name(k);
-                if (!kn || strcmp(kn, "BoardState") != 0) continue;
+                if (!k || k == g_bs_klass) continue;
+                if (!mgo_il2cpp_class_is_assignable_from(g_bs_klass, k)) continue;
+                const char *kn  = mgo_il2cpp_class_get_name(k);
                 const char *kns = mgo_il2cpp_class_get_namespace(k);
-                mgo_log("dice: candidate %p image=%s ns=%s name=%s%s",
+                mgo_log("dice: subclass %p image=%s ns=%s name=%s",
                         (void *)k, in ? in : "(null)",
-                        kns ? kns : "(null)", kn,
-                        k == g_bs_klass ? "  <-- chosen" : "");
-                found++;
+                        kns ? kns : "(null)", kn ? kn : "(null)");
+                g_bs_klasses[g_n_bs_klasses++] = k;
             }
         }
-        mgo_log("dice: total 'BoardState'-named classes: %d", found);
     }
+    mgo_log("dice: %d BoardState class(es) total (base + subclasses)", g_n_bs_klasses);
     return 0;
 }
 

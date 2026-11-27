@@ -276,6 +276,44 @@ int mgo_il2cpp_find_instances(Il2CppClass *klass, void **out, int cap) {
     return c.n;
 }
 
+// Multi-target variant: match against ANY of n_targets pre-resolved classes.
+// Still only pointer-equality inside the callback — targets[] is a small
+// array of klass pointers the caller already resolved from image metadata,
+// so the safety rules above still hold.
+struct walk_ctx_multi {
+    Il2CppClass **targets;
+    int n_targets;
+    void **out;
+    int cap;
+    int n;
+    long scanned;
+};
+
+static void walk_cb_multi(void *obj, void *user) {
+    struct walk_ctx_multi *c = (struct walk_ctx_multi *)user;
+    c->scanned++;
+    if (!obj || c->n >= c->cap) return;
+    Il2CppClass *k = mgo_il2cpp_object_get_class(obj);
+    if (!k) return;
+    for (int i = 0; i < c->n_targets; i++) {
+        if (k == c->targets[i]) {
+            c->out[c->n++] = obj;
+            return;
+        }
+    }
+}
+
+int mgo_il2cpp_find_instances_any(Il2CppClass **targets, int n_targets,
+                                  void **out, int cap) {
+    if (!g_ready || !targets || n_targets <= 0 || !out || cap <= 0) return 0;
+    if (!mgo_il2cpp_gc_foreach_heap || !mgo_il2cpp_object_get_class) return 0;
+    struct walk_ctx_multi c = { targets, n_targets, out, cap, 0, 0 };
+    mgo_il2cpp_gc_foreach_heap(walk_cb_multi, &c);
+    mgo_log("heap: walk scanned %ld objects, matched %d against %d class(es)",
+            c.scanned, c.n, n_targets);
+    return c.n;
+}
+
 // --- typed invokes --------------------------------------------------------
 
 Il2CppObject *mgo_il2cpp_invoke0(const MethodInfo *m, void *self, int *out_ok) {

@@ -74,6 +74,12 @@ int               mgo_il2cpp_count_methods(Il2CppClass *klass);
 // Not re-entrant.
 int               mgo_il2cpp_find_instances(Il2CppClass *klass, void **out, int cap);
 
+// Same as find_instances but matches against ANY of n_targets pre-resolved
+// class pointers. Caller-owned `targets` must stay valid across the call.
+// Pointer-equality only (same safety envelope as find_instances).
+int               mgo_il2cpp_find_instances_any(Il2CppClass **targets, int n_targets,
+                                                void **out, int cap);
+
 // Invoke `method` with 0/1 args. `self` may be NULL for statics. Returns
 // the boxed result; caller unboxes if needed. On any resolver miss returns
 // NULL and sets *out_ok = 0 if non-NULL.
