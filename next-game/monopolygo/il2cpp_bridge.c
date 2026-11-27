@@ -314,6 +314,133 @@ int mgo_il2cpp_find_instances_any(Il2CppClass **targets, int n_targets,
     return c.n;
 }
 
+// --- known-klass set + heap histogram ------------------------------------
+//
+// To interpret klass pointers collected during gc_foreach_heap safely, we
+// need to distinguish real Il2CppClass* values (from image metadata) from
+// garbage that the walker surfaces for non-managed allocations. Build a
+// sorted array of every klass pointer we can enumerate at init, then
+// binary-search it before calling any il2cpp_class_* API on a heap klass.
+
+static Il2CppClass **g_all_klasses = NULL;
+static int           g_n_all_klasses = 0;
+
+static int cmp_klass_ptr(const void *a, const void *b) {
+    Il2CppClass *ka = *(Il2CppClass * const *)a;
+    Il2CppClass *kb = *(Il2CppClass * const *)b;
+    if (ka < kb) return -1;
+    if (ka > kb) return 1;
+    return 0;
+}
+
+int mgo_il2cpp_build_klass_set(void) {
+    if (!g_ready) return -1;
+    if (g_all_klasses) return g_n_all_klasses;
+
+    Il2CppDomain *dom = mgo_il2cpp_domain_get();
+    if (!dom || !mgo_il2cpp_domain_get_assemblies) return -1;
+    size_t n_asm = 0;
+    const Il2CppAssembly **asms = mgo_il2cpp_domain_get_assemblies(dom, &n_asm);
+    if (!asms) return -1;
+
+    size_t total = 0;
+    for (size_t ai = 0; ai < n_asm; ai++) {
+        const Il2CppImage *img = mgo_il2cpp_assembly_get_image(asms[ai]);
+        if (img) total += mgo_il2cpp_image_get_class_count(img);
+    }
+    if (total == 0) return 0;
+
+    g_all_klasses = (Il2CppClass **)calloc(total, sizeof(Il2CppClass *));
+    if (!g_all_klasses) return -1;
+
+    for (size_t ai = 0; ai < n_asm; ai++) {
+        const Il2CppImage *img = mgo_il2cpp_assembly_get_image(asms[ai]);
+        if (!img) continue;
+        size_t ncl = mgo_il2cpp_image_get_class_count(img);
+        for (size_t ci = 0; ci < ncl; ci++) {
+            Il2CppClass *k = mgo_il2cpp_image_get_class(img, ci);
+            if (k) g_all_klasses[g_n_all_klasses++] = k;
+        }
+    }
+    qsort(g_all_klasses, g_n_all_klasses, sizeof(Il2CppClass *), cmp_klass_ptr);
+    mgo_log("bridge: known-klass set: %d classes across %zu assemblies",
+            g_n_all_klasses, n_asm);
+    return g_n_all_klasses;
+}
+
+int mgo_il2cpp_is_known_klass(Il2CppClass *k) {
+    if (!g_all_klasses || !k) return 0;
+    int lo = 0, hi = g_n_all_klasses - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        Il2CppClass *m = g_all_klasses[mid];
+        if (m == k) return 1;
+        if (m < k) lo = mid + 1;
+        else       hi = mid - 1;
+    }
+    return 0;
+}
+
+// Heap histogram: walk once, bucket klass pointers, log each class whose
+// namespace starts with `ns_prefix` (NULL = all) and its live count.
+// Static 1 MiB staging buffer; overflow is fine — unique classes still
+// get seen even if some object entries are dropped.
+
+#define MGO_HIST_CAP (1 << 17)   /* 131072 object slots */
+static Il2CppClass *g_hist_buf[MGO_HIST_CAP];
+
+struct hist_ctx {
+    int n;
+    int overflow;
+    long scanned;
+};
+
+static void hist_walk_cb(void *obj, void *user) {
+    struct hist_ctx *c = (struct hist_ctx *)user;
+    c->scanned++;
+    if (!obj) return;
+    Il2CppClass *k = mgo_il2cpp_object_get_class(obj);
+    if (!k) return;
+    if (c->n < MGO_HIST_CAP) g_hist_buf[c->n++] = k;
+    else c->overflow++;
+}
+
+void mgo_il2cpp_heap_histogram(const char *ns_prefix) {
+    if (!g_ready || !mgo_il2cpp_gc_foreach_heap || !mgo_il2cpp_object_get_class) return;
+    if (!g_all_klasses) {
+        mgo_log("heap: histogram skipped — known-klass set not built");
+        return;
+    }
+    struct hist_ctx c = { 0, 0, 0 };
+    mgo_il2cpp_gc_foreach_heap(hist_walk_cb, &c);
+    mgo_log("heap: histogram scanned %ld objects (overflow=%d, prefix=%s)",
+            c.scanned, c.overflow, ns_prefix ? ns_prefix : "*");
+
+    qsort(g_hist_buf, c.n, sizeof(Il2CppClass *), cmp_klass_ptr);
+
+    size_t pref_len = ns_prefix ? strlen(ns_prefix) : 0;
+    int printed = 0;
+    for (int i = 0; i < c.n; ) {
+        Il2CppClass *k = g_hist_buf[i];
+        int cnt = 1;
+        while (i + cnt < c.n && g_hist_buf[i + cnt] == k) cnt++;
+        int next = i + cnt;
+        i = next;
+        if (!mgo_il2cpp_is_known_klass(k)) continue;
+        const char *kn  = mgo_il2cpp_class_get_name(k);
+        const char *kns = mgo_il2cpp_class_get_namespace(k);
+        if (!kn) continue;
+        if (ns_prefix) {
+            if (!kns) continue;
+            if (strncmp(kns, ns_prefix, pref_len) != 0) continue;
+        }
+        mgo_log("heap: %d x %s.%s (klass %p)",
+                cnt, kns ? kns : "(null)", kn, (void *)k);
+        printed++;
+    }
+    mgo_log("heap: histogram done - %d class(es) matched prefix", printed);
+}
+
 // --- typed invokes --------------------------------------------------------
 
 Il2CppObject *mgo_il2cpp_invoke0(const MethodInfo *m, void *self, int *out_ok) {

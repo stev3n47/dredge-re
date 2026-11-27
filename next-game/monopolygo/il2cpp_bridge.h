@@ -80,6 +80,23 @@ int               mgo_il2cpp_find_instances(Il2CppClass *klass, void **out, int 
 int               mgo_il2cpp_find_instances_any(Il2CppClass **targets, int n_targets,
                                                 void **out, int cap);
 
+// Build the known-klass set (every Il2CppClass* reachable from image
+// metadata, sorted for binary search). Call once at init before any
+// mgo_il2cpp_is_known_klass or mgo_il2cpp_heap_histogram. Returns the
+// class count (>= 0) or -1 on failure. Idempotent.
+int               mgo_il2cpp_build_klass_set(void);
+
+// Binary-search the known-klass set. Returns 1 iff `k` is a class pointer
+// enumerated by build_klass_set — safe-to-use predicate for klass values
+// collected during gc_foreach_heap, which can surface garbage otherwise.
+int               mgo_il2cpp_is_known_klass(Il2CppClass *k);
+
+// Walk the heap once, bucket klass pointers for every live object, and
+// log a count + namespace.name for each unique class whose namespace
+// starts with `ns_prefix` (pass NULL to log every class). Needs
+// build_klass_set to have been called first; otherwise it is a no-op.
+void              mgo_il2cpp_heap_histogram(const char *ns_prefix);
+
 // Invoke `method` with 0/1 args. `self` may be NULL for statics. Returns
 // the boxed result; caller unboxes if needed. On any resolver miss returns
 // NULL and sets *out_ok = 0 if non-NULL.

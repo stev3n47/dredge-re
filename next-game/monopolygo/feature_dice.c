@@ -122,6 +122,8 @@ static int          g_n_bs_klasses = 0;
 static void        *g_bs_inst  = NULL;
 static void        *g_bs_bad   = NULL;   // instance that failed parse — skip on re-walk
 static unsigned long g_last_walk_ms = 0;
+static unsigned long g_dice_init_ms = 0;
+static int           g_hist_done = 0;
 
 static unsigned long now_ms(void);
 
@@ -299,12 +301,31 @@ static int dice_init(void) {
         }
     }
     mgo_log("dice: %d BoardState class(es) total (base + subclasses)", g_n_bs_klasses);
+
+    // Build the known-klass set so the fallback heap histogram (dice_tick)
+    // can safely call class_get_name on klass pointers collected during
+    // gc_foreach_heap.
+    mgo_il2cpp_build_klass_set();
+
+    g_dice_init_ms = now_ms();
     return 0;
 }
 
 static int dice_tick(void) {
     void *bs = resolve_boardstate();
     if (!bs) {
+        // Fallback diagnostic: if BoardState hasn't been found ~20s after
+        // init, dump every Tophat.* class with a live instance. Tells us
+        // whether BoardState is literally on the heap under a klass pointer
+        // that differs from the one image metadata hands us (closed-generic
+        // instantiation, runtime-synthesized type), or whether gameplay
+        // state isn't live at all.
+        if (!g_hist_done && g_dice_init_ms &&
+            (now_ms() - g_dice_init_ms) > 20000UL) {
+            g_hist_done = 1;
+            mgo_log("dice: no BoardState for 20s after init — dumping Tophat.* heap histogram");
+            mgo_il2cpp_heap_histogram("Tophat.");
+        }
         if (g_dice_snap.valid) {
             memset(&g_dice_snap, 0, sizeof g_dice_snap);
             mgo_log("dice: BoardState lost — snapshot cleared");
