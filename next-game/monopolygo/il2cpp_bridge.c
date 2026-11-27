@@ -246,6 +246,28 @@ int mgo_il2cpp_count_methods(Il2CppClass *klass) {
 // whose klass field is garbage — any il2cpp call through it walks into
 // bad memory. No is_assignable_from, no class_get_name, no gc_disable
 // wrap (gc_foreach_heap manages its own stop-the-world).
+//
+// CALLBACK CONTRACT (Unity 6 / Monopoly GO 1.82.0):
+// il2cpp_gc_foreach_heap on this build passes a pointer to an ITERATOR
+// RECORD, not the Il2CppObject itself. The record's first word is the
+// real object pointer, the second is its size in bytes. Verified
+// empirically via mgo_il2cpp_probe_object_layout: 256 sampled `obj`
+// callback args were all the same stack address (0x16d... — iOS main-
+// thread stack), while *(obj) walked the heap pages (deltas between
+// successive *(obj) values matched *(obj+8) sizes exactly).
+// Dereference once at the top of every callback to get the real object.
+
+static inline void *mgo_heap_iter_to_obj(void *iter) {
+    if (!iter) return NULL;
+    void *obj = *(void **)iter;
+    // Range guard: real managed objects live in the iOS heap range. If
+    // the dereferenced value is outside that, something about the
+    // iterator layout is different for this record — skip it rather
+    // than crash.
+    uintptr_t u = (uintptr_t)obj;
+    if (u < 0x100000000UL || u >= 0x8000000000UL) return NULL;
+    return obj;
+}
 
 struct walk_ctx {
     Il2CppClass *target;  // pre-resolved from image metadata — always safe
@@ -255,9 +277,10 @@ struct walk_ctx {
     long scanned;
 };
 
-static void walk_cb(void *obj, void *user) {
+static void walk_cb(void *iter, void *user) {
     struct walk_ctx *c = (struct walk_ctx *)user;
     c->scanned++;
+    void *obj = mgo_heap_iter_to_obj(iter);
     if (!obj || c->n >= c->cap) return;
     Il2CppClass *k = mgo_il2cpp_object_get_class(obj);  // obj->klass; cheap
     if (!k) return;
@@ -289,9 +312,10 @@ struct walk_ctx_multi {
     long scanned;
 };
 
-static void walk_cb_multi(void *obj, void *user) {
+static void walk_cb_multi(void *iter, void *user) {
     struct walk_ctx_multi *c = (struct walk_ctx_multi *)user;
     c->scanned++;
+    void *obj = mgo_heap_iter_to_obj(iter);
     if (!obj || c->n >= c->cap) return;
     Il2CppClass *k = mgo_il2cpp_object_get_class(obj);
     if (!k) return;
@@ -395,9 +419,10 @@ struct hist_ctx {
     long scanned;
 };
 
-static void hist_walk_cb(void *obj, void *user) {
+static void hist_walk_cb(void *iter, void *user) {
     struct hist_ctx *c = (struct hist_ctx *)user;
     c->scanned++;
+    void *obj = mgo_heap_iter_to_obj(iter);
     if (!obj) return;
     Il2CppClass *k = mgo_il2cpp_object_get_class(obj);
     if (!k) return;
@@ -506,24 +531,46 @@ void mgo_il2cpp_heap_histogram(const char *ns_prefix, int top_n) {
 #define PROBE_CAP 256
 static int        g_probe_n = 0;
 static void      *g_probe_addr[PROBE_CAP];
-static uintptr_t  g_probe_w[PROBE_CAP][4];
-static uintptr_t  g_probe_oget[PROBE_CAP];
+static uintptr_t  g_probe_w[PROBE_CAP][4];        // first 4 words at iter addr
+static uintptr_t  g_probe_oget[PROBE_CAP];        // what il2cpp_object_get_class returns
+static uintptr_t  g_probe_deref_w[PROBE_CAP][4];  // first 4 words at *(iter+0) (real obj, if hypothesis holds)
+static uintptr_t  g_probe_deref_oget[PROBE_CAP];  // il2cpp_object_get_class(*iter)
+static int        g_probe_deref_valid[PROBE_CAP]; // 1 if *(iter+0) looked like a heap address
 
-static void probe_walk_cb(void *obj, void *user) {
+static void probe_walk_cb(void *iter, void *user) {
     (void)user;
-    if (!obj || g_probe_n >= PROBE_CAP) return;
-    uintptr_t *o = (uintptr_t *)obj;
-    g_probe_addr[g_probe_n] = obj;
-    // Read first 4 words. Objects are at least 16 bytes in IL2CPP (klass +
-    // monitor), so w0..w1 are always safe; w2..w3 can read into fields,
-    // not past the object (allocator rounds up).
+    if (!iter || g_probe_n >= PROBE_CAP) return;
+    uintptr_t *o = (uintptr_t *)iter;
+    g_probe_addr[g_probe_n] = iter;
+    // Read first 4 words at iter. Captures the full iterator record if the
+    // Unity 6 hypothesis is correct, or the raw object header otherwise.
     g_probe_w[g_probe_n][0] = o[0];
     g_probe_w[g_probe_n][1] = o[1];
     g_probe_w[g_probe_n][2] = o[2];
     g_probe_w[g_probe_n][3] = o[3];
     g_probe_oget[g_probe_n] = (uintptr_t)(mgo_il2cpp_object_get_class
-                                          ? mgo_il2cpp_object_get_class(obj)
+                                          ? mgo_il2cpp_object_get_class(iter)
                                           : NULL);
+
+    // Hypothesis: iter is a pointer to an iterator record whose first word
+    // is the real object pointer. Dereference once and probe the real
+    // object's first 4 words — the first should be a known klass if the
+    // hypothesis holds.
+    uintptr_t cand = o[0];
+    if (cand >= 0x100000000UL && cand < 0x8000000000UL) {
+        uintptr_t *r = (uintptr_t *)cand;
+        g_probe_deref_w[g_probe_n][0] = r[0];
+        g_probe_deref_w[g_probe_n][1] = r[1];
+        g_probe_deref_w[g_probe_n][2] = r[2];
+        g_probe_deref_w[g_probe_n][3] = r[3];
+        g_probe_deref_oget[g_probe_n] =
+            (uintptr_t)(mgo_il2cpp_object_get_class
+                        ? mgo_il2cpp_object_get_class((void *)cand)
+                        : NULL);
+        g_probe_deref_valid[g_probe_n] = 1;
+    } else {
+        g_probe_deref_valid[g_probe_n] = 0;
+    }
     g_probe_n++;
 }
 
@@ -555,23 +602,53 @@ void mgo_il2cpp_probe_object_layout(void) {
         if (g_probe_oget[i] == g_probe_w[i][0]) oget_eq_w0++;
     }
     for (int j = 0; j < 4; j++) {
-        mgo_log("probe: offset +%2d: %d/%d objects have a known-klass value",
+        mgo_log("probe: iter+%2d: %d/%d objects have a known-klass value",
                 j * 8, hit_w[j], g_probe_n);
     }
-    mgo_log("probe: offset  0 untagged (&~0x7): %d/%d", hit_untag, g_probe_n);
-    mgo_log("probe: il2cpp_object_get_class() return: %d/%d known; equals obj[0] in %d/%d",
+    mgo_log("probe: iter+ 0 untagged (&~0x7): %d/%d", hit_untag, g_probe_n);
+    mgo_log("probe: il2cpp_object_get_class(iter): %d/%d known; equals *iter in %d/%d",
             hit_oget, g_probe_n, oget_eq_w0, g_probe_n);
 
-    // Raw dump of the first 5 objects for eyeball analysis.
+    // Hypothesis check: iter is a pointer to {obj, size, ...}. Deref once
+    // and probe offsets from the real obj.
+    int hit_dw[4] = {0};
+    int hit_doget = 0;
+    int n_deref = 0;
+    for (int i = 0; i < g_probe_n; i++) {
+        if (!g_probe_deref_valid[i]) continue;
+        n_deref++;
+        for (int j = 0; j < 4; j++) {
+            if (mgo_il2cpp_is_known_klass((Il2CppClass *)g_probe_deref_w[i][j]))
+                hit_dw[j]++;
+        }
+        if (mgo_il2cpp_is_known_klass((Il2CppClass *)g_probe_deref_oget[i])) hit_doget++;
+    }
+    for (int j = 0; j < 4; j++) {
+        mgo_log("probe: *iter then +%2d: %d/%d objects have a known-klass value",
+                j * 8, hit_dw[j], n_deref);
+    }
+    mgo_log("probe: il2cpp_object_get_class(*iter): %d/%d known (deref-valid: %d/%d)",
+            hit_doget, n_deref, n_deref, g_probe_n);
+
+    // Raw dump of the first 5 samples for eyeball analysis.
     int dump = g_probe_n < 5 ? g_probe_n : 5;
     for (int i = 0; i < dump; i++) {
-        mgo_log("probe: obj[%d]@%p  w0=0x%lx  w1=0x%lx  w2=0x%lx  w3=0x%lx  oget=0x%lx",
+        mgo_log("probe: iter[%d]@%p  w0=0x%lx w1=0x%lx w2=0x%lx w3=0x%lx  oget=0x%lx",
                 i, g_probe_addr[i],
                 (unsigned long)g_probe_w[i][0],
                 (unsigned long)g_probe_w[i][1],
                 (unsigned long)g_probe_w[i][2],
                 (unsigned long)g_probe_w[i][3],
                 (unsigned long)g_probe_oget[i]);
+        if (g_probe_deref_valid[i]) {
+            mgo_log("probe:  *iter[%d]@0x%lx dw0=0x%lx dw1=0x%lx dw2=0x%lx dw3=0x%lx  doget=0x%lx",
+                    i, (unsigned long)g_probe_w[i][0],
+                    (unsigned long)g_probe_deref_w[i][0],
+                    (unsigned long)g_probe_deref_w[i][1],
+                    (unsigned long)g_probe_deref_w[i][2],
+                    (unsigned long)g_probe_deref_w[i][3],
+                    (unsigned long)g_probe_deref_oget[i]);
+        }
     }
 }
 
