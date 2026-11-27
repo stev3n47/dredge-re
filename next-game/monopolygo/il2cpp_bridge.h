@@ -92,10 +92,11 @@ int               mgo_il2cpp_build_klass_set(void);
 int               mgo_il2cpp_is_known_klass(Il2CppClass *k);
 
 // Walk the heap once, bucket klass pointers for every live object, and
-// log a count + namespace.name for each unique class whose namespace
-// starts with `ns_prefix` (pass NULL to log every class). Needs
-// build_klass_set to have been called first; otherwise it is a no-op.
-void              mgo_il2cpp_heap_histogram(const char *ns_prefix);
+// log diagnostic info: totals (unique/known/objects), the top_n classes
+// by object count (set top_n=0 to skip), and every class matching
+// `ns_prefix` (NULL = skip). Needs build_klass_set to have been called
+// first; otherwise it is a no-op.
+void              mgo_il2cpp_heap_histogram(const char *ns_prefix, int top_n);
 
 // Invoke `method` with 0/1 args. `self` may be NULL for statics. Returns
 // the boxed result; caller unboxes if needed. On any resolver miss returns

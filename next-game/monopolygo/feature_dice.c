@@ -123,7 +123,11 @@ static void        *g_bs_inst  = NULL;
 static void        *g_bs_bad   = NULL;   // instance that failed parse — skip on re-walk
 static unsigned long g_last_walk_ms = 0;
 static unsigned long g_dice_init_ms = 0;
-static int           g_hist_done = 0;
+// Fire the heap histogram at two offsets from init: once early enough to
+// catch title/loading state, once late enough that the user has had time
+// to reach a live board. Each entry fires at most once per session.
+static const unsigned long g_hist_fire_ms[] = { 60000UL, 150000UL };
+static int g_hist_fired = 0;   // bitmask: bit i = fire i already done
 
 static unsigned long now_ms(void);
 
@@ -314,17 +318,24 @@ static int dice_init(void) {
 static int dice_tick(void) {
     void *bs = resolve_boardstate();
     if (!bs) {
-        // Fallback diagnostic: if BoardState hasn't been found ~20s after
-        // init, dump every Tophat.* class with a live instance. Tells us
-        // whether BoardState is literally on the heap under a klass pointer
-        // that differs from the one image metadata hands us (closed-generic
-        // instantiation, runtime-synthesized type), or whether gameplay
-        // state isn't live at all.
-        if (!g_hist_done && g_dice_init_ms &&
-            (now_ms() - g_dice_init_ms) > 20000UL) {
-            g_hist_done = 1;
-            mgo_log("dice: no BoardState for 20s after init — dumping Tophat.* heap histogram");
-            mgo_il2cpp_heap_histogram("Tophat.");
+        // Fire the heap histogram at scheduled offsets (60s, 150s) when we
+        // still haven't resolved a BoardState. The first fire catches
+        // title/loading state; the second gives the user time to reach the
+        // live board. Each run shows totals + top-30 by object count + any
+        // Tophat.* matches, so we can see what IS on the heap even when
+        // the prefix pass finds nothing.
+        if (g_dice_init_ms) {
+            unsigned long elapsed = now_ms() - g_dice_init_ms;
+            int n_slots = (int)(sizeof g_hist_fire_ms / sizeof g_hist_fire_ms[0]);
+            for (int i = 0; i < n_slots; i++) {
+                if (g_hist_fired & (1 << i)) continue;
+                if (elapsed < g_hist_fire_ms[i]) continue;
+                g_hist_fired |= (1 << i);
+                mgo_log("dice: fire %d: no BoardState %lums after init — heap histogram",
+                        i, elapsed);
+                mgo_il2cpp_heap_histogram("Tophat.", 30);
+                break;   // at most one fire per tick
+            }
         }
         if (g_dice_snap.valid) {
             memset(&g_dice_snap, 0, sizeof g_dice_snap);

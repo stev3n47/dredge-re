@@ -405,7 +405,20 @@ static void hist_walk_cb(void *obj, void *user) {
     else c->overflow++;
 }
 
-void mgo_il2cpp_heap_histogram(const char *ns_prefix) {
+// Per-unique-class row collected after the walk's RLE pass.
+struct hist_row {
+    Il2CppClass *k;
+    int count;
+};
+
+static int cmp_hist_row_desc(const void *a, const void *b) {
+    const struct hist_row *ra = (const struct hist_row *)a;
+    const struct hist_row *rb = (const struct hist_row *)b;
+    if (ra->count != rb->count) return rb->count - ra->count;
+    return 0;
+}
+
+void mgo_il2cpp_heap_histogram(const char *ns_prefix, int top_n) {
     if (!g_ready || !mgo_il2cpp_gc_foreach_heap || !mgo_il2cpp_object_get_class) return;
     if (!g_all_klasses) {
         mgo_log("heap: histogram skipped — known-klass set not built");
@@ -413,32 +426,69 @@ void mgo_il2cpp_heap_histogram(const char *ns_prefix) {
     }
     struct hist_ctx c = { 0, 0, 0 };
     mgo_il2cpp_gc_foreach_heap(hist_walk_cb, &c);
-    mgo_log("heap: histogram scanned %ld objects (overflow=%d, prefix=%s)",
-            c.scanned, c.overflow, ns_prefix ? ns_prefix : "*");
 
     qsort(g_hist_buf, c.n, sizeof(Il2CppClass *), cmp_klass_ptr);
 
-    size_t pref_len = ns_prefix ? strlen(ns_prefix) : 0;
-    int printed = 0;
+    // RLE pass -> rows (unique klass pointers + counts).
+    static struct hist_row rows[MGO_HIST_CAP];
+    int n_rows = 0;
+    long known_obj_count = 0;
+    int n_known_rows = 0;
     for (int i = 0; i < c.n; ) {
         Il2CppClass *k = g_hist_buf[i];
         int cnt = 1;
         while (i + cnt < c.n && g_hist_buf[i + cnt] == k) cnt++;
-        int next = i + cnt;
-        i = next;
-        if (!mgo_il2cpp_is_known_klass(k)) continue;
-        const char *kn  = mgo_il2cpp_class_get_name(k);
-        const char *kns = mgo_il2cpp_class_get_namespace(k);
-        if (!kn) continue;
-        if (ns_prefix) {
-            if (!kns) continue;
-            if (strncmp(kns, ns_prefix, pref_len) != 0) continue;
+        if (n_rows < MGO_HIST_CAP) {
+            rows[n_rows].k = k;
+            rows[n_rows].count = cnt;
+            n_rows++;
+            if (mgo_il2cpp_is_known_klass(k)) {
+                n_known_rows++;
+                known_obj_count += cnt;
+            }
         }
-        mgo_log("heap: %d x %s.%s (klass %p)",
-                cnt, kns ? kns : "(null)", kn, (void *)k);
-        printed++;
+        i += cnt;
     }
-    mgo_log("heap: histogram done - %d class(es) matched prefix", printed);
+
+    mgo_log("heap: histogram scanned %ld objects (overflow=%d, prefix=%s)",
+            c.scanned, c.overflow, ns_prefix ? ns_prefix : "*");
+    mgo_log("heap: %d unique klass ptrs, %d known (metadata), %ld objects on known klasses",
+            n_rows, n_known_rows, known_obj_count);
+
+    qsort(rows, n_rows, sizeof(rows[0]), cmp_hist_row_desc);
+
+    // Top-N by object count across ALL known classes (no namespace filter).
+    if (top_n > 0) {
+        int printed = 0;
+        for (int i = 0; i < n_rows && printed < top_n; i++) {
+            Il2CppClass *k = rows[i].k;
+            if (!mgo_il2cpp_is_known_klass(k)) continue;
+            const char *kn  = mgo_il2cpp_class_get_name(k);
+            const char *kns = mgo_il2cpp_class_get_namespace(k);
+            if (!kn) continue;
+            mgo_log("heap: top[%d] %d x %s.%s (klass %p)",
+                    printed, rows[i].count, kns ? kns : "", kn, (void *)k);
+            printed++;
+        }
+    }
+
+    // Explicit prefix pass (even if no entries match, you see the search ran).
+    if (ns_prefix) {
+        size_t pref_len = strlen(ns_prefix);
+        int printed = 0;
+        for (int i = 0; i < n_rows; i++) {
+            Il2CppClass *k = rows[i].k;
+            if (!mgo_il2cpp_is_known_klass(k)) continue;
+            const char *kn  = mgo_il2cpp_class_get_name(k);
+            const char *kns = mgo_il2cpp_class_get_namespace(k);
+            if (!kn || !kns) continue;
+            if (strncmp(kns, ns_prefix, pref_len) != 0) continue;
+            mgo_log("heap: %s %d x %s.%s (klass %p)",
+                    ns_prefix, rows[i].count, kns, kn, (void *)k);
+            printed++;
+        }
+        mgo_log("heap: %d class(es) matched prefix '%s'", printed, ns_prefix);
+    }
 }
 
 // --- typed invokes --------------------------------------------------------
