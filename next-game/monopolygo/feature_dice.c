@@ -311,6 +311,13 @@ static int dice_init(void) {
     // gc_foreach_heap.
     mgo_il2cpp_build_klass_set();
 
+    // Prior build showed every scanned object yielding a unique "klass"
+    // value with zero overlap against image metadata — the walker is not
+    // reading real klass pointers. Probe the raw object layout once so we
+    // see what offset actually holds klass, and whether
+    // il2cpp_object_get_class is doing what we think it is.
+    mgo_il2cpp_probe_object_layout();
+
     g_dice_init_ms = now_ms();
     return 0;
 }

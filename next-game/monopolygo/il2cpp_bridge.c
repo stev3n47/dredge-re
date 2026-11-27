@@ -491,6 +491,90 @@ void mgo_il2cpp_heap_histogram(const char *ns_prefix, int top_n) {
     }
 }
 
+// --- object layout probe --------------------------------------------------
+//
+// Previous diagnostic build: histogram reported "76390 unique klass ptrs,
+// 0 known". Every object yields a unique "klass" value and NONE are in
+// image metadata — that cannot be real Il2CppObject.klass reads. Probe
+// the raw layout: sample first PROBE_CAP objects' first 4 pointer-sized
+// words, then tally how many objects have a known-klass value at each
+// offset. The capture happens INSIDE the stop-the-world callback (safe),
+// and we also record what mgo_il2cpp_object_get_class returns for each
+// object so we can tell whether the function pointer is misbehaving vs.
+// the layout being shifted.
+
+#define PROBE_CAP 256
+static int        g_probe_n = 0;
+static void      *g_probe_addr[PROBE_CAP];
+static uintptr_t  g_probe_w[PROBE_CAP][4];
+static uintptr_t  g_probe_oget[PROBE_CAP];
+
+static void probe_walk_cb(void *obj, void *user) {
+    (void)user;
+    if (!obj || g_probe_n >= PROBE_CAP) return;
+    uintptr_t *o = (uintptr_t *)obj;
+    g_probe_addr[g_probe_n] = obj;
+    // Read first 4 words. Objects are at least 16 bytes in IL2CPP (klass +
+    // monitor), so w0..w1 are always safe; w2..w3 can read into fields,
+    // not past the object (allocator rounds up).
+    g_probe_w[g_probe_n][0] = o[0];
+    g_probe_w[g_probe_n][1] = o[1];
+    g_probe_w[g_probe_n][2] = o[2];
+    g_probe_w[g_probe_n][3] = o[3];
+    g_probe_oget[g_probe_n] = (uintptr_t)(mgo_il2cpp_object_get_class
+                                          ? mgo_il2cpp_object_get_class(obj)
+                                          : NULL);
+    g_probe_n++;
+}
+
+void mgo_il2cpp_probe_object_layout(void) {
+    if (!g_ready || !mgo_il2cpp_gc_foreach_heap) return;
+    if (!g_all_klasses) {
+        mgo_log("probe: skipped - known-klass set not built");
+        return;
+    }
+    g_probe_n = 0;
+    mgo_il2cpp_gc_foreach_heap(probe_walk_cb, NULL);
+    mgo_log("probe: collected %d objects (cap %d)", g_probe_n, PROBE_CAP);
+
+    // Tally known-klass hits at offsets 0, +8, +16, +24; plus offset-0
+    // with low-bit tags stripped (some IL2CPP builds pack bits there);
+    // plus what il2cpp_object_get_class() returned.
+    int hit_w[4] = {0};
+    int hit_untag = 0;
+    int hit_oget = 0;
+    int oget_eq_w0 = 0;
+    for (int i = 0; i < g_probe_n; i++) {
+        for (int j = 0; j < 4; j++) {
+            if (mgo_il2cpp_is_known_klass((Il2CppClass *)g_probe_w[i][j]))
+                hit_w[j]++;
+        }
+        uintptr_t untag = g_probe_w[i][0] & ~(uintptr_t)0x7;
+        if (mgo_il2cpp_is_known_klass((Il2CppClass *)untag)) hit_untag++;
+        if (mgo_il2cpp_is_known_klass((Il2CppClass *)g_probe_oget[i])) hit_oget++;
+        if (g_probe_oget[i] == g_probe_w[i][0]) oget_eq_w0++;
+    }
+    for (int j = 0; j < 4; j++) {
+        mgo_log("probe: offset +%2d: %d/%d objects have a known-klass value",
+                j * 8, hit_w[j], g_probe_n);
+    }
+    mgo_log("probe: offset  0 untagged (&~0x7): %d/%d", hit_untag, g_probe_n);
+    mgo_log("probe: il2cpp_object_get_class() return: %d/%d known; equals obj[0] in %d/%d",
+            hit_oget, g_probe_n, oget_eq_w0, g_probe_n);
+
+    // Raw dump of the first 5 objects for eyeball analysis.
+    int dump = g_probe_n < 5 ? g_probe_n : 5;
+    for (int i = 0; i < dump; i++) {
+        mgo_log("probe: obj[%d]@%p  w0=0x%lx  w1=0x%lx  w2=0x%lx  w3=0x%lx  oget=0x%lx",
+                i, g_probe_addr[i],
+                (unsigned long)g_probe_w[i][0],
+                (unsigned long)g_probe_w[i][1],
+                (unsigned long)g_probe_w[i][2],
+                (unsigned long)g_probe_w[i][3],
+                (unsigned long)g_probe_oget[i]);
+    }
+}
+
 // --- typed invokes --------------------------------------------------------
 
 Il2CppObject *mgo_il2cpp_invoke0(const MethodInfo *m, void *self, int *out_ok) {

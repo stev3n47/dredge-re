@@ -98,6 +98,15 @@ int               mgo_il2cpp_is_known_klass(Il2CppClass *k);
 // first; otherwise it is a no-op.
 void              mgo_il2cpp_heap_histogram(const char *ns_prefix, int top_n);
 
+// One-shot layout probe for when the walker surfaces nothing but garbage
+// klass pointers. Samples up to 256 objects INSIDE the stop-the-world
+// callback, records their first 4 pointer-sized words and what
+// il2cpp_object_get_class returns, then tallies how many of those are in
+// the known-klass set at each candidate offset. Log output is a few
+// summary lines plus raw dumps of the first 5 objects. Needs
+// build_klass_set first.
+void              mgo_il2cpp_probe_object_layout(void);
+
 // Invoke `method` with 0/1 args. `self` may be NULL for statics. Returns
 // the boxed result; caller unboxes if needed. On any resolver miss returns
 // NULL and sets *out_ok = 0 if non-NULL.
