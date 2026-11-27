@@ -243,10 +243,44 @@ static void predict_rolls(int64_t seed, int64_t iter, int32_t state,
 
 // Signature of the inputs that affect prediction — recompute + re-log only
 // when one of these moves (position changes mid-animation, state advances
-// per roll, iteration bumps at cap, multiplier toggles with boosts).
-typedef struct { int32_t st, mult, pos; int64_t it, sd; int32_t nscr; } sig_t;
-static sig_t g_last_sig = { -1, -1, -1, -1, -1, -1 };
+// per roll, iteration bumps at cap, multiplier toggles with boosts). The
+// scripted-queue hash covers the case where the server rewrites the queue
+// (push/pop/replace) without changing its length.
+typedef struct { int32_t st, mult, pos; int64_t it, sd; int32_t nscr, scr_hash; } sig_t;
+static sig_t g_last_sig = { -1, -1, -1, -1, -1, -1, 0 };
 static int   g_last_peek = -1;
+
+static int32_t scripted_hash(const int *scr, int nscr) {
+    // Position-aware folding hash; collision risk is negligible for our
+    // scale (≤ 16 small positive ints) and it's cheap enough to run every
+    // tick.
+    int32_t h = 0;
+    for (int i = 0; i < nscr; i++) h = (h * 131 + (int32_t)scr[i]) ^ (i + 1);
+    return h;
+}
+
+// Scripted queue holds distances the server has queued. The game short-
+// circuits the RNG path and calls RollScriptingLogic.GetRollsFromDistance
+// to pick concrete faces — a deterministic mapping we don't currently
+// invoke, so the SUM shown here matches the game while the per-die faces
+// are a plausible balanced split. Distances outside the valid 2d6 range
+// (e.g. mini-rolls or special scripted events in Monopoly GO) show the
+// total only with d[0]=d[1]=0.
+static void scripted_to_faces(int distance, int *d0, int *d1, int *doubles) {
+    if (distance >= 2 && distance <= 12) {
+        int lo = distance / 2;
+        int hi = distance - lo;
+        if (lo < 1) lo = 1;
+        if (hi > 6) hi = 6;
+        *d0 = lo;
+        *d1 = hi;
+        *doubles = (lo == hi) ? 1 : 0;
+    } else {
+        *d0 = 0;
+        *d1 = 0;
+        *doubles = 0;
+    }
+}
 
 static int dice_init(void) {
     const char *via = NULL;
@@ -384,13 +418,14 @@ static int dice_tick(void) {
     if (peek < 1) peek = 1;
     if (peek > MAX_PEEK) peek = MAX_PEEK;
 
-    sig_t sig = { st, mult, pos, it, sd, nscr };
+    sig_t sig = { st, mult, pos, it, sd, nscr, scripted_hash(scr, nscr) };
     // Memberwise compare — memcmp would drag in uninitialized padding.
     // peek included so a config edit re-renders even when state is static.
     if (g_dice_snap.valid && peek == g_last_peek &&
         sig.st == g_last_sig.st && sig.mult == g_last_sig.mult &&
         sig.pos == g_last_sig.pos && sig.it == g_last_sig.it &&
-        sig.sd == g_last_sig.sd && sig.nscr == g_last_sig.nscr)
+        sig.sd == g_last_sig.sd && sig.nscr == g_last_sig.nscr &&
+        sig.scr_hash == g_last_sig.scr_hash)
         return 0;   // nothing changed — keep the snapshot as-is
     g_last_sig = sig;
     g_last_peek = peek;
@@ -410,6 +445,20 @@ static int dice_tick(void) {
 
     int off = roll_offset(mult, pos);
     predict_rolls(sd, it, st, off, peek, s.rolls);
+
+    // When the server has queued scripted distances, those win: the game's
+    // RollCommonExecutor short-circuits the RNG path and uses
+    // RollScriptingLogic.GetRollsFromDistance for the first `nscr` rolls.
+    // Overlay the scripted distances as authoritative sums; the per-die
+    // faces are cosmetic since we don't invoke GetRollsFromDistance.
+    int n_overlay = nscr < peek ? nscr : peek;
+    for (int k = 0; k < n_overlay; k++) {
+        mgo_roll_t *r = &s.rolls[k];
+        r->n = DICE_COUNT;
+        r->sum = scr[k];
+        scripted_to_faces(scr[k], &r->d[0], &r->d[1], &r->doubles);
+    }
+
     g_dice_snap = s;
 
     mgo_roll_t *r0 = &s.rolls[0];
