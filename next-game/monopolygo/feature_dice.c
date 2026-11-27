@@ -119,6 +119,12 @@ static Il2CppClass *g_bs_klass = NULL;
 #define MGO_BS_MAX_KLASSES 16
 static Il2CppClass *g_bs_klasses[MGO_BS_MAX_KLASSES];
 static int          g_n_bs_klasses = 0;
+
+// RollScriptingLogic.GetRollsFromDistance(int) -> int[] — the game's own
+// deterministic distance→faces mapping used in place of the RNG when
+// ScriptedRolls is non-empty. Resolved at init if available; NULL means
+// the cosmetic balanced split is used as a fallback.
+static const MethodInfo *g_grfd_method = NULL;
 static void        *g_bs_inst  = NULL;
 static void        *g_bs_bad   = NULL;   // instance that failed parse — skip on re-walk
 static unsigned long g_last_walk_ms = 0;
@@ -259,13 +265,36 @@ static int32_t scripted_hash(const int *scr, int nscr) {
     return h;
 }
 
+// Invoke RollScriptingLogic.GetRollsFromDistance(distance) and read the
+// returned int[] to get the EXACT faces the game will pick. Returns 1 on
+// success (d0/d1 populated), 0 otherwise — caller falls back to the
+// cosmetic split. Runs on the main runloop so it is on a GC-attached
+// thread; the il2cpp invoke wrapper catches managed exceptions via its
+// exc out-param, so an unexpected signature will quietly return 0
+// instead of crashing.
+static int invoke_scripted_faces(int distance, int *d0, int *d1) {
+    if (!g_grfd_method) return 0;
+    int32_t dist = distance;
+    int ok = 0;
+    Il2CppObject *result = mgo_il2cpp_invoke1(g_grfd_method, NULL, &dist, &ok);
+    if (!ok || !result) return 0;
+    // int[] layout: length @+0x18, data @+0x20.
+    int32_t len = *(int32_t *)((char *)result + 0x18);
+    if (len < 1 || len > 8) return 0;
+    int32_t face0 = *(int32_t *)((char *)result + 0x20);
+    int32_t face1 = (len >= 2) ? *(int32_t *)((char *)result + 0x24) : 0;
+    *d0 = face0;
+    *d1 = face1;
+    return 1;
+}
+
 // Scripted queue holds distances the server has queued. The game short-
 // circuits the RNG path and calls RollScriptingLogic.GetRollsFromDistance
-// to pick concrete faces — a deterministic mapping we don't currently
-// invoke, so the SUM shown here matches the game while the per-die faces
-// are a plausible balanced split. Distances outside the valid 2d6 range
-// (e.g. mini-rolls or special scripted events in Monopoly GO) show the
-// total only with d[0]=d[1]=0.
+// to pick concrete faces. When invoke_scripted_faces fails (method not
+// resolved, bad signature, etc.) this cosmetic balanced split keeps the
+// SUM honest and the per-die faces plausible. Distances outside the
+// valid 2d6 range (mini-rolls or special scripted events in Monopoly GO)
+// show the total only with d[0]=d[1]=0.
 static void scripted_to_faces(int distance, int *d0, int *d1, int *doubles) {
     if (distance >= 2 && distance <= 12) {
         int lo = distance / 2;
@@ -351,6 +380,26 @@ static int dice_init(void) {
     // see what offset actually holds klass, and whether
     // il2cpp_object_get_class is doing what we think it is.
     mgo_il2cpp_probe_object_layout();
+
+    // Resolve RollScriptingLogic.GetRollsFromDistance so the scripted-roll
+    // overlay can call into the game's own deterministic distance→faces
+    // mapping instead of a cosmetic split. Best-effort: if either the
+    // class or the method is missing, we keep the cosmetic split.
+    Il2CppClass *rsl = mgo_il2cpp_find_class("Tophat.Common.dll", NULL, "RollScriptingLogic");
+    if (!rsl) rsl = mgo_il2cpp_find_class(NULL, NULL, "RollScriptingLogic");
+    if (rsl) {
+        const char *rns = mgo_il2cpp_class_get_namespace(rsl);
+        const char *rnm = mgo_il2cpp_class_get_name(rsl);
+        mgo_log("dice: RollScriptingLogic %p ns=%s name=%s",
+                (void *)rsl, rns ? rns : "(null)", rnm ? rnm : "(null)");
+        g_grfd_method = mgo_il2cpp_find_method(rsl, "GetRollsFromDistance", 1);
+        if (g_grfd_method)
+            mgo_log("dice: GetRollsFromDistance(1-arg) resolved @ %p", (void *)g_grfd_method);
+        else
+            mgo_log("dice: GetRollsFromDistance(1-arg) NOT found — scripted faces will use cosmetic split");
+    } else {
+        mgo_log("dice: RollScriptingLogic class NOT found — scripted faces will use cosmetic split");
+    }
 
     g_dice_init_ms = now_ms();
     return 0;
@@ -455,8 +504,20 @@ static int dice_tick(void) {
     for (int k = 0; k < n_overlay; k++) {
         mgo_roll_t *r = &s.rolls[k];
         r->n = DICE_COUNT;
-        r->sum = scr[k];
-        scripted_to_faces(scr[k], &r->d[0], &r->d[1], &r->doubles);
+        int d0 = 0, d1 = 0;
+        if (invoke_scripted_faces(scr[k], &d0, &d1)) {
+            // Game-truth faces. Doubles reflect the real combo.
+            r->d[0] = d0;
+            r->d[1] = d1;
+            r->doubles = (d0 == d1) ? 1 : 0;
+            // Trust the invoked faces for the sum too — handles the case
+            // where the distance encoding doesn't literally equal d0+d1
+            // (e.g. mini-roll scripts).
+            r->sum = d0 + d1;
+        } else {
+            r->sum = scr[k];
+            scripted_to_faces(scr[k], &r->d[0], &r->d[1], &r->doubles);
+        }
     }
 
     g_dice_snap = s;
